@@ -1,0 +1,21 @@
+
+# compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# virtual environments
+venv/
+env/
+.venv/
+.env/
+
+# jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# data files
+data/
+*.csv
+*.tsv
+*.h5
+*.parquet
