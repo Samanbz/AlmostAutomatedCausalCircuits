@@ -19,3 +19,9 @@ data/
 *.tsv
 *.h5
 *.parquet
+
+papers/
+*.gv
+*.dot
+*.pdf
+*.svg
