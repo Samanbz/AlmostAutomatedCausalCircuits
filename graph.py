@@ -153,3 +153,138 @@ class SymbolicArithmeticCircuit(DirectedAcyclicGraph[int, ArithmeticNode, Any]):
     """
 
     pass
+
+
+class Interval:
+    """Represents a mathematical interval [low, high), (low, high], etc."""
+
+    def __init__(
+        self,
+        low: float,
+        high: float,
+        include_low: bool = True,
+        include_high: bool = False,
+    ):
+        self.low = low
+        self.high = high
+        self.include_low = include_low
+        self.include_high = include_high
+
+    def contains(self, value: float) -> bool:
+        lower_check = (value >= self.low) if self.include_low else (value > self.low)
+        upper_check = (value <= self.high) if self.include_high else (value < self.high)
+        return lower_check and upper_check
+
+    def intersect(self, other: "Interval") -> "Interval":
+        new_low = max(self.low, other.low)
+        new_high = min(self.high, other.high)
+
+        # Determine strictness of bounds
+        if self.low == other.low:
+            new_include_low = self.include_low and other.include_low
+        else:
+            new_include_low = self.include_low if self.low > other.low else other.include_low
+
+        if self.high == other.high:
+            new_include_high = self.include_high and other.include_high
+        else:
+            new_include_high = self.include_high if self.high < other.high else other.include_high
+
+        return Interval(new_low, new_high, new_include_low, new_include_high)
+
+    def __repr__(self):
+        left = "[" if self.include_low else "("
+        right = "]" if self.include_high else ")"
+        return f"{left}{self.low}, {self.high}{right}"
+
+
+class Distribution(LeafNode):
+    """Base class for probability distributions used as leaves in SPNs."""
+
+    pass
+
+
+class GaussianDistribution(Distribution):
+    """Represents a Gaussian distribution leaf node."""
+
+    def __init__(self, scope: Tuple[int, ...], mean: float, stddev: float):
+        super().__init__(scope)
+        self.mean = mean
+        self.stddev = stddev
+
+    def __repr__(self):
+        return f"GaussianDistribution(scope={self.scope}, mean={self.mean}, stddev={self.stddev})"
+
+
+class CategoricalDistribution(Distribution):
+    """Represents a Categorical distribution leaf node."""
+
+    def __init__(self, scope: Tuple[int, ...], categories: List[Any], probabilities: List[float]):
+        super().__init__(scope)
+        self.categories = categories
+        self.probabilities = probabilities
+
+    def __repr__(self):
+        return f"CategoricalDistribution(scope={self.scope}, categories={self.categories}, probabilities={self.probabilities})"
+
+
+class UniformDistribution(Distribution):
+    """Represents a Uniform distribution leaf node."""
+
+    def __init__(self, scope: Tuple[int, ...], low: float, high: float):
+        super().__init__(scope)
+        self.low = low
+        self.high = high
+
+    def __repr__(self):
+        return f"UniformDistribution(scope={self.scope}, low={self.low}, high={self.high})"
+
+
+class TruncatedDistribution(Distribution):
+    """
+    Represents a distribution restricted to a specific interval.
+    """
+
+    def __init__(
+        self,
+        scope: Tuple[int, ...],
+        base_distribution: Distribution,
+        interval: Interval,
+    ):
+        super().__init__(scope)
+        self.base_distribution = base_distribution
+        self.interval = interval
+
+    def __repr__(self):
+        return f"TruncatedDistribution(scope={self.scope}, base={self.base_distribution}, interval={self.interval})"
+
+
+class DataRegionGraphNode(RegionGraphNode):
+    """RegionGraphNode that holds data slice information and constraints."""
+
+    def __init__(
+        self,
+        scope: Tuple[int, ...],
+        row_ids: List[int],
+        constraints: Dict[int, Interval] = None,
+    ):
+        super().__init__(scope)
+        self.row_ids = row_ids
+        self.constraints = constraints if constraints is not None else {}
+
+    def get_data_slice(self, data: np.ndarray) -> np.ndarray:
+        return data[np.ix_(self.row_ids, self.scope)]
+
+
+class DataRegionNode(DataRegionGraphNode, RegionNode):
+    pass
+
+
+class DataPartitionNode(DataRegionGraphNode, PartitionNode):
+    pass
+
+
+class DataRegionGraph(DirectedAcyclicGraph[int, DataRegionGraphNode, Any]):
+    """RegionGraph that holds data slices at each node."""
+
+    pass
