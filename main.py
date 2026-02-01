@@ -1,10 +1,16 @@
 import math
 
-from graph import ArithmeticNode, LeafNode, ProductNode, SumNode
-from graph_io import plot_dag
-from rat_spn import create_rat_spn
-from scm import AdditiveNoiseMechanism, StructuralCausalModel
-from utils import normal, synthesize_data, uniform
+from src.construction.rat_spn import create_rat_spn
+from src.graph import plot_dag
+from src.helpers import normal, synthesize_data, uniform
+from src.symbolic import (
+    AdditiveNoiseMechanism,
+    ArithmeticNode,
+    LeafNode,
+    ProductNode,
+    StructuralCausalModel,
+    SumNode,
+)
 
 
 # 1. Instantiate the Model
