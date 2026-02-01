@@ -21,6 +21,11 @@ dependencies = [
     "ruff",
 ]
 
+[project.optional-dependencies]
+test = [
+    "pytest"
+]
+
 [tool.ruff]
 line-length = 100
 target-version = "py38"
@@ -41,5 +46,10 @@ ignore = [
 
 [tool.ruff.lint.isort]
 lines-after-imports = 2
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
 
 

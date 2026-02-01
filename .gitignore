@@ -25,3 +25,6 @@ papers/
 *.dot
 *.pdf
 *.svg
+
+build/
+*.egg-info/
