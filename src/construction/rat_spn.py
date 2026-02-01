@@ -1,7 +1,7 @@
 import random
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
-from graph import (
+from src.symbolic import (
     LeafNode,
     PartitionNode,
     ProductNode,
@@ -10,6 +10,7 @@ from graph import (
     SumNode,
     SymbolicArithmeticCircuit,
 )
+from src.utils import BitSet
 
 
 def construct_random_region_graph(
@@ -30,22 +31,21 @@ def construct_random_region_graph(
         return nid
 
     # Cache regions by scope to avoid duplicates
-    scope_to_id: Dict[Tuple[int, ...], int] = {}
+    scope_to_id: Dict[BitSet, int] = {}
 
-    def get_or_create_region_node(scope: List[int]) -> int:
-        t_scope = tuple(sorted(scope))
-        if t_scope in scope_to_id:
-            return scope_to_id[t_scope]
+    def get_or_create_region_node(scope: BitSet) -> int:
+        if scope in scope_to_id:
+            return scope_to_id[scope]
 
         nid = next_id()
-        r_node = RegionNode(scope=t_scope)
+        r_node = RegionNode(scope=scope)
         rg.add_node(nid, r_node)
-        scope_to_id[t_scope] = nid
+        scope_to_id[scope] = nid
         return nid
 
-    root_scope = list(range(num_features))
+    root_scope = BitSet(range(num_features))
 
-    def split_recursive(scope: List[int], d: int):
+    def split_recursive(scope: BitSet, d: int):
         # Ensure region exists
         rid = get_or_create_region_node(scope)
 
@@ -54,7 +54,7 @@ def construct_random_region_graph(
 
         # 1. Create a partition for this splitting step
         partition_id = next_id()
-        p_node = PartitionNode(tuple(sorted(scope)))
+        p_node = PartitionNode(scope=scope)
         rg.add_node(partition_id, p_node)
 
         # Connect Region -> Partition
@@ -64,8 +64,8 @@ def construct_random_region_graph(
         shuffled = list(scope)
         random.shuffle(shuffled)
         mid = len(shuffled) // 2
-        scope1 = shuffled[:mid]
-        scope2 = shuffled[mid:]
+        scope1 = BitSet(shuffled[:mid])
+        scope2 = BitSet(shuffled[mid:])
 
         # 3. Get or Create sub-regions
         r1_id = get_or_create_region_node(scope1)
@@ -132,16 +132,15 @@ def construct_spn_from_region_graph(
 
         spn_ids = []
         if is_leaf_region:
-            for i in range(num_inputs):
+            for _ in range(num_inputs):
                 sid = next_id()
-                spn.add_node(sid, LeafNode(r_node.scope, i))
+                spn.add_node(sid, LeafNode(r_node.scope))
                 spn_ids.append(sid)
         else:
             count = num_classes if is_root_region else num_sums
             for _ in range(count):
                 sid = next_id()
-                s_node = SumNode()
-                s_node.scope = r_node.scope
+                s_node = SumNode(scope=r_node.scope)
                 spn.add_node(sid, s_node)
                 spn_ids.append(sid)
 
@@ -180,8 +179,7 @@ def construct_spn_from_region_graph(
                 prod_id = node_counter
                 node_counter += 1
 
-                prod_node = ProductNode()
-                prod_node.scope = parent_r_node.scope
+                prod_node = ProductNode(scope=parent_r_node.scope)
                 spn.add_node(prod_id, prod_node)
 
                 # Connect Product -> Children (Sum/Leaf of subregions)

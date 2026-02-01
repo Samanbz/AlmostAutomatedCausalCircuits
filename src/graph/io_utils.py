@@ -4,7 +4,7 @@ from typing import Any, Dict, Optional, Type, Union
 
 import graphviz
 
-from graph import DirectedAcyclicGraph
+from .base import DirectedAcyclicGraph
 
 
 def plot_dag(
