@@ -1,5 +1,5 @@
 from collections import deque
-from typing import Dict, Generator, Generic, List, TypeVar
+from typing import Any, Dict, Generator, Generic, List, Optional, Tuple, TypeVar
 
 
 # Generic types for Node ID (K), Node Payload (N) and Edge Payload (E)
@@ -52,6 +52,32 @@ class DirectedAcyclicGraph(Generic[K, N, E]):
     def get_edge_data(self, source: K, target: K) -> E:
         return self._adj[source][target]
 
+    def get_roots(self) -> List[K]:
+        """Returns a list of root node IDs (nodes with in-degree 0)."""
+        return [n for n in self._nodes if not self._rev_adj[n]]
+
+    def get_children(self, node_id: K) -> List[K]:
+        """Returns a list of children node IDs."""
+        if node_id not in self._adj:
+            return []
+        return list(self._adj[node_id].keys())
+
+    def get_leaves(self) -> List[K]:
+        """Returns a list of leaf node IDs (nodes with out-degree 0)."""
+        return [n for n in self._nodes if not self._adj[n]]
+
+    def is_leaf(self, node_id: K) -> bool:
+        """Returns True if the node has no children."""
+        return node_id not in self._adj or len(self._adj[node_id]) == 0
+
+    @property
+    def node_config(self) -> Dict[N, Dict[str, Any]]:
+        """
+        Returns the default node configuration for plotting.
+        Should return a dictionary mapping Node types to style attributes.
+        """
+        return {}
+
     def topological_sort(self) -> Generator[K, None, None]:
         """
         Yields node_ids in topological order using Kahn's Algorithm.
@@ -76,6 +102,70 @@ class DirectedAcyclicGraph(Generic[K, N, E]):
             raise RuntimeError(
                 f"Cycle detected in Graph! Visited {visited_count}/{len(self._nodes)} nodes."
             )
+
+
+class Tree(DirectedAcyclicGraph[K, N, E]):
+    """
+    A specific type of DAG that enforces tree properties (single root, unique parents).
+    """
+
+    def add_edge(self, source: K, target: K, data: E = None) -> None:
+        """Adds a directed edge from source to target, enforcing tree properties."""
+
+        # Enforce unique parents (in-degree <= 1)
+        if len(self.get_parents(target)) > 0:
+            raise ValueError(
+                f"Node '{target}' already has a parent. Trees do not allow multi-parent nodes."
+            )
+
+        super().add_edge(source, target, data)
+
+    def get_root(self) -> K:
+        """Returns the single root node ID."""
+        roots = self.get_roots()
+
+        if not roots:
+            if not self._nodes:
+                raise ValueError("Tree is empty.")
+            raise ValueError("Graph has cycle, no root found.")
+
+        if len(roots) > 1:
+            raise ValueError(
+                f"Tree has multiple roots: {roots}. It might be a disconnected forest."
+            )
+
+        return roots[0]
+
+
+class BinaryTree(Tree[K, N, E]):
+    """
+    A binary tree with explicit left/right child semantics.
+    Enforces that each node is either a leaf (no children) or has exactly two children.
+    """
+
+    def __init__(self):
+        super().__init__()
+        # Maps parent_id -> (left_child_id, right_child_id)
+        self._children_pair: Dict[K, Tuple[K, K]] = {}
+
+    def add_children(self, parent: K, left_child: K, right_child: K, data: E = None) -> None:
+        """Adds both children to the parent node atomically."""
+        if parent in self._children_pair:
+            raise ValueError(f"Node '{parent}' already has children.")
+        # Add edges via parent class (enforces tree properties)
+        super().add_edge(parent, left_child, data)
+        super().add_edge(parent, right_child, data)
+        self._children_pair[parent] = (left_child, right_child)
+
+    def add_edge(self, source: K, target: K, data: E = None) -> None:
+        """Disabled: Use add_children() to add both children at once."""
+        raise NotImplementedError(
+            "BinaryTree requires adding both children at once via add_children()."
+        )
+
+    def get_children_pair(self, node_id: K) -> Optional[Tuple[K, K]]:
+        """Returns (left_child, right_child) tuple, or None if leaf."""
+        return self._children_pair.get(node_id)
 
 
 class Node:
