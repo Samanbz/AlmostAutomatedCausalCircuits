@@ -1,9 +1,9 @@
 import random
-import time
 from typing import Dict, List, Tuple
 
 import numpy as np
 
+from src.logging import logger as g_logger
 from src.symbolic import (
     DataPartitionNode,
     DataRegionGraph,
@@ -12,8 +12,12 @@ from src.symbolic import (
     GaussianDistribution,
     SymbolicArithmeticCircuit,
     UniformDistribution,
+    VTree,
 )
 from src.utils import BitSet, DataSlice, Interval
+
+
+logger = g_logger.getChild("xpc")
 
 
 def get_random_cut_point(dist: Distribution) -> float:
@@ -94,16 +98,38 @@ def apply_logical_constraints(
 
 def partition_randomly(
     data_slice: DataSlice,
-    conj_len: int,
+    conj_vars: BitSet,
     split_arity: int,
     min_examples: int,
     input_dists: Dict[int, Distribution],
-) -> Tuple[List[DataSlice], BitSet]:
+    max_tries: int = 20,
+) -> List[DataSlice]:
     slices: List[DataSlice] = []
 
-    conj_vars = random.sample(list(data_slice.col_ids), conj_len)
+    assert all(var in input_dists for var in conj_vars), (
+        "All conjunction variables must have input distributions."
+    )
+
     conj_dists = {var: input_dists[var] for var in conj_vars}
+
+    logger.debug("")
+    tries = 0
     while len(slices) < split_arity - 1:
+        if tries == 0:
+            logger.debug(
+                f"Partitioning data slice with {len(data_slice)} examples on vars {conj_vars}. Slice {len(slices) + 1}/{split_arity - 1}"
+            )
+        if tries >= max_tries:
+            logger.debug(
+                f"Failed to partition data slice with {len(data_slice)} examples on vars {conj_vars} after {max_tries} tries."
+            )
+            break
+        if len(data_slice) < 2 * min_examples:
+            logger.debug(
+                f"Insufficient examples ({len(data_slice)}) to partition data slice on vars {conj_vars}."
+            )
+            break
+
         constraints = get_random_logical_constraints(
             conj_dists=conj_dists,
         )
@@ -112,26 +138,40 @@ def partition_randomly(
             constraints=constraints,
         )
         if len(subset_row_ids) < min_examples or len(rest_row_ids) < min_examples:
+            logger.debug(
+                f"\tRejected {len(subset_row_ids)}/{len(rest_row_ids)} split due to insufficient examples. Tries {tries}/{max_tries}."
+            )
+            tries += 1
             continue
+
+        logger.debug(f"\tAccepted split with {len(subset_row_ids)}/{len(rest_row_ids)} examples.")
+        logger.debug("")
+
         new_slice = DataSlice(
             data_slice.data, subset_row_ids, data_slice.col_ids, constraints=constraints
         )
         slices.append(new_slice)
         data_slice = DataSlice(data_slice.data, rest_row_ids, data_slice.col_ids)
+        tries = 0
+
     if len(slices) > 0:
         slices.append(data_slice)
-        return slices, BitSet(conj_vars)
+        return slices
     else:
-        return [], BitSet.from_int(0)
+        return []
 
 
-def construct_random_region_graph(
+def construct_random_data_region_graph(
     data: np.ndarray,
     input_dists: Dict[int, Distribution],
     min_examples: int,
     split_arity: int,
-    conj_len: int,
-) -> DataRegionGraph:
+    var_decomp: VTree,
+) -> Tuple[DataRegionGraph, List[int]]:
+    assert split_arity >= 2, "Split arity must be at least 2."
+    assert data.ndim == 2, "Data must be a 2D array."
+    assert var_decomp is not None, "Variable decomposition (VTree) is required."
+
     node_counter = 0
 
     def next_id():
@@ -147,56 +187,76 @@ def construct_random_region_graph(
     root_id = next_id()
     rg.add_node(root_id, root_region)
 
+    # Map DataRegionNode ID -> VTree Node ID
+    rnode_to_vnode: Dict[int, int] = {root_id: var_decomp.get_root()}
+
     P = [(root_id, root_region)]
     while P:
         # Random region from P
         idx = random.randint(0, len(P) - 1)
         r_id, r_node = P.pop(idx)
 
-        # If scope == conj_len, the sister region will have scope 0
-        if len(r_node.scope) <= conj_len:
-            continue
-        # If not enough examples to split
-        if len(r_node.row_ids) < split_arity * min_examples:
+        v_id = rnode_to_vnode[r_id]
+
+        if var_decomp.is_leaf(v_id):
             continue
 
-        data_slice = r_node.get_data_slice(data)
-        data_slices, conj_vars = partition_randomly(
-            data_slice=data_slice,
-            conj_len=conj_len,
+        # Get children (left is always conj_vars), v_id is not leaf, so children are not None
+        conj_v_id, rest_v_id = var_decomp.get_children_pair(v_id)
+
+        conj_vars = var_decomp.get_node_data(conj_v_id).scope
+
+        current_data_slice = r_node.get_data_slice(data)
+        data_slices = partition_randomly(
+            data_slice=current_data_slice,
+            conj_vars=conj_vars,
             split_arity=split_arity,
             min_examples=min_examples,
             input_dists=input_dists,
         )
 
-        if data_slices:
-            new_partitions: List[Tuple[int, DataPartitionNode]] = []
-            for data_slice in data_slices:
-                partition = DataPartitionNode(
-                    scope=r_node.scope,
-                    row_ids=data_slice.row_ids,
-                    constraints=data_slice.constraints,
-                )
-                partition_id = next_id()
-                rg.add_node(partition_id, partition)
-                rg.add_edge(r_id, partition_id)
-                new_partitions.append((partition_id, partition))
-            for p_id, p_node in new_partitions:
-                l_region = DataRegionNode(
-                    scope=conj_vars,
-                    row_ids=p_node.row_ids,
-                )
-                r_region = DataRegionNode(
-                    scope=r_node.scope.difference(conj_vars),
-                    row_ids=p_node.row_ids,
-                )
-                l_region_id = next_id()
-                r_region_id = next_id()
-                rg.add_node(l_region_id, l_region)
-                rg.add_node(r_region_id, r_region)
-                rg.add_edge(p_id, l_region_id)
-                rg.add_edge(p_id, r_region_id)
-                P.append((r_region_id, r_region))
+        new_partitions: List[Tuple[int, DataPartitionNode]] = []
+        for data_slice in data_slices:
+            partition = DataPartitionNode(
+                scope=r_node.scope,
+                row_ids=data_slice.row_ids,
+                constraints=data_slice.constraints,
+            )
+            partition_id = next_id()
+            rg.add_node(partition_id, partition)
+            rg.add_edge(r_id, partition_id)
+            new_partitions.append((partition_id, partition))
+
+        for p_id, p_node in new_partitions:
+            assert conj_vars == BitSet(list(p_node.constraints.keys())), (
+                "Constraint variable mismatch."
+            )
+            l_region = DataRegionNode(
+                scope=conj_vars,
+                row_ids=p_node.row_ids,
+                constraints=p_node.constraints,
+            )
+            r_region = DataRegionNode(
+                scope=r_node.scope.difference(conj_vars),
+                row_ids=p_node.row_ids,
+                # No constraints on right region
+            )
+            l_region_id = next_id()
+            r_region_id = next_id()
+
+            rg.add_node(l_region_id, l_region)
+            rg.add_node(r_region_id, r_region)
+            rg.add_edge(p_id, l_region_id)
+            rg.add_edge(p_id, r_region_id)
+
+            # Map new regions to corresponding VNodes
+            rnode_to_vnode[l_region_id] = conj_v_id
+            if rest_v_id is not None:
+                rnode_to_vnode[r_region_id] = rest_v_id
+
+            # Add to Queue
+            P.append((l_region_id, l_region))
+            P.append((r_region_id, r_region))
 
     return rg
 
@@ -205,16 +265,4 @@ def construct_spn_from_region_graph(
     rg: DataRegionGraph,
     data: np.ndarray,
 ) -> SymbolicArithmeticCircuit:
-    pass
-
-
-# FIXME:
-# 1. Issue with infinite loop and no satisfying splits, due to badly chosen constraints? or not enough rows?
-# TODO:
-# 1. Allow for usage of fixed random ordering of variables when splitting, return this fixed ordering as well.
-# 2. Implement construct_spn_from_region_graph
-#   a. Pass down input distributions corresponding to current scope, which get truncated at partitioned nodes based on their constraints
-#   b. At leaf nodes, create leaf distributions with truncated input distributions, turn early-stopped regions into chow-liu trees?
-# 3. Implement methods/utilities for checking structural and support properties of an Arithmetic Circuit
-# 4. Verify that the constructed AC is S, DEC, SD, DET
-# 5. Implement algorithm for multiplying two compatible ACs together, verify that product of two DET ACs is still DET
+    pass  # TODO
