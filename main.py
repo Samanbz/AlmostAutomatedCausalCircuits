@@ -48,20 +48,7 @@ spn = create_rat_spn(
     num_inputs=2,
 )
 
-
-def leaf_label(node: ArithmeticNode) -> str:
-    if hasattr(node, "scope"):
-        return f"Leaf\n{sorted(node.scope)}"
-    return "Leaf"
-
-
-config = {
-    SumNode: {"color": "#ff9999", "label": "+", "shape": "diamond"},
-    ProductNode: {"color": "#9999ff", "label": "x", "shape": "box"},
-    LeafNode: {"color": "#99ff99", "label": leaf_label, "shape": "ellipse"},
-}
-
-plot = plot_dag(spn, node_config=config)
+plot = plot_dag(spn)
 
 # Plot in a window
 plot.view()

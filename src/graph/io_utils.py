@@ -9,7 +9,7 @@ from .base import DirectedAcyclicGraph
 
 def plot_dag(
     dag: DirectedAcyclicGraph,
-    node_config: Dict[Type, Dict[str, Any]],
+    node_config: Optional[Dict[Type, Dict[str, Any]]] = None,
     output_path: Optional[Union[str, PathLike]] = None,
     orientation: str = "vertical",
     node_shape: str = "circle",
@@ -24,12 +24,16 @@ def plot_dag(
         node_config: Dictionary mapping Node classes to style attributes.
                      e.g. {SumNode: {'color': 'red', 'label': '+'}, ...}
                      Values for 'label' and 'color' can be strings or callables taking the node as input.
+                     If None, uses dag.node_config.
         output_path: Path to save the image. If None, returns object for Jupyter display.
         orientation: "vertical" (Top-Down) or "horizontal" (Left-Right).
         node_shape: Default shape for nodes if not specified in config.
         rank_sep: Vertical separation between layers (inches).
         node_sep: Horizontal separation between nodes (inches).
     """
+
+    if node_config is None:
+        node_config = dag.node_config
 
     # 1. Determine Format from Path
     fmt = "svg"

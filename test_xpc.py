@@ -56,12 +56,7 @@ data_region_graph = construct_random_region_graph(
     conj_len=1,
 )
 
-plot_config = {
-    DataRegionNode: {"color": "#ffcc99", "label": "Region", "shape": "box"},
-    DataPartitionNode: {"color": "#99ccff", "label": "Partition", "shape": "ellipse"},
-}
-
-plot = plot_dag(data_region_graph, node_config=plot_config)
+plot = plot_dag(data_region_graph)
 
 # Plot in a window
 plot.view()
