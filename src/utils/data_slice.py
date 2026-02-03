@@ -1,13 +1,23 @@
+from typing import Dict
+
 import numpy as np
 
 from .bitset import BitSet
+from .interval import Interval
 
 
 class DataSlice:
-    def __init__(self, data: np.ndarray, row_ids: BitSet, col_ids: BitSet):
+    def __init__(
+        self,
+        data: np.ndarray,
+        row_ids: BitSet,
+        col_ids: BitSet,
+        constraints: Dict[int, Interval] = None,
+    ):
         self.data = data
         self.row_ids = row_ids
         self.col_ids = col_ids
+        self.constraints = constraints if constraints is not None else {}
 
     def get_data(self) -> np.ndarray:
         row_mask = self.row_ids.to_bool_mask(self.data.shape[0])

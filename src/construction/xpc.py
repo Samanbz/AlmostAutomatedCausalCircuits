@@ -1,4 +1,5 @@
 import random
+import time
 from typing import Dict, List, Tuple
 
 import numpy as np
@@ -9,6 +10,7 @@ from src.symbolic import (
     DataRegionNode,
     Distribution,
     GaussianDistribution,
+    SymbolicArithmeticCircuit,
     UniformDistribution,
 )
 from src.utils import BitSet, DataSlice, Interval
@@ -90,7 +92,7 @@ def apply_logical_constraints(
     return subset_ids, rest_ids
 
 
-def rand_splits(
+def partition_randomly(
     data_slice: DataSlice,
     conj_len: int,
     split_arity: int,
@@ -101,7 +103,6 @@ def rand_splits(
 
     conj_vars = random.sample(list(data_slice.col_ids), conj_len)
     conj_dists = {var: input_dists[var] for var in conj_vars}
-
     while len(slices) < split_arity - 1:
         constraints = get_random_logical_constraints(
             conj_dists=conj_dists,
@@ -111,13 +112,12 @@ def rand_splits(
             constraints=constraints,
         )
         if len(subset_row_ids) < min_examples or len(rest_row_ids) < min_examples:
-            print(f"\tRejected split {len(subset_row_ids)}/{len(rest_row_ids)}")
             continue
-        print(f"\tAccepted split {len(subset_row_ids)}/{len(rest_row_ids)}")
-        new_slice = DataSlice(data_slice.data, subset_row_ids, data_slice.col_ids)
+        new_slice = DataSlice(
+            data_slice.data, subset_row_ids, data_slice.col_ids, constraints=constraints
+        )
         slices.append(new_slice)
         data_slice = DataSlice(data_slice.data, rest_row_ids, data_slice.col_ids)
-
     if len(slices) > 0:
         slices.append(data_slice)
         return slices, BitSet(conj_vars)
@@ -125,7 +125,7 @@ def rand_splits(
         return [], BitSet.from_int(0)
 
 
-def random_region_graph(
+def construct_random_region_graph(
     data: np.ndarray,
     input_dists: Dict[int, Distribution],
     min_examples: int,
@@ -143,25 +143,25 @@ def random_region_graph(
     rg = DataRegionGraph()
     num_rows, num_cols = data.shape
 
-    root_region = DataRegionNode(
-        scope=BitSet.full(num_cols), row_ids=BitSet.full(num_rows), constraints={}
-    )
+    root_region = DataRegionNode(scope=BitSet.full(num_cols), row_ids=BitSet.full(num_rows))
     root_id = next_id()
     rg.add_node(root_id, root_region)
 
     P = [(root_id, root_region)]
     while P:
-        print(f"P: {P}")
         # Random region from P
         idx = random.randint(0, len(P) - 1)
         r_id, r_node = P.pop(idx)
-        if len(r_node.scope) < conj_len or len(r_node.row_ids) < 2 * min_examples:
-            print(f"Skipping region node {r_id} due to insufficient scope size or examples.")
+
+        # If scope == conj_len, the sister region will have scope 0
+        if len(r_node.scope) <= conj_len:
+            continue
+        # If not enough examples to split
+        if len(r_node.row_ids) < split_arity * min_examples:
             continue
 
         data_slice = r_node.get_data_slice(data)
-        print(f"Processing region node {r_id} with {len(r_node.row_ids)} examples.")
-        data_slices, conj_vars = rand_splits(
+        data_slices, conj_vars = partition_randomly(
             data_slice=data_slice,
             conj_len=conj_len,
             split_arity=split_arity,
@@ -172,7 +172,11 @@ def random_region_graph(
         if data_slices:
             new_partitions: List[Tuple[int, DataPartitionNode]] = []
             for data_slice in data_slices:
-                partition = DataPartitionNode(scope=r_node.scope, row_ids=data_slice.row_ids)
+                partition = DataPartitionNode(
+                    scope=r_node.scope,
+                    row_ids=data_slice.row_ids,
+                    constraints=data_slice.constraints,
+                )
                 partition_id = next_id()
                 rg.add_node(partition_id, partition)
                 rg.add_edge(r_id, partition_id)
@@ -195,3 +199,22 @@ def random_region_graph(
                 P.append((r_region_id, r_region))
 
     return rg
+
+
+def construct_spn_from_region_graph(
+    rg: DataRegionGraph,
+    data: np.ndarray,
+) -> SymbolicArithmeticCircuit:
+    pass
+
+
+# FIXME:
+# 1. Issue with infinite loop and no satisfying splits, due to badly chosen constraints? or not enough rows?
+# TODO:
+# 1. Allow for usage of fixed random ordering of variables when splitting, return this fixed ordering as well.
+# 2. Implement construct_spn_from_region_graph
+#   a. Pass down input distributions corresponding to current scope, which get truncated at partitioned nodes based on their constraints
+#   b. At leaf nodes, create leaf distributions with truncated input distributions, turn early-stopped regions into chow-liu trees?
+# 3. Implement methods/utilities for checking structural and support properties of an Arithmetic Circuit
+# 4. Verify that the constructed AC is S, DEC, SD, DET
+# 5. Implement algorithm for multiplying two compatible ACs together, verify that product of two DET ACs is still DET
