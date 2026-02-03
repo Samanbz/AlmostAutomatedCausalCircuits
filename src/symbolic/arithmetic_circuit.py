@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Dict
 
 from src.graph import DirectedAcyclicGraph, Node
 from src.utils import BitSet
@@ -38,4 +38,15 @@ class SymbolicArithmeticCircuit(DirectedAcyclicGraph[int, ArithmeticNode, Any]):
     Nodes are identified by integers and contain Node objects (SumNode, ProductNode, etc.).
     """
 
-    pass
+    @property
+    def node_config(self) -> Dict[type, Dict[str, Any]]:
+        def leaf_label(node: ArithmeticNode) -> str:
+            if hasattr(node, "scope"):
+                return f"Leaf\n{sorted(node.scope)}"
+            return "Leaf"
+
+        return {
+            SumNode: {"color": "#ff9999", "label": "+", "shape": "diamond"},
+            ProductNode: {"color": "#9999ff", "label": "x", "shape": "box"},
+            LeafNode: {"color": "#99ff99", "label": leaf_label, "shape": "ellipse"},
+        }

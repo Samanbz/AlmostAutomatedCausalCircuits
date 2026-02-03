@@ -2,7 +2,7 @@ from typing import Any, List
 
 from src.utils import BitSet, Interval
 
-from .arithmetic import LeafNode
+from .arithmetic_circuit import LeafNode
 
 
 class Distribution(LeafNode):

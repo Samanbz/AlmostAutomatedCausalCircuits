@@ -5,7 +5,7 @@ import numpy as np
 from src.graph import DirectedAcyclicGraph
 from src.utils import BitSet, DataSlice, Interval
 
-from .region import RegionGraphNode
+from .region_graph import RegionGraphNode
 
 
 class DataRegionGraphNode(RegionGraphNode):
@@ -15,9 +15,11 @@ class DataRegionGraphNode(RegionGraphNode):
         self,
         scope: BitSet,
         row_ids: BitSet,
+        constraints: Dict[int, Interval] = None,
     ):
         super().__init__(scope)
         self.row_ids = row_ids
+        self.constraints = constraints if constraints is not None else {}
 
     def get_data_slice(self, data: np.ndarray) -> DataSlice:
         return DataSlice(data, self.row_ids, self.scope)
@@ -28,17 +30,23 @@ class DataRegionNode(DataRegionGraphNode):
 
 
 class DataPartitionNode(DataRegionGraphNode):
-    def __init__(
-        self,
-        scope: BitSet,
-        row_ids: BitSet,
-        constraints: Dict[int, Interval] = None,
-    ):
-        DataRegionGraphNode.__init__(self, scope, row_ids)
-        self.constraints = constraints if constraints is not None else {}
+    pass
 
 
 class DataRegionGraph(DirectedAcyclicGraph[int, DataRegionGraphNode, Any]):
     """RegionGraph that holds data slices at each node."""
 
-    pass
+    @property
+    def node_config(self) -> Dict[type, Dict[str, Any]]:
+        return {
+            DataRegionNode: {
+                "color": "#ffcc99",
+                "label": lambda n: f"Region\nScope: {list(n.scope)}\nRows: {len(n.row_ids)}",
+                "shape": "box",
+            },
+            DataPartitionNode: {
+                "color": "#99ccff",
+                "label": lambda n: f"Partition\nScope: {list(n.scope)}\nRows: {len(n.row_ids)}",
+                "shape": "ellipse",
+            },
+        }
