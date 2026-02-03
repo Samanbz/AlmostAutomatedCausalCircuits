@@ -25,6 +25,9 @@ dependencies = [
 test = [
     "pytest"
 ]
+dev = [
+    "colorlog"
+]
 
 [tool.ruff]
 line-length = 100
