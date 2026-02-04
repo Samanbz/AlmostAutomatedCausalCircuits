@@ -3,7 +3,8 @@ import random
 import numpy as np
 import torch
 
-from src.construction.xpc import construct_random_region_graph
+from src.construction.random_vtree import construct_random_vtree
+from src.construction.xpc import construct_random_data_region_graph
 from src.graph import plot_dag
 from src.helpers import normal, synthesize_data, uniform
 from src.symbolic import (
@@ -12,12 +13,14 @@ from src.symbolic import (
     DataRegionNode,
     GaussianDistribution,
     StructuralCausalModel,
+    VTree,
 )
 
 
-random.seed(42)
-np.random.seed(42)
-torch.manual_seed(42)
+seed = 123
+random.seed(seed)
+np.random.seed(seed)
+torch.manual_seed(seed)
 
 # 1. Instantiate the Model
 scm = StructuralCausalModel()
@@ -41,9 +44,12 @@ scm.add_variable("H", health_mech, parents=["A", "F"])
 scm.add_variable("M", mobility_mech, parents=["H"])
 
 # 4. Run Pipeline
-df = synthesize_data(scm, n_samples=5000)
+df = synthesize_data(scm, n_samples=1000)
 
-data_region_graph = construct_random_region_graph(
+
+rand_vtree = construct_random_vtree(num_vars=4)
+
+data_region_graph = construct_random_data_region_graph(
     data=df.to_numpy(),
     input_dists={
         0: GaussianDistribution(scope=(0,), mean=df["A"].mean(), stddev=df["A"].std()),
@@ -51,12 +57,15 @@ data_region_graph = construct_random_region_graph(
         2: GaussianDistribution(scope=(2,), mean=df["H"].mean(), stddev=df["H"].std()),
         3: GaussianDistribution(scope=(3,), mean=df["M"].mean(), stddev=df["M"].std()),
     },
-    min_examples=20,
+    min_examples=100,
     split_arity=3,
-    conj_len=1,
+    var_decomp=rand_vtree,
 )
 
 plot = plot_dag(data_region_graph)
 
 # Plot in a window
-plot.view()
+plot.view(filename="xpc_drg.html")
+
+vplot = plot_dag(rand_vtree)
+vplot.view(filename="xpc_vtree.html")
