@@ -40,10 +40,13 @@ class SymbolicArithmeticCircuit(DirectedAcyclicGraph[int, ArithmeticNode, Any]):
 
     @property
     def node_config(self) -> Dict[type, Dict[str, Any]]:
-        def leaf_label(node: ArithmeticNode) -> str:
+        def leaf_label(node: LeafNode) -> str:
+            label = "Leaf"
             if hasattr(node, "scope"):
-                return f"Leaf\n{sorted(node.scope)}"
-            return "Leaf"
+                label += f"\n{sorted(node.scope)}"
+            if hasattr(node, "support"):
+                label += f"\n{node.support}"
+            return label
 
         return {
             SumNode: {"color": "#ff9999", "label": "+", "shape": "diamond"},

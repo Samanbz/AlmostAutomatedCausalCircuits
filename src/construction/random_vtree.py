@@ -1,11 +1,11 @@
 import random
 from typing import Optional
 
+from src.symbolic.vtree import VNode, VTree
 from src.utils import BitSet
-from symbolic.vtree import VNode, VTree
 
 
-def construct_random_vtree(num_vars: int, conj_len: Optional[int]) -> VTree:
+def construct_random_vtree(num_vars: int, conj_len: Optional[int] = None) -> VTree:
     """Constructs a random binary variable tree (vtree) for the given number of variables.
 
     Args:

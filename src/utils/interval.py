@@ -90,7 +90,7 @@ class ContinuousInterval(Interval):
     def __repr__(self):
         left = "[" if self.include_low else "("
         right = "]" if self.include_high else ")"
-        return f"{left}{self.low}, {self.high}{right}"
+        return f"{left}{self.low:.2f}, {self.high:.2f}{right}"
 
 
 class DiscreteInterval(Interval):
