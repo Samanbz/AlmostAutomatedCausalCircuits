@@ -9,6 +9,8 @@ from src.symbolic import (
     DataRegionGraph,
     DataRegionNode,
     Distribution,
+    ProductNode,
+    SumNode,
     SymbolicArithmeticCircuit,
     VTree,
 )
@@ -283,6 +285,117 @@ def construct_random_data_region_graph(
 
 def construct_spn_from_region_graph(
     rg: DataRegionGraph,
-    data: np.ndarray,
+    input_dists: Dict[int, Distribution],
 ) -> SymbolicArithmeticCircuit:
-    pass
+    node_counter = 1
+
+    def next_id():
+        nonlocal node_counter
+        nid = node_counter
+        node_counter += 1
+        return nid
+
+    circuit = SymbolicArithmeticCircuit()
+
+    rg_root = rg.get_node_data(rg.get_roots()[0])
+    ac_root = SumNode(scope=rg_root.scope)
+
+    circuit.add_node(0, ac_root)
+
+    rg_node_to_ac_node: Dict[int, int] = {}
+    rg_node_to_ac_node[rg.get_roots()[0]] = 0
+
+    for r_id in rg.topological_sort():
+        r_node = rg.get_node_data(r_id)
+        if r_id == rg.get_roots()[0]:
+            continue
+
+        logger.debug(f"Processing RG Node ID {r_id} with scope {r_node.scope}.")
+        if isinstance(r_node, DataRegionNode):
+            rg_node_parents = rg.get_parents(r_id)  # TODO Use tree?
+            logger.debug(f"\tParents: {rg_node_parents}")
+            assert len(rg_node_parents) == 1, (
+                "DataRegionNode must have exactly one parent DataPartitionNode."
+            )
+            p_id = rg_node_parents[0]
+            p_ac_id = rg_node_to_ac_node[p_id]
+            p_ac_node = circuit.get_node_data(p_ac_id)
+            assert isinstance(p_ac_node, ProductNode), (
+                "Parent AC node must be a ProductNode corresponding to the partition."
+            )
+
+            if rg.is_leaf(r_id):
+                # Create Naive Factorization
+                for i in r_node.scope:
+                    leaf_node = input_dists[i].constrain_to(r_node.constraints.get(i, None))
+                    leaf_id = next_id()
+                    circuit.add_node(leaf_id, leaf_node)
+                    circuit.add_edge(p_ac_id, leaf_id)
+            else:
+                # Create SumNode for inner RegionNode
+                region_ac_node = SumNode(scope=r_node.scope)
+                region_ac_id = next_id()
+                circuit.add_node(region_ac_id, region_ac_node)
+                circuit.add_edge(p_ac_id, region_ac_id)
+                rg_node_to_ac_node[r_id] = region_ac_id
+
+        elif isinstance(r_node, DataPartitionNode):
+            partition_ac_node = ProductNode(scope=r_node.scope)
+            partition_ac_id = next_id()
+            circuit.add_node(partition_ac_id, partition_ac_node)
+
+            rg_node_parents = rg.get_parents(r_id)
+            assert len(rg_node_parents) == 1, (
+                "DataPartitionNode must have exactly one parent DataRegionNode."
+            )
+            r_parent_id = rg_node_parents[0]
+            r_parent_ac_id = rg_node_to_ac_node[r_parent_id]
+            r_parent_ac_node = circuit.get_node_data(r_parent_ac_id)
+            assert isinstance(r_parent_ac_node, SumNode), (
+                "Parent AC node must be a SumNode corresponding to the region."
+            )
+
+            circuit.add_edge(r_parent_ac_id, partition_ac_id)
+            rg_node_to_ac_node[r_id] = partition_ac_id
+        else:
+            raise ValueError(f"Unknown region graph node type: {type(r_node)}")
+
+    return circuit
+
+
+# DONE:
+# 1. Allow for usage of fixed random ordering of variables when splitting, return this fixed ordering as well.
+# 2. Implement construct_spn_from_region_graph
+#   a. Pass down input distributions corresponding to current scope, which get truncated at partitioned nodes based on their constraints
+
+# TODO:
+#   b. At leaf nodes, create leaf distributions with truncated input distributions, turn early-stopped regions into chow-liu trees?
+# 3. Implement methods/utilities for checking structural and support properties of an Arithmetic Circuit
+# 4. Verify that the constructed AC is S, DEC, SD, DET
+# 5. Implement algorithm for multiplying two compatible ACs together, verify that product of two DET ACs is still DET
+
+
+# Questions:
+# 1. Does the Circuit really have to be compatible to a Comb VTree? Or can it just be any VTree?
+# If we go past a comb tree it would mean that the regions invloving the conj_vars can be split further,
+# meaning the constraints involved in a region node with conj_vars are not minimal.
+# Is this true for indicator leaves? Is this false for distribution leaves?
+# This would mean conj_vars needs to shrink with depth and that any VTree is valid
+# So we need the main function to accept a VTree and the XPC function to accept a Comb VTree!
+# Still the VTree will be a binary tree regardless and the left child will always be the conj_vars,
+# the difference being that the left child can have further children as well, and that the VTree can be more balanced.
+# What do we call this new circuit construction algorithm then? XPC uses Comb VTrees (and assumes indicator leaves,
+# which for us means once-truncated distributions)
+
+# 2. How to elegantly pass down distributions? This is needed for constructing the actual SPN from the region graph,
+# as well as effectively splitting the data, as we need to know the input distributions to sample new constraints that make sense.
+# This would potentially improve the splits and reduce the number of failed attempts at splitting.
+# This means we don't just pass down the constraints during construction, but also the truncated distributions? hm...
+# Or perhaps we can just pass down the constraints and *apply* them to the original distributions when needed? I think this is better.
+# It's clear then, during compilation to a SPN, when we reach a Region Node with constraints, it must be a (potentially naive product of) truncated distribution(s).
+# The question that remains is, if we follow this general VTree approach (ie not comb tree), will there be any Region Nodes without constraints? I think so...
+# I need a more theoretical understanding and guarantees about this new construction process.
+
+
+# Next steps: apply constraints to input dists and sample cut-points from them
+# Then, implement the SPN construction from the region grapht

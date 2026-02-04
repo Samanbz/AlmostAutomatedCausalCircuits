@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Any, List
+from typing import Any, List, Optional
 
 import numpy as np
 from scipy import stats
@@ -25,8 +25,8 @@ class Distribution(LeafNode, ABC):
         pass
 
     @abstractmethod
-    def constrain_to(self, interval: Interval) -> "TruncatedDistribution":
-        """Return a truncated distribution constrained to the given interval."""
+    def constrain_to(self, interval: Optional[Interval]) -> "TruncatedDistribution":
+        """Return a truncated distribution constrained to the given interval. If interval is None, return self."""
         pass
 
 
@@ -52,8 +52,10 @@ class GaussianDistribution(Distribution):
         right_dist = TruncatedGaussianDistribution(self.scope, self, right_support)
         return left_dist, right_dist
 
-    def constrain_to(self, interval: ContinuousInterval) -> "TruncatedDistribution":
+    def constrain_to(self, interval: Optional[ContinuousInterval]) -> "TruncatedDistribution":
         """Return a truncated Gaussian distribution constrained to the given interval."""
+        if interval is None:
+            return self
         return TruncatedGaussianDistribution(self.scope, self, interval)
 
     def __repr__(self):
@@ -82,8 +84,10 @@ class CategoricalDistribution(Distribution):
         right_dist = TruncatedCategoricalDistribution(self.scope, self, right_support)
         return left_dist, right_dist
 
-    def constrain_to(self, interval: DiscreteInterval) -> "TruncatedDistribution":
+    def constrain_to(self, interval: Optional[DiscreteInterval]) -> "TruncatedDistribution":
         """Return a truncated categorical distribution constrained to the given interval."""
+        if interval is None:
+            return self
         return TruncatedCategoricalDistribution(self.scope, self, interval)
 
     def __repr__(self):
@@ -112,8 +116,10 @@ class UniformDistribution(Distribution):
         right_dist = TruncatedUniformDistribution(self.scope, self, right_support)
         return left_dist, right_dist
 
-    def constrain_to(self, interval: ContinuousInterval) -> "TruncatedDistribution":
+    def constrain_to(self, interval: Optional[ContinuousInterval]) -> "TruncatedDistribution":
         """Return a truncated uniform distribution constrained to the given interval."""
+        if interval is None:
+            return self
         return TruncatedUniformDistribution(self.scope, self, interval)
 
     def __repr__(self):
@@ -149,8 +155,10 @@ class TruncatedDistribution(Distribution):
         right_dist = self.__class__(self.scope, self.base_distribution, right_support)
         return left_dist, right_dist
 
-    def constrain_to(self, interval: Interval) -> "TruncatedDistribution":
+    def constrain_to(self, interval: Optional[Interval]) -> "TruncatedDistribution":
         """Return a further truncated distribution constrained to the given interval."""
+        if interval is None:
+            return self
         new_support = self.support.intersect(interval)
         return self.__class__(self.scope, self.base_distribution, new_support)
 
