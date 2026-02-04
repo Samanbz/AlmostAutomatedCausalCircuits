@@ -19,6 +19,7 @@ dependencies = [
     "torch",
     "networkx",
     "ruff",
+    "scipy",
 ]
 
 [project.optional-dependencies]

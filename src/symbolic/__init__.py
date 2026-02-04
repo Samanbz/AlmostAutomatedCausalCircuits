@@ -15,7 +15,10 @@ from .distributions import (
     CategoricalDistribution,
     Distribution,
     GaussianDistribution,
+    TruncatedCategoricalDistribution,
     TruncatedDistribution,
+    TruncatedGaussianDistribution,
+    TruncatedUniformDistribution,
     UniformDistribution,
 )
 from .region_graph import PartitionNode, RegionGraph, RegionGraphNode, RegionNode
@@ -31,6 +34,9 @@ __all__ = [
     "GaussianDistribution",
     "UniformDistribution",
     "TruncatedDistribution",
+    "TruncatedGaussianDistribution",
+    "TruncatedUniformDistribution",
+    "TruncatedCategoricalDistribution",
     "ArithmeticNode",
     "DataRegionGraphNode",
     "RegionGraphNode",
