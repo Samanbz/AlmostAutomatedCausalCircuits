@@ -32,8 +32,8 @@ def get_random_constraints(
         left_dist, right_dist = dist.split_at(rand_cut_point)
         if random.random() < 0.5:
             left_dist, right_dist = right_dist, left_dist
-        constraints.set_constraint(var_idx, left_dist.support)
-        r_constraints.set_constraint(var_idx, right_dist.support)
+        constraints.add(var_idx, left_dist.support)
+        r_constraints.add(var_idx, right_dist.support)
 
     return constraints, r_constraints
 
@@ -229,20 +229,20 @@ def construct_random_data_region_graph(
             new_partitions.append((partition_id, partition))
 
         for p_id, p_node in new_partitions:
-            assert conj_vars == BitSet(list(p_node.constraints.intervals.keys())), (
-                "Constraint variable mismatch."
-            )
+            # Filter constraints for children based on their scope.
+            l_constraints = p_node.constraints.filter_by_vars(conj_vars)
             l_region = DataRegionNode(
                 scope=conj_vars,
                 row_ids=p_node.row_ids,
-                constraints=p_node.constraints,  # carry over constraints
+                constraints=l_constraints,
             )
 
+            r_scope = r_node.scope.difference(conj_vars)
+            r_constraints = p_node.constraints.filter_by_vars(r_scope)
             r_region = DataRegionNode(
-                scope=r_node.scope.difference(conj_vars),
+                scope=r_scope,
                 row_ids=p_node.row_ids,
-                # No need to add constraints here, as input dists
-                # with scope conj_vars won't flow down here anyways
+                constraints=r_constraints,
             )
             l_region_id = next_id()
             r_region_id = next_id()
@@ -308,7 +308,7 @@ def construct_spn_from_region_graph(
             if rg.is_leaf(r_id):
                 # Create Naive Factorization
                 for i in r_node.scope:
-                    leaf_node = input_dists[i].constrain_to(r_node.constraints.get(i, None))
+                    leaf_node = input_dists[i].constrain_to(r_node.constraints.get(i))
                     leaf_id = next_id()
                     circuit.add_node(leaf_id, leaf_node)
                     circuit.add_edge(p_ac_id, leaf_id)

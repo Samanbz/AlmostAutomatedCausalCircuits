@@ -1,5 +1,6 @@
 from typing import Dict
 
+from .bitset import BitSet
 from .interval import Interval
 
 
@@ -35,6 +36,10 @@ class Support:
         for var, interval in other.intervals.items():
             if var not in self.intervals:
                 new_intervals[var] = interval
+        return Support(new_intervals)
+
+    def filter_by_vars(self, vars: BitSet) -> "Support":
+        new_intervals = {var: interval for var, interval in self.intervals.items() if var in vars}
         return Support(new_intervals)
 
     @property
