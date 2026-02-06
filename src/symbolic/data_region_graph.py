@@ -3,7 +3,7 @@ from typing import Any, Dict
 import numpy as np
 
 from src.graph import DirectedAcyclicGraph
-from src.utils import BitSet, DataSlice, Interval
+from src.utils import BitSet, DataSlice, Support
 
 from .region_graph import RegionGraphNode
 
@@ -15,14 +15,14 @@ class DataRegionGraphNode(RegionGraphNode):
         self,
         scope: BitSet,
         row_ids: BitSet,
-        constraints: Dict[int, Interval] = None,
+        constraints: Support = None,
     ):
         super().__init__(scope)
         self.row_ids = row_ids
-        self.constraints = constraints if constraints is not None else {}
+        self.constraints = constraints if constraints is not None else Support()
 
     def get_data_slice(self, data: np.ndarray) -> DataSlice:
-        return DataSlice(data, self.row_ids, self.scope)
+        return DataSlice(data, self.row_ids, self.scope, self.constraints)
 
 
 class DataRegionNode(DataRegionGraphNode):

@@ -18,10 +18,24 @@ class Interval(ABC):
         pass
 
     @abstractmethod
+    def union(self, other: "Interval") -> "Interval":
+        """
+        Returns the union of this interval with another.
+        Assumes continuity for continuous intervals and set union for discrete intervals.
+        """
+        pass
+
+    @abstractmethod
     def split_at(self, cut_point: Any) -> Tuple["Interval", "Interval"]:
         """
         Splits the interval at the given cut point into two intervals.
         """
+        pass
+
+    @property
+    @abstractmethod
+    def is_empty(self) -> bool:
+        """Returns True if the interval is empty."""
         pass
 
 
@@ -47,13 +61,17 @@ class ContinuousInterval(Interval):
     def contains(self, value: Union[float, np.ndarray]) -> Union[bool, np.ndarray]:
         lower_check = (value >= self.low) if self.include_low else (value > self.low)
         upper_check = (value <= self.high) if self.include_high else (value < self.high)
-        if hasattr(value, "__len__") and not isinstance(value, str):  # Handle array-like
+        if hasattr(value, "__len__") and not isinstance(
+            value, str
+        ):  # Handle array-like
             return lower_check & upper_check
         return lower_check and upper_check
 
     def intersect(self, other: "Interval") -> "ContinuousInterval":
         if not isinstance(other, ContinuousInterval):
-            raise TypeError("Can only intersect ContinuousInterval with ContinuousInterval.")
+            raise TypeError(
+                "Can only intersect ContinuousInterval with ContinuousInterval."
+            )
 
         new_low = max(self.low, other.low)
         new_high = min(self.high, other.high)
@@ -62,16 +80,48 @@ class ContinuousInterval(Interval):
         if self.low == other.low:
             new_include_low = self.include_low and other.include_low
         else:
-            new_include_low = self.include_low if self.low > other.low else other.include_low
+            new_include_low = (
+                self.include_low if self.low > other.low else other.include_low
+            )
 
         if self.high == other.high:
             new_include_high = self.include_high and other.include_high
         else:
-            new_include_high = self.include_high if self.high < other.high else other.include_high
+            new_include_high = (
+                self.include_high if self.high < other.high else other.include_high
+            )
 
         return ContinuousInterval(new_low, new_high, new_include_low, new_include_high)
 
-    def split_at(self, cut_point: float) -> Tuple["ContinuousInterval", "ContinuousInterval"]:
+    def union(self, other: "Interval") -> "ContinuousInterval":
+        if not isinstance(other, ContinuousInterval):
+            raise TypeError(
+                "Can only union ContinuousInterval with ContinuousInterval."
+            )
+
+        new_low = min(self.low, other.low)
+        new_high = max(self.high, other.high)
+
+        # Determine strictness of bounds
+        if self.low == other.low:
+            new_include_low = self.include_low or other.include_low
+        else:
+            new_include_low = (
+                self.include_low if self.low < other.low else other.include_low
+            )
+
+        if self.high == other.high:
+            new_include_high = self.include_high or other.include_high
+        else:
+            new_include_high = (
+                self.include_high if self.high > other.high else other.include_high
+            )
+
+        return ContinuousInterval(new_low, new_high, new_include_low, new_include_high)
+
+    def split_at(
+        self, cut_point: float
+    ) -> Tuple["ContinuousInterval", "ContinuousInterval"]:
         """
         Splits the interval at the given cut point into two intervals.
         Cutpoint is exclusive to the right interval.
@@ -86,6 +136,14 @@ class ContinuousInterval(Interval):
         left = ContinuousInterval(self.low, cut_point, self.include_low, True)
         right = ContinuousInterval(cut_point, self.high, False, self.include_high)
         return left, right
+
+    @property
+    def is_empty(self) -> bool:
+        if self.low > self.high:
+            return True
+        if self.low == self.high:
+            return not (self.include_low and self.include_high)
+        return False
 
     def __repr__(self):
         left = "[" if self.include_low else "("
@@ -102,14 +160,31 @@ class DiscreteInterval(Interval):
     def contains(self, value: Union[int, np.ndarray]) -> Union[bool, np.ndarray]:
         if isinstance(value, (np.ndarray, list)):
             return np.isin(value, self.values)
-        return np.isin(value, self.values).item() if np.isscalar(value) else value in self.values
+        return (
+            np.isin(value, self.values).item()
+            if np.isscalar(value)
+            else value in self.values
+        )
 
     def intersect(self, other: "Interval") -> "DiscreteInterval":
         if not isinstance(other, DiscreteInterval):
-            raise TypeError("Can only intersect DiscreteInterval with DiscreteInterval.")
+            raise TypeError(
+                "Can only intersect DiscreteInterval with DiscreteInterval."
+            )
 
         common_values = np.intersect1d(self.values, other.values)
         return DiscreteInterval(common_values)
+
+    def union(self, other: "Interval") -> "DiscreteInterval":
+        if not isinstance(other, DiscreteInterval):
+            raise TypeError("Can only union DiscreteInterval with DiscreteInterval.")
+
+        all_values = np.union1d(self.values, other.values)
+        return DiscreteInterval(all_values)
+
+    @property
+    def is_empty(self) -> bool:
+        return len(self.values) == 0
 
     def split_at(self, cut_point: int) -> Tuple["DiscreteInterval", "DiscreteInterval"]:
         left_vals = self.values[self.values <= cut_point]

@@ -14,33 +14,33 @@ from src.symbolic import (
     SymbolicArithmeticCircuit,
     VTree,
 )
-from src.utils import BitSet, DataSlice, Interval
+from src.utils import BitSet, DataSlice, Support
 
 
 logger = g_logger.getChild("xpc")
 
 
-def get_random_logical_constraints(
+def get_random_constraints(
     conj_dists: Dict[int, Distribution],
-) -> Tuple[Dict[int, Interval], Dict[int, Interval]]:
+) -> Tuple[Support, Support]:
     """Generate random constraints by sampling from distributions and cutting at the sampled point."""
-    constraints = {}
-    r_constraints = {}
+    constraints = Support()
+    r_constraints = Support()
 
     for var_idx, dist in conj_dists.items():
         rand_cut_point = dist.sample()
         left_dist, right_dist = dist.split_at(rand_cut_point)
         if random.random() < 0.5:
             left_dist, right_dist = right_dist, left_dist
-        constraints[var_idx] = left_dist.support
-        r_constraints[var_idx] = right_dist.support
+        constraints.set_constraint(var_idx, left_dist.support)
+        r_constraints.set_constraint(var_idx, right_dist.support)
 
     return constraints, r_constraints
 
 
 def apply_logical_constraints(
     data_slice: DataSlice,
-    constraints: Dict[int, Interval],
+    constraints: Support,
 ) -> Tuple[BitSet, BitSet]:
     """
     Applies constraints to the subset of data defined by row_ids.
@@ -49,13 +49,13 @@ def apply_logical_constraints(
     if not data_slice.row_ids:
         return [], []
 
-    assert all(i in data_slice.col_ids for i in list(constraints.keys())), (
+    assert all(i in data_slice.col_ids for i in list(constraints.intervals.keys())), (
         "Constraint variables must be in data slice columns."
     )
 
     mask = np.ones(len(data_slice.row_ids), dtype=bool)
 
-    for var_idx, interval in constraints.items():
+    for var_idx, interval in constraints:
         vals = data_slice.get_column(var_idx)
         mask &= interval.contains(vals)
 
@@ -79,25 +79,6 @@ def apply_logical_constraints(
     assert rest_ids == data_slice.row_ids.difference(subset_ids), "Row ID partitioning error."
 
     return subset_ids, rest_ids
-
-
-def intersect_logical_constraints(
-    constraints1: Dict[int, Interval],
-    constraints2: Dict[int, Interval],
-) -> Dict[int, Interval]:
-    """Intersect two sets of logical constraints."""
-    intersected_constraints: Dict[int, Interval] = {}
-
-    all_vars = set(constraints1.keys()).union(set(constraints2.keys()))
-    for var in all_vars:
-        if var in constraints1 and var in constraints2:
-            intersected_constraints[var] = constraints1[var].intersect(constraints2[var])
-        elif var in constraints1:
-            intersected_constraints[var] = constraints1[var]
-        else:
-            intersected_constraints[var] = constraints2[var]
-
-    return intersected_constraints
 
 
 def partition_randomly(
@@ -134,7 +115,7 @@ def partition_randomly(
             )
             break
 
-        constraints, r_constraints = get_random_logical_constraints(
+        constraints, r_constraints = get_random_constraints(
             conj_dists=conj_dists,
         )
         subset_row_ids, rest_row_ids = apply_logical_constraints(
@@ -155,7 +136,7 @@ def partition_randomly(
             data_slice.data,
             subset_row_ids,
             data_slice.col_ids,
-            constraints=intersect_logical_constraints(data_slice.constraints, constraints),
+            constraints=data_slice.constraints.intersect(constraints),
         )
         slices.append(new_slice)
 
@@ -163,7 +144,7 @@ def partition_randomly(
             data_slice.data,
             rest_row_ids,
             data_slice.col_ids,
-            constraints=intersect_logical_constraints(data_slice.constraints, r_constraints),
+            constraints=data_slice.constraints.intersect(r_constraints),
         )
         tries = 0
 
@@ -248,7 +229,7 @@ def construct_random_data_region_graph(
             new_partitions.append((partition_id, partition))
 
         for p_id, p_node in new_partitions:
-            assert conj_vars == BitSet(list(p_node.constraints.keys())), (
+            assert conj_vars == BitSet(list(p_node.constraints.intervals.keys())), (
                 "Constraint variable mismatch."
             )
             l_region = DataRegionNode(
