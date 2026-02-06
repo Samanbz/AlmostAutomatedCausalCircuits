@@ -1,9 +1,21 @@
-from .arithmetic_circuit import (
+from .arithmetic import (
     ArithmeticNode,
+    CategoricalDistribution,
+    Decomposability,
+    Determinism,
+    Distribution,
+    GaussianDistribution,
     LeafNode,
     ProductNode,
+    Smoothness,
+    StructuredDecomposability,
     SumNode,
     SymbolicArithmeticCircuit,
+    TruncatedCategoricalDistribution,
+    TruncatedDistribution,
+    TruncatedGaussianDistribution,
+    TruncatedUniformDistribution,
+    UniformDistribution,
 )
 from .data_region_graph import (
     DataPartitionNode,
@@ -11,22 +23,16 @@ from .data_region_graph import (
     DataRegionGraphNode,
     DataRegionNode,
 )
-from .distributions import (
-    CategoricalDistribution,
-    Distribution,
-    GaussianDistribution,
-    TruncatedCategoricalDistribution,
-    TruncatedDistribution,
-    TruncatedGaussianDistribution,
-    TruncatedUniformDistribution,
-    UniformDistribution,
-)
 from .region_graph import PartitionNode, RegionGraph, RegionGraphNode, RegionNode
 from .scm import AdditiveNoiseMechanism, Mechanism, StructuralCausalModel
 from .vtree import VNode, VTree
 
 
 __all__ = [
+    "Smoothness",
+    "Decomposability",
+    "Determinism",
+    "StructuredDecomposability",
     "VTree",
     "VNode",
     "Distribution",

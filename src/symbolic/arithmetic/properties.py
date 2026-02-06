@@ -1,14 +1,13 @@
 from abc import ABC, abstractmethod
-from typing import Dict
+from typing import TYPE_CHECKING, Dict
 
 from src.utils import BitSet
 
-from .arithmetic_circuit import (
-    LeafNode,
-    ProductNode,
-    SumNode,
-    SymbolicArithmeticCircuit,
-)
+from .nodes import LeafNode, ProductNode, SumNode
+
+
+if TYPE_CHECKING:
+    from .circuit import SymbolicArithmeticCircuit
 
 
 class Property(ABC):
@@ -17,7 +16,7 @@ class Property(ABC):
     """
 
     @abstractmethod
-    def check(self, node_id: int, circuit: SymbolicArithmeticCircuit) -> bool:
+    def check(self, node_id: int, circuit: "SymbolicArithmeticCircuit") -> bool:
         """Check if the property holds for the given node."""
         raise NotImplementedError
 
@@ -29,7 +28,7 @@ class Smoothness(Property):
     A circuit is smooth if for every sum node, all children have the same scope.
     """
 
-    def check(self, node_id: int, circuit: SymbolicArithmeticCircuit) -> bool:
+    def check(self, node_id: int, circuit: "SymbolicArithmeticCircuit") -> bool:
         node = circuit.get_node_data(node_id)
         if isinstance(node, ProductNode) or isinstance(node, LeafNode):
             return True  # Smoothness only applies to SumNodes
@@ -45,7 +44,7 @@ class Decomposability(Property):
     A circuit is decomposable if for every product node, the scopes of its children are disjoint.
     """
 
-    def check(self, node_id: int, circuit: SymbolicArithmeticCircuit) -> bool:
+    def check(self, node_id: int, circuit: "SymbolicArithmeticCircuit") -> bool:
         node = circuit.get_node_data(node_id)
         if isinstance(node, SumNode) or isinstance(node, LeafNode):
             return True  # Decomposability only applies to ProductNodes
@@ -56,7 +55,7 @@ class Decomposability(Property):
         child_scopes = [circuit.get_node_data(child_id).scope for child_id in children]
         for i in range(len(child_scopes)):
             for j in range(i + 1, len(child_scopes)):
-                if not child_scopes[i].intersection(child_scopes[j]).is_empty():
+                if not child_scopes[i].intersection(child_scopes[j]).is_empty:
                     return False
         return True
 
@@ -68,7 +67,7 @@ class Determinism(Property):
     A circuit is deterministic if for every sum node, the supports of its children are disjoint.
     """
 
-    def check(self, node_id: int, circuit: SymbolicArithmeticCircuit) -> bool:
+    def check(self, node_id: int, circuit: "SymbolicArithmeticCircuit") -> bool:
         node = circuit.get_node_data(node_id)
         if isinstance(node, ProductNode) or isinstance(node, LeafNode):
             return True  # Determinism only applies to SumNodes
@@ -98,7 +97,7 @@ class StructuredDecomposability(Property):
         self.cache: Dict[BitSet, bool] = {}
         self.cache_circuit: SymbolicArithmeticCircuit = None
 
-    def check(self, node_id: int, circuit: SymbolicArithmeticCircuit) -> bool:
+    def check(self, node_id: int, circuit: "SymbolicArithmeticCircuit") -> bool:
         node = circuit.get_node_data(node_id)
         if isinstance(node, SumNode) or isinstance(node, LeafNode):
             return True  # Structured decomposability only applies to ProductNodes

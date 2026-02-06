@@ -1,16 +1,15 @@
 import pytest
 
-from src.symbolic.arithmetic_circuit import (
-    ProductNode,
-    SumNode,
-    SymbolicArithmeticCircuit,
-)
-from src.symbolic.distributions import Distribution, GaussianDistribution
-from src.symbolic.properties import (
+from src.symbolic import (
     Decomposability,
     Determinism,
+    Distribution,
+    GaussianDistribution,
+    ProductNode,
     Smoothness,
     StructuredDecomposability,
+    SumNode,
+    SymbolicArithmeticCircuit,
 )
 from src.utils import BitSet, ContinuousInterval, Support
 

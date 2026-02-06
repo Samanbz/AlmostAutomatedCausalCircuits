@@ -1,35 +1,14 @@
-from typing import Any, Dict, List, Type
+from typing import TYPE_CHECKING, Any, Dict, List, Type
 
-from src.graph import DirectedAcyclicGraph, Node
+from src.graph import DirectedAcyclicGraph
 from src.utils import BitSet, Support
 
-
-class ArithmeticNode(Node):
-    """Represents an arithmetic operation node."""
-
-    def __init__(self, scope: BitSet):
-        self.scope = scope
-
-    def __repr__(self):
-        return f"{self.__class__.__name__}(scope={self.scope})"
+from .distributions import Distribution
+from .nodes import ArithmeticNode, LeafNode, ProductNode, SumNode
 
 
-class SumNode(ArithmeticNode):
-    """Represents a sum operation."""
-
-    pass
-
-
-class ProductNode(ArithmeticNode):
-    """Represents a product operation."""
-
-    pass
-
-
-class LeafNode(ArithmeticNode):
-    """Represents a leaf distribution (e.g., Gaussian) in the SPN."""
-
-    pass
+if TYPE_CHECKING:
+    from .properties import Property
 
 
 class SymbolicArithmeticCircuit(DirectedAcyclicGraph[int, ArithmeticNode, Any]):
@@ -40,12 +19,13 @@ class SymbolicArithmeticCircuit(DirectedAcyclicGraph[int, ArithmeticNode, Any]):
 
     # TODO: Should we maybe store support at the nodes and assign them top-down like scope?
     def get_support(self, node_id: int) -> Support:
-        from .distributions import Distribution  # avoid circular import
-
         if self.is_leaf(node_id):
             node = self.get_node_data(node_id)
             assert isinstance(node, Distribution), "Leaf nodes must be of type LeafNode"
-            return node.support
+            # FIXME: assuming distribution scope is a single variable, which we can, but it's not
+            # an elegant solution. Should later be refactored so that Distribution also has a
+            # support property of type Support, which also includes the scope.
+            return Support({node.scope.min(): node.support})
         children = self.get_children(node_id)
         support = Support()
         for child_id in children:
@@ -61,6 +41,13 @@ class SymbolicArithmeticCircuit(DirectedAcyclicGraph[int, ArithmeticNode, Any]):
             if isinstance(node, node_type) and node.scope == scope
         ]  # TODO: improve by using a top-down pruning search
 
+    def check_property(self, property: "Property") -> bool:
+        """Checks if the given property holds for the specified node."""
+        for node_id in self.topological_sort():
+            if not property.check(node_id, self):
+                return False
+        return True
+
     @property
     def node_config(self) -> Dict[type, Dict[str, Any]]:
         def leaf_label(node: LeafNode) -> str:
@@ -68,7 +55,6 @@ class SymbolicArithmeticCircuit(DirectedAcyclicGraph[int, ArithmeticNode, Any]):
             if hasattr(node, "scope"):
                 label += f"\n{sorted(node.scope)}"
             if hasattr(node, "support"):
-                # node: Distribution
                 label += f"\n{node.support}"
             return label
 
