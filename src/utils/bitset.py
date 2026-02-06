@@ -71,16 +71,17 @@ class BitSet:
     def __hash__(self) -> int:
         return hash(self._val)
 
-    def is_empty(self) -> bool:  # TODO: test
+    @property
+    def is_empty(self) -> bool:
         return self._val == 0
 
-    def min(self) -> int:  # TODO: test
-        if self.is_empty():
+    def min(self) -> int:
+        if self.is_empty:
             raise ValueError("BitSet is empty")
         return (self._val & -self._val).bit_length() - 1
 
     def max(self) -> int:  # TODO: test
-        if self.is_empty():
+        if self.is_empty:
             raise ValueError("BitSet is empty")
         return self._val.bit_length() - 1
 

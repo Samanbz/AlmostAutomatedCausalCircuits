@@ -142,13 +142,13 @@ class TestBitSet:
 
     def test_is_empty(self):
         bs = BitSet()
-        assert bs.is_empty()
+        assert bs.is_empty
 
         bs.add(1)
-        assert not bs.is_empty()
+        assert not bs.is_empty
 
         bs.remove(1)
-        assert bs.is_empty()
+        assert bs.is_empty
 
     def test_min_max(self):
         bs = BitSet([1, 5, 10])
