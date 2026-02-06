@@ -139,3 +139,37 @@ class TestBitSet:
 
         assert h_after != h_before
         assert h_after == hash(bs1)
+
+    def test_is_empty(self):
+        bs = BitSet()
+        assert bs.is_empty()
+
+        bs.add(1)
+        assert not bs.is_empty()
+
+        bs.remove(1)
+        assert bs.is_empty()
+
+    def test_min_max(self):
+        bs = BitSet([1, 5, 10])
+        assert bs.min() == 1
+        assert bs.max() == 10
+
+        bs = BitSet([3])
+        assert bs.min() == 3
+        assert bs.max() == 3
+
+        empty_bs = BitSet()
+        with pytest.raises(ValueError, match="BitSet is empty"):
+            empty_bs.min()
+        with pytest.raises(ValueError, match="BitSet is empty"):
+            empty_bs.max()
+
+    def test_repr(self):
+        bs = BitSet([1, 2])
+        # The list order in repr depends on iteration order which depends on bit significance
+        # BitSet iteration yields indices from LSB to MSB (0...N)
+        assert repr(bs) == "BitSet([1, 2])"
+
+        bs = BitSet()
+        assert repr(bs) == "BitSet([])"

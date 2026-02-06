@@ -71,6 +71,19 @@ class BitSet:
     def __hash__(self) -> int:
         return hash(self._val)
 
+    def is_empty(self) -> bool:  # TODO: test
+        return self._val == 0
+
+    def min(self) -> int:  # TODO: test
+        if self.is_empty():
+            raise ValueError("BitSet is empty")
+        return (self._val & -self._val).bit_length() - 1
+
+    def max(self) -> int:  # TODO: test
+        if self.is_empty():
+            raise ValueError("BitSet is empty")
+        return self._val.bit_length() - 1
+
     def union(self, other: "BitSet") -> "BitSet":
         if not isinstance(other, BitSet):
             return NotImplemented
@@ -116,5 +129,7 @@ class BitSet:
         n_bytes = (size + 7) // 8
         val = self._val & ((1 << size) - 1)
         bytes_val = val.to_bytes(n_bytes, byteorder="little")
-        bits = np.unpackbits(np.frombuffer(bytes_val, dtype=np.uint8), bitorder="little")
+        bits = np.unpackbits(
+            np.frombuffer(bytes_val, dtype=np.uint8), bitorder="little"
+        )
         return bits[:size].view(bool)
