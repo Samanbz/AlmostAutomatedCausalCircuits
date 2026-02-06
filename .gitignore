@@ -10,6 +10,12 @@ env/
 .venv/
 .env/
 
+# VS Code settings
+.vscode/
+
+# Github settings
+.github/
+
 # jupyter Notebook checkpoints
 .ipynb_checkpoints/
 
