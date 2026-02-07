@@ -1,9 +1,8 @@
 from typing import TYPE_CHECKING, Any, Dict, List, Type
 
 from src.graph import DirectedAcyclicGraph
-from src.utils import BitSet, Support
+from src.utils import BitSet
 
-from .distributions import Distribution
 from .nodes import ArithmeticNode, LeafNode, ProductNode, SumNode
 
 
@@ -16,22 +15,6 @@ class SymbolicArithmeticCircuit(DirectedAcyclicGraph[int, ArithmeticNode, Any]):
     A DAG representing a symbolic arithmetic circuit.
     Nodes are identified by integers and contain Node objects (SumNode, ProductNode, etc.).
     """
-
-    # TODO: Should we maybe store support at the nodes and assign them top-down like scope?
-    def get_support(self, node_id: int) -> Support:
-        if self.is_leaf(node_id):
-            node = self.get_node_data(node_id)
-            assert isinstance(node, Distribution), "Leaf nodes must be of type LeafNode"
-            # FIXME: assuming distribution scope is a single variable, which we can, but it's not
-            # an elegant solution. Should later be refactored so that Distribution also has a
-            # support property of type Support, which also includes the scope.
-            return Support({node.scope.min(): node.support})
-        children = self.get_children(node_id)
-        support = Support()
-        for child_id in children:
-            child_support = self.get_support(child_id)
-            support = support.union(child_support)
-        return support
 
     def get_nodes_with_scope(self, scope: BitSet, node_type: Type[ArithmeticNode]) -> List[int]:
         """Returns a list of node IDs that have the given scope and are of the specified type."""
@@ -54,8 +37,9 @@ class SymbolicArithmeticCircuit(DirectedAcyclicGraph[int, ArithmeticNode, Any]):
             label = "Leaf"
             if hasattr(node, "scope"):
                 label += f"\n{sorted(node.scope)}"
-            if hasattr(node, "support"):
-                label += f"\n{node.support}"
+            if hasattr(node, "var_support"):
+                # node: Distribution
+                label += f"\n{node.var_support}"
             return label
 
         return {

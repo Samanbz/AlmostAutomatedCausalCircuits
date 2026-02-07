@@ -32,8 +32,8 @@ def get_random_constraints(
         left_dist, right_dist = dist.split_at(rand_cut_point)
         if random.random() < 0.5:
             left_dist, right_dist = right_dist, left_dist
-        constraints.add(var_idx, left_dist.support)
-        r_constraints.add(var_idx, right_dist.support)
+        constraints.add(var_idx, left_dist.var_support)
+        r_constraints.add(var_idx, right_dist.var_support)
 
     return constraints, r_constraints
 
@@ -279,7 +279,11 @@ def construct_spn_from_region_graph(
     circuit = SymbolicArithmeticCircuit()
 
     rg_root = rg.get_node_data(rg.get_roots()[0])
-    ac_root = SumNode(scope=rg_root.scope)
+    ac_root = SumNode(
+        support=Support({var: input_dists[var].var_support for var in rg_root.scope}).intersect(
+            rg_root.constraints
+        )
+    )
 
     circuit.add_node(0, ac_root)
 
@@ -314,14 +318,22 @@ def construct_spn_from_region_graph(
                     circuit.add_edge(p_ac_id, leaf_id)
             else:
                 # Create SumNode for inner RegionNode
-                region_ac_node = SumNode(scope=r_node.scope)
+                region_ac_node = SumNode(
+                    support=Support(
+                        {var: input_dists[var].var_support for var in r_node.scope}
+                    ).intersect(r_node.constraints)
+                )
                 region_ac_id = next_id()
                 circuit.add_node(region_ac_id, region_ac_node)
                 circuit.add_edge(p_ac_id, region_ac_id)
                 rg_node_to_ac_node[r_id] = region_ac_id
 
         elif isinstance(r_node, DataPartitionNode):
-            partition_ac_node = ProductNode(scope=r_node.scope)
+            partition_ac_node = ProductNode(
+                support=Support(
+                    {var: input_dists[var].var_support for var in r_node.scope}
+                ).intersect(r_node.constraints)
+            )
             partition_ac_id = next_id()
             circuit.add_node(partition_ac_id, partition_ac_node)
 
@@ -380,3 +392,5 @@ def construct_spn_from_region_graph(
 
 # Next steps: apply constraints to input dists and sample cut-points from them
 # Then, implement the SPN construction from the region grapht
+
+# NEXT: refactor so that nodes store support instead of scope, which then stores scope implicitly.

@@ -1,17 +1,19 @@
-from typing import Any
-
 from src.graph import Node
-from src.utils import BitSet
+from src.utils import BitSet, Support
 
 
 class ArithmeticNode(Node):
     """Represents an arithmetic operation node."""
 
-    def __init__(self, scope: BitSet):
-        self.scope = scope
+    def __init__(self, support: Support):
+        self.support = support
+
+    @property
+    def scope(self) -> BitSet:
+        return self.support.scope
 
     def __repr__(self):
-        return f"{self.__class__.__name__}(scope={self.scope})"
+        return f"{self.__class__.__name__}(scope={self.support.scope})"
 
 
 class SumNode(ArithmeticNode):

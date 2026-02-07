@@ -14,6 +14,10 @@ class Support:
     def get(self, var: int) -> Interval:
         return self.intervals.get(var, None)
 
+    @property
+    def scope(self) -> BitSet:
+        return BitSet(self.intervals.keys())
+
     def intersect(self, other: "Support") -> "Support":
         new_intervals = {}
         for var, interval in self.intervals.items():

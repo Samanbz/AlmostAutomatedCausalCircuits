@@ -4,7 +4,7 @@ from typing import Any, List, Optional
 import numpy as np
 from scipy import stats
 
-from src.utils import BitSet, ContinuousInterval, DiscreteInterval, Interval
+from src.utils import ContinuousInterval, DiscreteInterval, Interval, Support
 
 from .nodes import LeafNode
 
@@ -12,12 +12,10 @@ from .nodes import LeafNode
 class Distribution(LeafNode, ABC):
     """Base class for probability distributions used as leaves in SPNs."""
 
-    support: Interval
-    scope: BitSet
-
-    def __init__(self, scope: BitSet, support: Interval):
-        super().__init__(scope)
-        self.support = support
+    def __init__(self, var: int, var_support: Interval):
+        super().__init__(Support({var: var_support}))
+        self.var = var
+        self.var_support = var_support
 
     @abstractmethod
     def sample(self) -> Any:
@@ -38,8 +36,8 @@ class Distribution(LeafNode, ABC):
 class GaussianDistribution(Distribution):
     """Represents a Gaussian distribution leaf node."""
 
-    def __init__(self, scope: BitSet, mean: float, stddev: float):
-        super().__init__(scope, ContinuousInterval.infinite())
+    def __init__(self, var: int, mean: float, stddev: float):
+        super().__init__(var, ContinuousInterval(float("-inf"), float("inf")))
         self.mean = mean
         self.stddev = stddev
 
@@ -51,26 +49,26 @@ class GaussianDistribution(Distribution):
         self, cut_point: float
     ) -> tuple["TruncatedGaussianDistribution", "TruncatedGaussianDistribution"]:
         """Split the Gaussian at a cut point, returning two truncated Gaussians."""
-        left_support, right_support = self.support.split_at(cut_point)
-        left_dist = TruncatedGaussianDistribution(self.scope, self, left_support)
-        right_dist = TruncatedGaussianDistribution(self.scope, self, right_support)
+        left_support, right_support = self.var_support.split_at(cut_point)
+        left_dist = TruncatedGaussianDistribution(self.var, self, left_support)
+        right_dist = TruncatedGaussianDistribution(self.var, self, right_support)
         return left_dist, right_dist
 
     def constrain_to(self, interval: Optional[ContinuousInterval]) -> "TruncatedDistribution":
         """Return a truncated Gaussian distribution constrained to the given interval."""
         if interval is None:
             return self
-        return TruncatedGaussianDistribution(self.scope, self, interval)
+        return TruncatedGaussianDistribution(self.var, self, interval)
 
     def __repr__(self):
-        return f"GaussianDistribution(scope={self.scope}, mean={self.mean}, stddev={self.stddev})"
+        return f"GaussianDistribution(var={self.var}, mean={self.mean}, stddev={self.stddev})"
 
 
 class CategoricalDistribution(Distribution):
     """Represents a Categorical distribution leaf node."""
 
-    def __init__(self, scope: BitSet, categories: List[Any], probabilities: List[float]):
-        super().__init__(scope, DiscreteInterval(range(len(categories))))
+    def __init__(self, var: int, categories: List[Any], probabilities: List[float]):
+        super().__init__(var, DiscreteInterval(range(len(categories))))
         self.categories = categories
         self.probabilities = probabilities
 
@@ -82,26 +80,26 @@ class CategoricalDistribution(Distribution):
         self, cut_point: Any
     ) -> tuple["TruncatedCategoricalDistribution", "TruncatedCategoricalDistribution"]:
         """Split the categorical distribution at a cut point."""
-        left_support, right_support = self.support.split_at(cut_point)
-        left_dist = TruncatedCategoricalDistribution(self.scope, self, left_support)
-        right_dist = TruncatedCategoricalDistribution(self.scope, self, right_support)
+        left_support, right_support = self.var_support.split_at(cut_point)
+        left_dist = TruncatedCategoricalDistribution(self.var, self, left_support)
+        right_dist = TruncatedCategoricalDistribution(self.var, self, right_support)
         return left_dist, right_dist
 
     def constrain_to(self, interval: Optional[DiscreteInterval]) -> "TruncatedDistribution":
         """Return a truncated categorical distribution constrained to the given interval."""
         if interval is None:
             return self
-        return TruncatedCategoricalDistribution(self.scope, self, interval)
+        return TruncatedCategoricalDistribution(self.var, self, interval)
 
     def __repr__(self):
-        return f"CategoricalDistribution(scope={self.scope}, categories={self.categories}, probabilities={self.probabilities})"
+        return f"CategoricalDistribution(var={self.var}, categories={self.categories}, probabilities={self.probabilities})"
 
 
 class UniformDistribution(Distribution):
     """Represents a Uniform distribution leaf node."""
 
-    def __init__(self, scope: BitSet, low: float, high: float):
-        super().__init__(scope, ContinuousInterval(low, high))
+    def __init__(self, var: int, low: float, high: float):
+        super().__init__(var, ContinuousInterval(low, high))
         self.low = low
         self.high = high
 
@@ -113,19 +111,19 @@ class UniformDistribution(Distribution):
         self, cut_point: float
     ) -> tuple["TruncatedUniformDistribution", "TruncatedUniformDistribution"]:
         """Split the uniform distribution at a cut point."""
-        left_support, right_support = self.support.split_at(cut_point)
-        left_dist = TruncatedUniformDistribution(self.scope, self, left_support)
-        right_dist = TruncatedUniformDistribution(self.scope, self, right_support)
+        left_support, right_support = self.var_support.split_at(cut_point)
+        left_dist = TruncatedUniformDistribution(self.var, self, left_support)
+        right_dist = TruncatedUniformDistribution(self.var, self, right_support)
         return left_dist, right_dist
 
     def constrain_to(self, interval: Optional[ContinuousInterval]) -> "TruncatedDistribution":
         """Return a truncated uniform distribution constrained to the given interval."""
         if interval is None:
             return self
-        return TruncatedUniformDistribution(self.scope, self, interval)
+        return TruncatedUniformDistribution(self.var, self, interval)
 
     def __repr__(self):
-        return f"UniformDistribution(scope={self.scope}, low={self.low}, high={self.high})"
+        return f"UniformDistribution(var={self.var}, low={self.low}, high={self.high})"
 
 
 class TruncatedDistribution(Distribution):
@@ -134,15 +132,15 @@ class TruncatedDistribution(Distribution):
     Uses rejection sampling by default.
     """
 
-    def __init__(self, scope: BitSet, base_distribution: Distribution, support: Interval):
-        super().__init__(scope, support)
+    def __init__(self, var: int, base_distribution: Distribution, var_support: Interval):
+        super().__init__(var, var_support)
         self.base_distribution = base_distribution
 
     def sample(self, max_attempts: int = 1000) -> Any:
         """Sample from base distribution using rejection sampling."""
         for _ in range(max_attempts):
             value = self.base_distribution.sample()
-            if self.support.contains(value):
+            if self.var_support.contains(value):
                 return value
         raise ValueError(
             f"Failed to sample from TruncatedDistribution after {max_attempts} attempts. "
@@ -151,20 +149,20 @@ class TruncatedDistribution(Distribution):
 
     def split_at(self, cut_point: Any) -> tuple["TruncatedDistribution", "TruncatedDistribution"]:
         """Further split the truncated distribution at a cut point."""
-        left_support, right_support = self.support.split_at(cut_point)
-        left_dist = self.__class__(self.scope, self.base_distribution, left_support)
-        right_dist = self.__class__(self.scope, self.base_distribution, right_support)
+        left_support, right_support = self.var_support.split_at(cut_point)
+        left_dist = self.__class__(self.var, self.base_distribution, left_support)
+        right_dist = self.__class__(self.var, self.base_distribution, right_support)
         return left_dist, right_dist
 
     def constrain_to(self, interval: Optional[Interval]) -> "TruncatedDistribution":
         """Return a further truncated distribution constrained to the given interval."""
         if interval is None:
             return self
-        new_support = self.support.intersect(interval)
-        return self.__class__(self.scope, self.base_distribution, new_support)
+        new_support = self.var_support.intersect(interval)
+        return self.__class__(self.var, self.base_distribution, new_support)
 
     def __repr__(self):
-        return f"TruncatedDistribution(scope={self.scope}, base={self.base_distribution}, support={self.support})"
+        return f"TruncatedDistribution(var={self.var}, base={self.base_distribution}, support={self.var_support})"
 
 
 class TruncatedGaussianDistribution(TruncatedDistribution):
@@ -175,11 +173,11 @@ class TruncatedGaussianDistribution(TruncatedDistribution):
 
     def __init__(
         self,
-        scope: BitSet,
+        var: int,
         base_distribution: GaussianDistribution,
         support: ContinuousInterval,
     ):
-        super().__init__(scope, base_distribution, support)
+        super().__init__(var, base_distribution, support)
         if not isinstance(base_distribution, GaussianDistribution):
             raise TypeError("Base distribution must be GaussianDistribution")
         if not isinstance(support, ContinuousInterval):
@@ -190,13 +188,13 @@ class TruncatedGaussianDistribution(TruncatedDistribution):
     def sample(self) -> float:
         """Sample from truncated Gaussian using scipy.stats.truncnorm."""
         # Convert bounds to standardized form for truncnorm
-        self.support: ContinuousInterval
-        a = (self.support.low - self.mean) / self.stddev
-        b = (self.support.high - self.mean) / self.stddev
+        self.var_support: ContinuousInterval
+        a = (self.var_support.low - self.mean) / self.stddev
+        b = (self.var_support.high - self.mean) / self.stddev
         return stats.truncnorm.rvs(a, b, loc=self.mean, scale=self.stddev)
 
     def __repr__(self):
-        return f"TruncatedGaussianDistribution(scope={self.scope}, mean={self.mean}, stddev={self.stddev}, support={self.support})"
+        return f"TruncatedGaussianDistribution(var={self.var}, mean={self.mean}, stddev={self.stddev}, support={self.var_support})"
 
 
 class TruncatedUniformDistribution(TruncatedDistribution):
@@ -207,11 +205,11 @@ class TruncatedUniformDistribution(TruncatedDistribution):
 
     def __init__(
         self,
-        scope: BitSet,
+        var: int,
         base_distribution: UniformDistribution,
         support: ContinuousInterval,
     ):
-        super().__init__(scope, base_distribution, support)
+        super().__init__(var, base_distribution, support)
         if not isinstance(base_distribution, UniformDistribution):
             raise TypeError("Base distribution must be UniformDistribution")
         if not isinstance(support, ContinuousInterval):
@@ -219,11 +217,11 @@ class TruncatedUniformDistribution(TruncatedDistribution):
 
     def sample(self) -> float:
         """Sample uniformly from the truncated interval."""
-        self.support: ContinuousInterval
-        return np.random.uniform(self.support.low, self.support.high)
+        self.var_support: ContinuousInterval
+        return np.random.uniform(self.var_support.low, self.var_support.high)
 
     def __repr__(self):
-        return f"TruncatedUniformDistribution(scope={self.scope}, support={self.support})"
+        return f"TruncatedUniformDistribution(var={self.var}, support={self.var_support})"
 
 
 class TruncatedCategoricalDistribution(TruncatedDistribution):
@@ -234,11 +232,11 @@ class TruncatedCategoricalDistribution(TruncatedDistribution):
 
     def __init__(
         self,
-        scope: BitSet,
+        var: int,
         base_distribution: CategoricalDistribution,
         support: DiscreteInterval,
     ):
-        super().__init__(scope, base_distribution, support)
+        super().__init__(var, base_distribution, support)
         if not isinstance(base_distribution, CategoricalDistribution):
             raise TypeError("Base distribution must be CategoricalDistribution")
         if not isinstance(support, DiscreteInterval):
@@ -248,7 +246,7 @@ class TruncatedCategoricalDistribution(TruncatedDistribution):
         self.categories = []
         self.probabilities = []
         for cat, prob in zip(base_distribution.categories, base_distribution.probabilities):
-            if support.contains(cat):
+            if self.var_support.contains(cat):
                 self.categories.append(cat)
                 self.probabilities.append(prob)
 
@@ -264,4 +262,4 @@ class TruncatedCategoricalDistribution(TruncatedDistribution):
         return np.random.choice(self.categories, p=self.probabilities)
 
     def __repr__(self):
-        return f"TruncatedCategoricalDistribution(scope={self.scope}, categories={self.categories}, probabilities={self.probabilities})"
+        return f"TruncatedCategoricalDistribution(var={self.var}, categories={self.categories}, probabilities={self.probabilities})"

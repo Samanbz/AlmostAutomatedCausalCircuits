@@ -75,7 +75,7 @@ class Determinism(Property):
         children = circuit.get_children(node_id)
 
         # Check if supports of children are disjoint
-        child_supports = [circuit.get_support(child_id) for child_id in children]
+        child_supports = [circuit.get_node_data(child_id).support for child_id in children]
         for i in range(len(child_supports)):
             for j in range(i + 1, len(child_supports)):
                 if not child_supports[i].intersect(child_supports[j]).is_empty:
