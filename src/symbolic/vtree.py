@@ -18,8 +18,6 @@ class VNode(Node):
 class VTree(BinaryTree[int, VNode, None]):
     """A variable tree (vtree) represented as a directed acyclic graph."""
 
-    # TODO: Does it make sense to have a Tree class that VTree can inherit from? Does assuming tree properties (e.g. a node has at most one parent) help?
-
     @property
     def node_config(self) -> Dict[type, Dict[str, Any]]:
         return {
