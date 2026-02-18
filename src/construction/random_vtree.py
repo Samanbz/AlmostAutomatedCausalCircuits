@@ -5,11 +5,11 @@ from src.symbolic.vtree import VNode, VTree
 from src.utils import BitSet
 
 
-def construct_random_vtree(num_vars: int, conj_len: Optional[int] = None) -> VTree:
+def construct_random_vtree(vars: set[int], conj_len: Optional[int] = None) -> VTree:
     """Constructs a random binary variable tree (vtree) for the given number of variables.
 
     Args:
-        num_vars (int): The number of variables.
+        vars (set[int]): The set of variables.
         conj_len (Optional[int]): The number of variables to consider at each split. If None, is sampled randomly at each split.
     """
 
@@ -27,7 +27,7 @@ def construct_random_vtree(num_vars: int, conj_len: Optional[int] = None) -> VTr
 
     vt = VTree()
 
-    ordering = list(range(num_vars))
+    ordering = list(vars)
     random.shuffle(ordering)
 
     root_scope = BitSet(ordering)
