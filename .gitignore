@@ -25,6 +25,7 @@ data/
 *.tsv
 *.h5
 *.parquet
+*.html
 
 papers/
 *.gv
