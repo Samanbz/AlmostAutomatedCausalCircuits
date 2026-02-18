@@ -6,6 +6,7 @@ from .arithmetic import (
     Distribution,
     GaussianDistribution,
     LeafNode,
+    MarginalDeterminism,
     ProductNode,
     Smoothness,
     StructuredDecomposability,
@@ -25,7 +26,7 @@ from .data_region_graph import (
 )
 from .region_graph import PartitionNode, RegionGraph, RegionGraphNode, RegionNode
 from .scm import AdditiveNoiseMechanism, Mechanism, StructuralCausalModel
-from .vtree import VNode, VTree
+from .vtree import MDVNode, MDVTree, VNode, VTree
 
 
 __all__ = [
@@ -33,8 +34,11 @@ __all__ = [
     "Decomposability",
     "Determinism",
     "StructuredDecomposability",
+    "MarginalDeterminism",
     "VTree",
     "VNode",
+    "MDVTree",
+    "MDVNode",
     "Distribution",
     "CategoricalDistribution",
     "GaussianDistribution",

@@ -13,6 +13,7 @@ from .nodes import ArithmeticNode, LeafNode, ProductNode, SumNode
 from .properties import (
     Decomposability,
     Determinism,
+    MarginalDeterminism,
     Property,
     Smoothness,
     StructuredDecomposability,
@@ -38,4 +39,5 @@ __all__ = [
     "Decomposability",
     "Determinism",
     "StructuredDecomposability",
+    "MarginalDeterminism",
 ]

@@ -149,8 +149,46 @@ class Compatibility(Property):
 
 
 class MarginalDeterminism(Property):
+    """
+    Represents the property of marginal determinism for arithmetic circuits.
+
+    A circuit is marginal deterministic with respect to a subset Q ⊆ V if for every sum node T:
+    - The restricted scope φ_Q(T) is empty (i.e., NO overlap between node scope and Q).
+    - The sum node T is Q-deterministic (children have disjoint marginalized supports on Q).
+    """
+
     def __init__(self, target_scope: BitSet):
         self.target_scope = target_scope
 
-    # TODO
-    pass
+    def check(self, node_id: int, circuit: "SymbolicArithmeticCircuit") -> bool:
+        node = circuit.get_node_data(node_id)
+
+        # Marginal determinism applies only to SumNodes
+        if isinstance(node, ProductNode) or isinstance(node, LeafNode):
+            return True
+
+        # Check condition 1: Restricted scope, no overlap with Q
+        if node.scope.intersection(self.target_scope).is_empty:
+            return True
+
+        # Check condition 2: The sum node T is Q-deterministic.
+        # This means children have distinct marginalized supports on Q.
+        children = circuit.get_children(node_id)
+        child_marginalized_supports = []
+
+        # Project each child's support onto Q.
+        for child_id in children:
+            child_node = circuit.get_node_data(child_id)
+            marginal_support = child_node.support.filter_by_vars(self.target_scope)
+            child_marginalized_supports.append(marginal_support)
+
+        for i in range(len(child_marginalized_supports)):
+            for j in range(i + 1, len(child_marginalized_supports)):
+                s1 = child_marginalized_supports[i]
+                s2 = child_marginalized_supports[j]
+
+                intersection = s1.intersect(s2)
+                if not intersection.is_empty:
+                    return False
+
+        return True
