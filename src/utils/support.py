@@ -43,6 +43,15 @@ class Support:
         return Support(new_intervals)
 
     def filter_by_vars(self, vars: BitSet) -> "Support":
+        """
+        Returns a new Support object containing only the intervals for the variables in the given BitSet.
+
+        :param vars: A BitSet representing the variables to keep in the support.
+        Variables not in this set will be removed from the resulting Support.
+        :type vars: BitSet
+        :return: A new Support object with intervals only for the specified variables.
+        :rtype: Support
+        """
         new_intervals = {var: interval for var, interval in self.intervals.items() if var in vars}
         return Support(new_intervals)
 
