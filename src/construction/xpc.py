@@ -9,6 +9,7 @@ from src.symbolic import (
     DataRegionGraph,
     DataRegionNode,
     Distribution,
+    MDVTree,
     ProductNode,
     SumNode,
     SymbolicArithmeticCircuit,
@@ -161,7 +162,7 @@ def construct_random_data_region_graph(
     min_examples: int,
     split_arity: int,
     var_decomp: VTree,
-) -> Tuple[DataRegionGraph, List[int]]:
+) -> DataRegionGraph:
     assert split_arity >= 2, "Split arity must be at least 2."
     assert data.ndim == 2, "Data must be a 2D array."
     assert var_decomp is not None, "Variable decomposition (VTree) is required."
@@ -264,6 +265,104 @@ def construct_random_data_region_graph(
     return rg
 
 
+def construct_random_md_data_region_graph(
+    data: np.ndarray,
+    input_dists: Dict[int, Distribution],
+    min_examples: int,
+    split_arity: int,
+    md_var_decomp: MDVTree,
+) -> DataRegionGraph:
+    assert split_arity >= 2, "Split arity must be at least 2."
+    assert data.ndim == 2, "Data must be a 2D array."
+    assert md_var_decomp is not None, (
+        "Marginal deterministic variable decomposition (MDVTree) is required."
+    )
+
+    node_counter = 0
+
+    def next_id():
+        nonlocal node_counter
+        nid = node_counter
+        node_counter += 1
+        return nid
+
+    rg = DataRegionGraph()
+    num_rows, num_cols = data.shape
+
+    root_region = DataRegionNode(scope=BitSet.full(num_cols), row_ids=BitSet.full(num_rows))
+    root_id = next_id()
+    rg.add_node(root_id, root_region)
+
+    # Map DataRegionNode ID -> VTree Node ID
+    rg_nid_to_md_vid: Dict[int, int] = {root_id: md_var_decomp.get_root()}
+
+    def partition_recursive(r_id: int):
+        r_node = rg.get_node_data(r_id)
+        md_vid = rg_nid_to_md_vid[r_id]
+        md_vnode = md_var_decomp.get_node_data(md_vid)
+        if md_var_decomp.is_leaf(md_vid):
+            return  # No further partitioning needed
+
+        current_data_slice = r_node.get_data_slice(data)
+        current_constraints = r_node.constraints
+        constrainted_input_dists = {
+            var: dist.constrain_to(current_constraints[var]) if var in current_constraints else dist
+            for var, dist in input_dists.items()
+        }
+
+        data_slices = partition_randomly(
+            data_slice=current_data_slice,
+            conj_vars=md_vnode.md_set,
+            split_arity=split_arity,
+            min_examples=min_examples,
+            input_dists=constrainted_input_dists,
+        )
+
+        for data_slice in data_slices:
+            l_md_child_id, r_md_child_id = md_var_decomp.get_children_pair(
+                md_vid
+            )  # Guaranteed to be truthy since md_vid is not a leaf
+            l_md_child = md_var_decomp.get_node_data(l_md_child_id)
+            r_md_child = md_var_decomp.get_node_data(r_md_child_id)
+
+            p_node_id = next_id()
+            p_node = DataPartitionNode(
+                scope=md_vnode.scope,
+                row_ids=data_slice.row_ids,
+                constraints=data_slice.constraints,
+            )
+            rg.add_node(p_node_id, p_node)
+
+            l_r_node_id = next_id()
+            l_r_node = DataRegionNode(
+                scope=l_md_child.scope,
+                row_ids=data_slice.row_ids,
+                constraints=data_slice.constraints,
+            )
+            rg.add_node(l_r_node_id, l_r_node)
+            rg_nid_to_md_vid[l_r_node_id] = l_md_child_id
+
+            r_r_node_id = next_id()
+            r_r_node = DataRegionNode(
+                scope=r_md_child.scope,
+                row_ids=data_slice.row_ids,
+                constraints=data_slice.constraints,
+            )
+            rg.add_node(r_r_node_id, r_r_node)
+            rg_nid_to_md_vid[r_r_node_id] = r_md_child_id
+
+            rg.add_edge(p_node_id, l_r_node_id)
+            rg.add_edge(p_node_id, r_r_node_id)
+
+            rg.add_edge(r_id, p_node_id)
+
+            partition_recursive(l_r_node_id)
+            partition_recursive(r_r_node_id)
+
+    partition_recursive(root_id)
+    return rg
+
+
 def construct_spn_from_region_graph(
     rg: DataRegionGraph,
     input_dists: Dict[int, Distribution],
@@ -354,43 +453,3 @@ def construct_spn_from_region_graph(
             raise ValueError(f"Unknown region graph node type: {type(r_node)}")
 
     return circuit
-
-
-# DONE:
-# 1. Allow for usage of fixed random ordering of variables when splitting, return this fixed ordering as well.
-# 2. Implement construct_spn_from_region_graph
-#   a. Pass down input distributions corresponding to current scope, which get truncated at partitioned nodes based on their constraints
-
-# TODO:
-#   b. At leaf nodes, create leaf distributions with truncated input distributions, turn early-stopped regions into chow-liu trees?
-# 3. Implement methods/utilities for checking structural and support properties of an Arithmetic Circuit
-# 4. Verify that the constructed AC is S, DEC, SD, DET
-# 5. Implement algorithm for multiplying two compatible ACs together, verify that product of two DET ACs is still DET
-
-
-# Questions:
-# 1. Does the Circuit really have to be compatible to a Comb VTree? Or can it just be any VTree?
-# If we go past a comb tree it would mean that the regions invloving the conj_vars can be split further,
-# meaning the constraints involved in a region node with conj_vars are not minimal.
-# Is this true for indicator leaves? Is this false for distribution leaves?
-# This would mean conj_vars needs to shrink with depth and that any VTree is valid
-# So we need the main function to accept a VTree and the XPC function to accept a Comb VTree!
-# Still the VTree will be a binary tree regardless and the left child will always be the conj_vars,
-# the difference being that the left child can have further children as well, and that the VTree can be more balanced.
-# What do we call this new circuit construction algorithm then? XPC uses Comb VTrees (and assumes indicator leaves,
-# which for us means once-truncated distributions)
-
-# 2. How to elegantly pass down distributions? This is needed for constructing the actual SPN from the region graph,
-# as well as effectively splitting the data, as we need to know the input distributions to sample new constraints that make sense.
-# This would potentially improve the splits and reduce the number of failed attempts at splitting.
-# This means we don't just pass down the constraints during construction, but also the truncated distributions? hm...
-# Or perhaps we can just pass down the constraints and *apply* them to the original distributions when needed? I think this is better.
-# It's clear then, during compilation to a SPN, when we reach a Region Node with constraints, it must be a (potentially naive product of) truncated distribution(s).
-# The question that remains is, if we follow this general VTree approach (ie not comb tree), will there be any Region Nodes without constraints? I think so...
-# I need a more theoretical understanding and guarantees about this new construction process.
-
-
-# Next steps: apply constraints to input dists and sample cut-points from them
-# Then, implement the SPN construction from the region grapht
-
-# NEXT: refactor so that nodes store support instead of scope, which then stores scope implicitly.
