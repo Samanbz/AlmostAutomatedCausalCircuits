@@ -5,6 +5,51 @@ from src.utils.bitset import BitSet
 
 
 class TestBitSet:
+    def test_universal(self):
+        u = BitSet.universal()
+
+        # Membership
+        assert 0 in u
+        assert 100 in u
+        assert 100000 in u
+
+        # Length and iteration should fail
+        with pytest.raises(OverflowError, match="(?i)infinite set"):
+            len(u)
+
+        # iter(u) just returns a generator, doesn't execute code yet.
+        # We need to try to consume it to trigger the error.
+        with pytest.raises(OverflowError, match="(?i)infinite set"):
+            next(iter(u))
+
+        with pytest.raises(OverflowError, match="(?i)infinite set"):
+            list(u)
+
+        # Operations
+        bs = BitSet([1, 2, 3])
+
+        # Union with universal is universal
+        assert u.union(bs) == u
+        assert bs.union(u) == u
+
+        # Intersection with universal is the set itself
+        assert u.intersection(bs) == bs
+        assert bs.intersection(u) == bs
+
+        # Difference
+        # bs - u = empty
+        assert bs.difference(u).is_empty
+
+        # u - bs = infinite set (all ints except 1, 2, 3)
+        diff = u.difference(bs)
+        assert 0 in diff
+        assert 1 not in diff
+        assert 2 not in diff
+        assert 3 not in diff
+        assert 4 in diff
+        with pytest.raises(OverflowError):
+            len(diff)
+
     def test_init_empty(self):
         bs = BitSet()
         assert len(bs) == 0

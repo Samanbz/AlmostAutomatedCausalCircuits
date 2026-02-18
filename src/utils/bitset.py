@@ -34,6 +34,11 @@ class BitSet:
         val = (1 << size) - 1 if size > 0 else 0
         return cls.from_int(val)
 
+    @classmethod
+    def universal(cls) -> "BitSet":
+        """Returns a BitSet representing the universal set (all integers)."""
+        return cls.from_int(-1)
+
     def add(self, element: int):
         self._val |= 1 << int(element)
 
@@ -50,6 +55,8 @@ class BitSet:
         return bool((self._val >> int(element)) & 1)
 
     def __iter__(self):
+        if self._val < 0:
+            raise OverflowError("Cannot iterate over infinite set")
         v = self._val
         while v:
             lsb = v & -v
@@ -58,10 +65,12 @@ class BitSet:
             v ^= lsb
 
     def __len__(self) -> int:
+        if self._val < 0:
+            raise OverflowError("Infinite set has no length")
         return self._val.bit_count()
 
     def __repr__(self) -> str:
-        return f"BitSet({list(self)})"
+        return f"BitSet({list(self) if self._val >= 0 else 'Univ.'})"
 
     def __eq__(self, other) -> bool:
         if isinstance(other, BitSet):
@@ -75,6 +84,11 @@ class BitSet:
     def is_empty(self) -> bool:
         return self._val == 0
 
+    @property
+    def is_universal(self) -> bool:
+        return self._val == -1
+
+    @property
     def min(self) -> int:
         if self.is_empty:
             raise ValueError("BitSet is empty")
@@ -130,7 +144,5 @@ class BitSet:
         n_bytes = (size + 7) // 8
         val = self._val & ((1 << size) - 1)
         bytes_val = val.to_bytes(n_bytes, byteorder="little")
-        bits = np.unpackbits(
-            np.frombuffer(bytes_val, dtype=np.uint8), bitorder="little"
-        )
+        bits = np.unpackbits(np.frombuffer(bytes_val, dtype=np.uint8), bitorder="little")
         return bits[:size].view(bool)
