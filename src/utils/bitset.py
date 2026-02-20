@@ -94,7 +94,8 @@ class BitSet:
             raise ValueError("BitSet is empty")
         return (self._val & -self._val).bit_length() - 1
 
-    def max(self) -> int:  # TODO: test
+    @property
+    def max(self) -> int:
         if self.is_empty:
             raise ValueError("BitSet is empty")
         return self._val.bit_length() - 1

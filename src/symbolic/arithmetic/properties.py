@@ -122,7 +122,7 @@ class StructuredDecomposability(Property):
 
         # Enforce an ordering on the child scopes. Since node is decomposable, child scopes are
         # disjoint, so this works reliably.
-        node_child_scopes.sort(key=lambda s: s.min())
+        node_child_scopes.sort(key=lambda s: s.min)
         for prod_node_id in prod_node_ids:
             if prod_node_id == node_id:
                 continue  # Skip self
@@ -131,7 +131,7 @@ class StructuredDecomposability(Property):
             prod_child_scopes = [
                 circuit.get_node_data(child_id).scope for child_id in prod_children
             ]
-            prod_child_scopes.sort(key=lambda s: s.min())
+            prod_child_scopes.sort(key=lambda s: s.min)
 
             if node_child_scopes != prod_child_scopes:
                 self.cache[node.scope] = False

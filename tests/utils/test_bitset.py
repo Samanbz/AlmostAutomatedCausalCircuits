@@ -197,12 +197,12 @@ class TestBitSet:
 
     def test_min_max(self):
         bs = BitSet([1, 5, 10])
-        assert bs.min() == 1
-        assert bs.max() == 10
+        assert bs.min == 1
+        assert bs.max == 10
 
         bs = BitSet([3])
-        assert bs.min() == 3
-        assert bs.max() == 3
+        assert bs.min == 3
+        assert bs.max == 3
 
         empty_bs = BitSet()
         with pytest.raises(ValueError, match="BitSet is empty"):
