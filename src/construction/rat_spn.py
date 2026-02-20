@@ -2,6 +2,7 @@ import random
 from typing import Dict, List
 
 from src.symbolic import (
+    Distribution,
     LeafNode,
     PartitionNode,
     ProductNode,
@@ -10,7 +11,13 @@ from src.symbolic import (
     SumNode,
     SymbolicArithmeticCircuit,
 )
-from src.utils import BitSet
+from src.utils import BitSet, Support
+
+
+def get_support(scope: BitSet, input_dists: Dict[int, Distribution]) -> Support:
+    """Utility function to create a full support for a given scope."""
+    intervals = {i: input_dists[i].support for i in scope}
+    return Support(intervals)
 
 
 def construct_random_region_graph(
@@ -91,7 +98,11 @@ def construct_random_region_graph(
 
 
 def construct_spn_from_region_graph(
-    rg: RegionGraph, num_classes: int, num_sums: int, num_inputs: int
+    rg: RegionGraph,
+    num_classes: int,
+    num_sums: int,
+    num_inputs: int,
+    input_dists: Dict[int, Distribution],
 ) -> SymbolicArithmeticCircuit:
     """
     Algorithm 1: Construct SPN from Region Graph.
@@ -134,13 +145,13 @@ def construct_spn_from_region_graph(
         if is_leaf_region:
             for _ in range(num_inputs):
                 sid = next_id()
-                spn.add_node(sid, LeafNode(r_node.scope))
+                spn.add_node(sid, LeafNode(support=get_support(r_node.scope, input_dists)))
                 spn_ids.append(sid)
         else:
             count = num_classes if is_root_region else num_sums
             for _ in range(count):
                 sid = next_id()
-                s_node = SumNode(scope=r_node.scope)
+                s_node = SumNode(support=get_support(r_node.scope, input_dists))
                 spn.add_node(sid, s_node)
                 spn_ids.append(sid)
 
@@ -179,7 +190,7 @@ def construct_spn_from_region_graph(
                 prod_id = node_counter
                 node_counter += 1
 
-                prod_node = ProductNode(scope=parent_r_node.scope)
+                prod_node = ProductNode(support=get_support(parent_r_node.scope, input_dists))
                 spn.add_node(prod_id, prod_node)
 
                 # Connect Product -> Children (Sum/Leaf of subregions)
@@ -201,6 +212,7 @@ def create_rat_spn(
     num_repetitions: int,
     num_sums: int,
     num_inputs: int,
+    input_dists: Dict[int, Distribution],
 ) -> SymbolicArithmeticCircuit:
     """
     High-level function to create a RAT-SPN arithmetic circuit.
@@ -217,5 +229,5 @@ def create_rat_spn(
         A SymbolicArithmeticCircuit representing the SPN.
     """
     rg = construct_random_region_graph(num_features, depth, num_repetitions)
-    spn = construct_spn_from_region_graph(rg, num_classes, num_sums, num_inputs)
+    spn = construct_spn_from_region_graph(rg, num_classes, num_sums, num_inputs, input_dists)
     return spn
