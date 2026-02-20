@@ -61,7 +61,7 @@ def apply_logical_constraints(
         mask &= interval.contains(vals)
 
     # Convert active rows to indices
-    current_row_mask = data_slice.row_ids.to_bool_mask(data_slice.data.shape[0])
+    current_row_mask = data_slice.row_ids.to_numpy(data_slice.data.shape[0])
     active_indices = np.flatnonzero(current_row_mask)
 
     # Split indices based on mask

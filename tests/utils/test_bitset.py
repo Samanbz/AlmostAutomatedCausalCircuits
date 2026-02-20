@@ -140,14 +140,14 @@ class TestBitSet:
         assert 1 not in bs
         assert len(bs) == 2
 
-    def test_to_bool_mask(self):
+    def test_to_numpy(self):
         bs = BitSet([0, 2])
-        mask = bs.to_bool_mask(3)
+        mask = bs.to_numpy(3)
         expected = np.array([True, False, True], dtype=bool)
         np.testing.assert_array_equal(mask, expected)
 
         # Test size larger than max element
-        mask_large = bs.to_bool_mask(5)
+        mask_large = bs.to_numpy(5)
         expected_large = np.array([True, False, True, False, False], dtype=bool)
         np.testing.assert_array_equal(mask_large, expected_large)
 

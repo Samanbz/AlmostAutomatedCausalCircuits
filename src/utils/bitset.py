@@ -1,6 +1,7 @@
 from typing import Iterable
 
 import numpy as np
+import torch
 
 
 class BitSet:
@@ -10,7 +11,7 @@ class BitSet:
         self._val = 0
         if isinstance(elements, BitSet):
             self._val = elements._val
-        elif elements:
+        else:
             for e in elements:
                 self._val |= 1 << int(e)
 
@@ -141,9 +142,12 @@ class BitSet:
     def __xor__(self, other):
         return self.symmetric_difference(other)
 
-    def to_bool_mask(self, size: int) -> np.ndarray:
+    def to_numpy(self, size: int) -> np.ndarray:
         n_bytes = (size + 7) // 8
         val = self._val & ((1 << size) - 1)
         bytes_val = val.to_bytes(n_bytes, byteorder="little")
         bits = np.unpackbits(np.frombuffer(bytes_val, dtype=np.uint8), bitorder="little")
         return bits[:size].view(bool)
+
+    def to_tensor(self, size: int) -> torch.BoolTensor:
+        return torch.from_numpy(self.to_numpy(size))

@@ -18,12 +18,12 @@ class DataSlice:
         self.constraints = constraints if constraints is not None else Support()
 
     def get_data(self) -> np.ndarray:
-        row_mask = self.row_ids.to_bool_mask(self.data.shape[0])
-        col_mask = self.col_ids.to_bool_mask(self.data.shape[1])
+        row_mask = self.row_ids.to_numpy(self.data.shape[0])
+        col_mask = self.col_ids.to_numpy(self.data.shape[1])
         return self.data[row_mask][:, col_mask]
 
     def get_column(self, global_col_idx: int) -> np.ndarray:
-        row_mask = self.row_ids.to_bool_mask(self.data.shape[0])
+        row_mask = self.row_ids.to_numpy(self.data.shape[0])
         return self.data[row_mask, global_col_idx]
 
     def __len__(self):
