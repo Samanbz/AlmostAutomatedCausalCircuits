@@ -2,9 +2,9 @@ from typing import Any, Dict
 
 import numpy as np
 
-from src.graph import DirectedAcyclicGraph
 from src.utils import BitSet, DataSlice, Support
 
+from .base import DirectedAcyclicGraph
 from .region_graph import RegionGraphNode
 
 

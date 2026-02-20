@@ -1,6 +1,7 @@
 from collections import deque
 from typing import Any, Dict, Generator, Generic, List, Optional, Tuple, TypeVar
 
+
 # Generic types for Node ID (K), Node Payload (N) and Edge Payload (E)
 K = TypeVar("K")
 N = TypeVar("N")
@@ -147,9 +148,7 @@ class BinaryTree(Tree[K, N, E]):
         # Maps parent_id -> (left_child_id, right_child_id)
         self._children_pair: Dict[K, Tuple[K, K]] = {}
 
-    def add_children(
-        self, parent: K, left_child: K, right_child: K, data: E = None
-    ) -> None:
+    def add_children(self, parent: K, left_child: K, right_child: K, data: E = None) -> None:
         """Adds both children to the parent node atomically."""
         if parent in self._children_pair:
             raise ValueError(f"Node '{parent}' already has children.")

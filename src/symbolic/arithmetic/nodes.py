@@ -1,5 +1,6 @@
-from src.graph import Node
 from src.utils import BitSet, Support
+
+from ..base import Node
 
 
 class ArithmeticNode(Node):

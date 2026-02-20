@@ -4,7 +4,7 @@ from typing import Any, Callable, List, Optional
 import numpy as np
 import pandas as pd
 
-from src.graph import DirectedAcyclicGraph
+from .base import DirectedAcyclicGraph
 
 
 class Mechanism(ABC):

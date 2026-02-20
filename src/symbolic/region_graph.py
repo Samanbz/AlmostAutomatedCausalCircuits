@@ -1,7 +1,8 @@
 from typing import Any
 
-from src.graph import DirectedAcyclicGraph, Node
 from src.utils import BitSet
+
+from .base import DirectedAcyclicGraph, Node
 
 
 class RegionGraphNode(Node):

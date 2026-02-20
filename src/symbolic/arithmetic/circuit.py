@@ -1,8 +1,8 @@
 from typing import TYPE_CHECKING, Any, Dict, List, Type
 
-from src.graph import DirectedAcyclicGraph
 from src.utils import BitSet
 
+from ..base import DirectedAcyclicGraph
 from .nodes import ArithmeticNode, LeafNode, ProductNode, SumNode
 
 

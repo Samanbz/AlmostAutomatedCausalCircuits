@@ -1,7 +1,8 @@
 from typing import Any, Dict
 
-from src.graph import BinaryTree, Node
 from src.utils import BitSet
+
+from .base import BinaryTree, Node
 
 
 class VNode(Node):
