@@ -14,6 +14,8 @@ class SymbolicArithmeticCircuit(DirectedAcyclicGraph[int, ArithmeticNode, Any]):
     """
     A DAG representing a symbolic arithmetic circuit.
     Nodes are identified by integers and contain Node objects (SumNode, ProductNode, etc.).
+    Edges can optionally contain data (e.g., weights for sum nodes) and represent descendence and
+    not computational flow.
     """
 
     def get_nodes_with_scope(self, scope: BitSet, node_type: Type[ArithmeticNode]) -> List[int]:
@@ -31,8 +33,7 @@ class SymbolicArithmeticCircuit(DirectedAcyclicGraph[int, ArithmeticNode, Any]):
                 return False
         return True
 
-    @property
-    def node_config(self) -> Dict[type, Dict[str, Any]]:
+    def get_node_config(self, show_node_id=False) -> Dict[type, Dict[str, Any]]:
         def leaf_label(node: LeafNode) -> str:
             label = "Leaf"
             if hasattr(node, "scope"):
@@ -42,8 +43,23 @@ class SymbolicArithmeticCircuit(DirectedAcyclicGraph[int, ArithmeticNode, Any]):
                 label += f"\n{node.var_support}"
             return label
 
+        node_ids = {n: k for k, n in self._nodes.items()}
+
+        def node_label(node: ArithmeticNode) -> str:
+            label = ""
+            if isinstance(node, SumNode):
+                label = "+"
+            elif isinstance(node, ProductNode):
+                label = "x"
+            elif isinstance(node, LeafNode):
+                label = leaf_label(node)
+            if show_node_id:
+                label += f"\nID: {node_ids[node]}"
+
+            return label
+
         return {
-            SumNode: {"color": "#ff9999", "label": "+", "shape": "diamond"},
-            ProductNode: {"color": "#9999ff", "label": "x", "shape": "box"},
-            LeafNode: {"color": "#99ff99", "label": leaf_label, "shape": "ellipse"},
+            SumNode: {"color": "#ff9999", "label": node_label, "shape": "diamond"},
+            ProductNode: {"color": "#9999ff", "label": node_label, "shape": "box"},
+            LeafNode: {"color": "#99ff99", "label": node_label, "shape": "ellipse"},
         }

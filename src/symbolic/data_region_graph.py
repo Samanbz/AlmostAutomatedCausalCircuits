@@ -36,8 +36,7 @@ class DataPartitionNode(DataRegionGraphNode):
 class DataRegionGraph(DirectedAcyclicGraph[int, DataRegionGraphNode, Any]):
     """RegionGraph that holds data slices at each node."""
 
-    @property
-    def node_config(self) -> Dict[type, Dict[str, Any]]:
+    def get_node_config(self) -> Dict[type, Dict[str, Any]]:
         return {
             DataRegionNode: {
                 "color": "#ffcc99",

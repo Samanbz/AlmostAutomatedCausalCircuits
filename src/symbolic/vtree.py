@@ -19,8 +19,7 @@ class VNode(Node):
 class VTree(BinaryTree[int, VNode, None]):
     """A variable tree (vtree) represented as a directed acyclic graph."""
 
-    @property
-    def node_config(self) -> Dict[type, Dict[str, Any]]:
+    def get_node_config(self) -> Dict[type, Dict[str, Any]]:
         return {
             VNode: {
                 "shape": "box",
@@ -91,8 +90,7 @@ class MDVTree(BinaryTree[int, MDVNode, None]):
         label_recursive(root_id)
         return md_vtree
 
-    @property
-    def node_config(self) -> Dict[type, Dict[str, Any]]:
+    def get_node_config(self) -> Dict[type, Dict[str, Any]]:
         return {
             MDVNode: {
                 "shape": "box",

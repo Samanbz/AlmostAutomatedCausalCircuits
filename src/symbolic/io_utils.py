@@ -33,7 +33,7 @@ def plot_dag(
     """
 
     if node_config is None:
-        node_config = dag.node_config
+        node_config = dag.get_node_config()
 
     # 1. Determine Format from Path
     fmt = "svg"
