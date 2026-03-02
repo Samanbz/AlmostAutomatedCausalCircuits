@@ -15,6 +15,7 @@ def plot_dag(
     node_shape: str = "circle",
     rank_sep: float = 0.5,
     node_sep: float = 0.5,
+    show_edge_data: bool = False,
 ) -> graphviz.Digraph:
     """
     Plots a DirectedAcyclicGraph using Graphviz.
@@ -30,6 +31,7 @@ def plot_dag(
         node_shape: Default shape for nodes if not specified in config.
         rank_sep: Vertical separation between layers (inches).
         node_sep: Horizontal separation between nodes (inches).
+        show_edge_data: Whether to show edge weights/data on the edges.
     """
 
     if node_config is None:
@@ -59,7 +61,8 @@ def plot_dag(
     dot.attr(rankdir="TB" if orientation == "vertical" else "LR")
     dot.attr(ranksep=str(rank_sep))
     dot.attr(nodesep=str(node_sep))
-    dot.attr(splines="false")  # Straight lines
+    dot.attr(splines="false")  # Straight lines for better readability
+    dot.attr(overlap="false")
 
     # 3. Add Nodes
     for node_id, node_data in dag._nodes.items():
@@ -93,8 +96,15 @@ def plot_dag(
 
     # 4. Add Edges
     for source_id, targets in dag._adj.items():
-        for target_id in targets:
-            dot.edge(str(source_id), str(target_id))
+        for target_id, edge_data in targets.items():
+            edge_attrs = {}
+            if show_edge_data and isinstance(edge_data, (int, float)):
+                edge_attrs["label"] = f"{edge_data:.2f}"
+                edge_attrs["fontsize"] = "8"
+                edge_attrs["fontcolor"] = "black"
+                edge_attrs["decorate"] = "true"  # Connect label to edge with a line if needed
+
+            dot.edge(str(source_id), str(target_id), **edge_attrs)
 
     # 5. Render or Return
     if output_path is not None:

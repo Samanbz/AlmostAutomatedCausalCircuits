@@ -434,10 +434,8 @@ def construct_spn_from_region_graph(
         if rg_node_id == rg.get_roots()[0]:
             continue
 
-        logger.debug(f"Processing RG Node ID {rg_node_id} with scope {rg_node.scope}.")
         if isinstance(rg_node, DataRegionNode):
             rg_node_parents = rg.get_parents(rg_node_id)  # TODO Use tree?
-            logger.debug(f"\tParents: {rg_node_parents}")
             assert len(rg_node_parents) == 1, (
                 "DataRegionNode must have exactly one parent DataPartitionNode."
             )
