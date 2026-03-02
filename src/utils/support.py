@@ -63,3 +63,8 @@ class Support:
 
     def __iter__(self):
         return iter(self.intervals.items())
+
+    def __repr__(self):
+        newline = '\n'
+        tab = '\t'
+        return f"Support({newline}{newline.join(f'{tab}{k}: {v}' for k, v in self.intervals.items())}{newline})"

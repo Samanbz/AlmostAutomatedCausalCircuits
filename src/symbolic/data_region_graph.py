@@ -40,12 +40,12 @@ class DataRegionGraph(DirectedAcyclicGraph[int, DataRegionGraphNode, Any]):
         return {
             DataRegionNode: {
                 "color": "#ffcc99",
-                "label": lambda n: f"Region\nScope: {list(n.scope)}\nRows: {len(n.row_ids)}",
+                "label": lambda n: f"Region\nScope: {list(n.scope)}\nRows: {len(n.row_ids)}\nConstraints: {n.constraints}",
                 "shape": "box",
             },
             DataPartitionNode: {
                 "color": "#99ccff",
-                "label": lambda n: f"Partition\nScope: {list(n.scope)}\nRows: {len(n.row_ids)}",
+                "label": lambda n: f"Partition\nScope: {list(n.scope)}\nRows: {len(n.row_ids)}\nConstraints: {n.constraints}",
                 "shape": "ellipse",
             },
         }
