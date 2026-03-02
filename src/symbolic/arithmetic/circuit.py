@@ -1,3 +1,4 @@
+from collections import deque
 from typing import TYPE_CHECKING, Any, Dict, List, Type
 
 from src.utils import BitSet
@@ -32,6 +33,20 @@ class SymbolicArithmeticCircuit(DirectedAcyclicGraph[int, ArithmeticNode, Any]):
             if not property.check(node_id, self):
                 return False
         return True
+
+    def add_edge(self, source: int, target: int, data: Any = None) -> None:
+        """Adds a directed edge from source to target with optional data."""
+        if self.is_sum_node(source) and data is None:
+            raise ValueError("SumNode edges must have associated weights.")
+        super().add_edge(source, target, data)
+
+    def is_sum_node(self, node_id: int) -> bool:
+        return isinstance(self.get_node_data(node_id), SumNode) or isinstance(
+            self.get_node_data(node_id), LeafNode
+        )
+
+    def is_product_node(self, node_id: int) -> bool:
+        return isinstance(self.get_node_data(node_id), ProductNode)
 
     def get_node_config(self, show_node_id=False) -> Dict[type, Dict[str, Any]]:
         def leaf_label(node: LeafNode) -> str:
