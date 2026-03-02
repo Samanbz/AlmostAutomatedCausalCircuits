@@ -46,6 +46,14 @@ class DirectedAcyclicGraph(Generic[K, N, E]):
         """Returns a list of parent node IDs."""
         return list(self._rev_adj[node_id].keys())
 
+    def get_incoming_edges(self, node_id: K) -> List[Tuple[K, E]]:
+        """Returns a list of (parent_id, edge_data) tuples for incoming edges."""
+        return list(self._rev_adj[node_id].items())
+
+    def get_outgoing_edges(self, node_id: K) -> List[Tuple[K, E]]:
+        """Returns a list of (child_id, edge_data) tuples for outgoing edges."""
+        return list(self._adj[node_id].items())
+
     def get_node_data(self, node_id: K) -> N:
         return self._nodes[node_id]
 
@@ -70,8 +78,7 @@ class DirectedAcyclicGraph(Generic[K, N, E]):
         """Returns True if the node has no children."""
         return node_id not in self._adj or len(self._adj[node_id]) == 0
 
-    @property
-    def node_config(self) -> Dict[N, Dict[str, Any]]:
+    def get_node_config(self) -> Dict[N, Dict[str, Any]]:
         """
         Returns the default node configuration for plotting.
         Should return a dictionary mapping Node types to style attributes.
@@ -97,6 +104,43 @@ class DirectedAcyclicGraph(Generic[K, N, E]):
                 in_degree[v] -= 1
                 if in_degree[v] == 0:
                     queue.append(v)
+
+        if visited_count != len(self._nodes):
+            raise RuntimeError(
+                f"Cycle detected in Graph! Visited {visited_count}/{len(self._nodes)} nodes."
+            )
+
+    def layered_topological_sort(self, reverse: bool = False) -> Generator[List[K], None, None]:
+        """
+        Yields lists of node_ids in topological order, grouped by layers.
+        Nodes in the same layer have the same distance from the root(s).
+        """
+
+        if reverse:
+            # Out-degree for reverse layering
+            degree = {u: len(self._adj[u]) for u in self._nodes}
+            queue = deque([u for u, deg in degree.items() if deg == 0])
+        else:
+            # In-degree for normal layering
+            degree = {u: len(self._rev_adj[u]) for u in self._nodes}
+            queue = deque([u for u, deg in degree.items() if deg == 0])
+
+        visited_count = 0
+        while queue:
+            layer_size = len(queue)
+            current_layer = []
+            for _ in range(layer_size):
+                u = queue.popleft()
+                current_layer.append(u)
+                visited_count += 1
+
+                neighbors = self._rev_adj[u] if reverse else self._adj[u]
+                for v in neighbors:
+                    degree[v] -= 1
+                    if degree[v] == 0:
+                        queue.append(v)
+
+            yield current_layer
 
         if visited_count != len(self._nodes):
             raise RuntimeError(
