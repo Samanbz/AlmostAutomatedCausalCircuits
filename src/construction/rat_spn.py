@@ -3,7 +3,6 @@ from typing import Dict, List
 
 from src.symbolic import (
     Distribution,
-    LeafNode,
     PartitionNode,
     ProductNode,
     RegionGraph,
@@ -145,7 +144,25 @@ def construct_spn_from_region_graph(
         if is_leaf_region:
             for _ in range(num_inputs):
                 sid = next_id()
-                spn.add_node(sid, LeafNode(support=get_support(r_node.scope, input_dists)))
+                # Create a specialized leaf node by reusing the distribution for the scope
+                # NOTE: input_dists is a dict[var_id -> Distribution].
+                # A leaf region typically covers ONE variable for univariate leaves.
+                # If scope has > 1 variable, we need multiple leaves or a multivariate leaf.
+                # RAT-SPN usually assumes univariate leaves at bottom.
+
+                # Check scope size
+                if len(r_node.scope) != 1:
+                    raise ValueError(f"Leaf region scope must be size 1, got {len(r_node.scope)}")
+
+                var_id = list(r_node.scope)[0]
+                dist_template = input_dists[var_id]
+
+                # We should clone/copy the distribution to have unique instances
+                import copy
+
+                leaf_dist = copy.deepcopy(dist_template)
+
+                spn.add_node(sid, leaf_dist)
                 spn_ids.append(sid)
         else:
             count = num_classes if is_root_region else num_sums
@@ -200,7 +217,20 @@ def construct_spn_from_region_graph(
                 # Connect Parent Region Sums -> This Product
                 for parent_sum_id in parent_spn_ids:
                     # Edge: Sum -> Product
-                    spn.add_edge(parent_sum_id, prod_id)
+                    weight = random.random()
+                    spn.add_edge(parent_sum_id, prod_id, data=weight)
+
+    # Normalize weights for all Sum nodes
+    for node_id in spn.topological_sort():
+        if isinstance(spn.get_node_data(node_id), SumNode):
+            outgoing = spn.get_outgoing_edges(node_id)
+            if not outgoing:
+                continue
+
+            total_weight = sum(edge[1] for edge in outgoing)
+            if total_weight > 0:
+                for child_id, weight in outgoing:
+                    spn.set_edge_data(node_id, child_id, weight / total_weight)
 
     return spn
 

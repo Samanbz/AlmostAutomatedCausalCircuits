@@ -48,6 +48,13 @@ class SymbolicArithmeticCircuit(DirectedAcyclicGraph[int, ArithmeticNode, Any]):
     def is_product_node(self, node_id: int) -> bool:
         return isinstance(self.get_node_data(node_id), ProductNode)
 
+    def set_edge_data(self, source: int, target: int, data: Any) -> None:
+        """Sets the data for an existing edge from source to target."""
+        if source not in self._adj or target not in self._adj[source]:
+            raise KeyError(f"Edge from '{source}' to '{target}' does not exist.")
+        self._adj[source][target] = data
+        self._rev_adj[target][source] = data
+
     def get_node_config(self, show_node_id=False) -> Dict[type, Dict[str, Any]]:
         def leaf_label(node: LeafNode) -> str:
             label = "Leaf"
