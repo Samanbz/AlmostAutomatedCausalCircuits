@@ -64,7 +64,13 @@ class Support:
     def __iter__(self):
         return iter(self.intervals.items())
 
+    def __getitem__(self, key: int) -> Interval:
+        return self.intervals[key]
+
+    def __contains__(self, key: int) -> bool:
+        return key in self.intervals
+
     def __repr__(self):
-        newline = '\n'
-        tab = '\t'
+        newline = "\n"
+        tab = "\t"
         return f"Support({newline}{newline.join(f'{tab}{k}: {v}' for k, v in self.intervals.items())}{newline})"

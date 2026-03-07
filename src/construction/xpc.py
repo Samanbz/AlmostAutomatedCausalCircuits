@@ -47,6 +47,9 @@ def get_factorial_constraints(
     var_splits = {}
     for var, dist in conj_dists.items():
         rand_cut_point = dist.sample()
+        logger.debug(
+            f"Variable {var}: sampled cut point {rand_cut_point} from distribution {dist}."
+        )
         left_dist, right_dist = dist.split_at(rand_cut_point)
         # Randomize left/right order to avoid bias, though combinatorial product covers all
         opts = [left_dist.var_support, right_dist.var_support]
@@ -104,29 +107,22 @@ def apply_constraint(
 
 def partition_randomly(
     data_slice: DataSlice,
-    conj_vars: BitSet,
     split_arity: int,  # Kept for signature compatibility, but overridden by 2^k geometry
     min_examples: int,
-    input_dists: Dict[int, Distribution],
+    conj_dists: Dict[int, Distribution],
     max_tries: int = 20,
 ) -> List[DataSlice]:
-    assert all(var in input_dists for var in conj_vars), (
-        "All conjunction variables must have input distributions."
-    )
-
-    conj_dists = {var: input_dists[var] for var in conj_vars}
-
     if len(data_slice) < 2 * min_examples:
         logger.debug(
-            f"Insufficient examples ({len(data_slice)}) to partition data slice on vars {conj_vars}."
+            f"Insufficient examples ({len(data_slice)}) to partition data slice on vars {list(conj_dists.keys())}."
         )
         return []
 
     logger.debug(
-        f"Factorial partitioning data slice with {len(data_slice)} examples on {len(conj_vars)} vars."
+        f"Factorial partitioning data slice with {len(data_slice)} examples on {len(conj_dists)} vars."
     )
 
-    for tries in range(max_tries):
+    for _ in range(max_tries):
         supports = get_factorial_constraints(conj_dists)
         candidate_slices = []
         populated_branches = 0
@@ -150,10 +146,11 @@ def partition_randomly(
             candidate_slices.append(new_slice)
 
         # For a split to be useful, it should distribute data into at least 2 branches
-        if populated_branches >= 2:
+        if populated_branches >= 2:  # FIXME: So we just lose data if we can't find a good split!?
             logger.debug(
                 f"\tAccepted factorial split with {populated_branches}/{len(supports)} heavily populated branches."
             )
+            # logger. debug(f"Factorial constraints: {supports}")
             return candidate_slices
 
     logger.debug(f"Failed to find a viable factorial partition after {max_tries} tries.")
@@ -307,19 +304,25 @@ def construct_random_md_data_region_graph(
         if md_var_decomp.is_leaf(md_vid):
             return  # No further partitioning needed
 
+        logger.debug(
+            f"Partitioning RG node {rg_node_id} with MDVTree node {md_vid} on vars {md_vnode.md_set}."
+        )
+
         current_data_slice = rg_node.get_data_slice(data)
         current_constraints = rg_node.constraints
-        constrainted_input_dists = {
+        # logger.debug(f"Current constraints: {current_constraints}")
+
+        conj_dists = {
             var: dist.constrain_to(current_constraints[var]) if var in current_constraints else dist
             for var, dist in input_dists.items()
+            if var in md_vnode.md_set
         }
 
         data_slices = partition_randomly(
             data_slice=current_data_slice,
-            conj_vars=md_vnode.md_set,
             split_arity=split_arity,
             min_examples=min_examples,
-            input_dists=constrainted_input_dists,
+            conj_dists=conj_dists,
         )
 
         for data_slice in data_slices:
