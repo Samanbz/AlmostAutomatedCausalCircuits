@@ -16,6 +16,9 @@ env/
 # Github settings
 .github/
 
+# Scratch space
+scratch/
+
 # jupyter Notebook checkpoints
 .ipynb_checkpoints/
 
@@ -26,12 +29,14 @@ data/
 *.h5
 *.parquet
 *.html
+*.log
 
 papers/
 *.gv
 *.dot
 *.pdf
 *.svg
+*.png
 
 build/
 *.egg-info/
