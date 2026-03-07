@@ -3,6 +3,7 @@ from typing import Callable
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.colors import LinearSegmentedColormap
 
 from src.symbolic import StructuralCausalModel
 
@@ -31,14 +32,13 @@ def uniform(low: float, high: float) -> Callable[[int], np.ndarray]:
     return lambda n: np.random.uniform(low, high, size=n)
 
 
-def plot_bool_matrix(matrix: np.ndarray, title: str = "Boolean Matrix"):
-    """
-    Utility function to visualize a boolean matrix as a grid.
-    Black for 1 (True), White for 0 (False).
-    """
+def _plot_grid(
+    matrix: np.ndarray, cmap: str, vmin: float, vmax: float, title: str, filename: str = None
+) -> None:
+    """Helper to plot a matrix as a grid with specific colormaps and bounds."""
     rows, cols = matrix.shape
     plt.figure(figsize=(8, 8))
-    plt.imshow(matrix, cmap="binary", vmin=0, vmax=1, aspect="equal", interpolation="nearest")
+    plt.imshow(matrix, cmap=cmap, vmin=vmin, vmax=vmax, aspect="equal", interpolation="nearest")
 
     # Gridlines configuration
     ax = plt.gca()
@@ -69,4 +69,33 @@ def plot_bool_matrix(matrix: np.ndarray, title: str = "Boolean Matrix"):
 
     plt.title(title)
     plt.tight_layout()
-    plt.show()
+
+    if filename:
+        plt.savefig(filename)
+        print(f"Plot saved to {filename}")
+    else:
+        plt.show()
+
+
+def plot_matrix(matrix: np.ndarray, title: str = "Connection Matrix", filename: str = None) -> None:
+    """
+    Utility function to visualize a boolean matrix as a grid.
+    Black for 1 (True), White for 0 (False).
+    """
+    _plot_grid(matrix, cmap="binary", vmin=0, vmax=1, title=title, filename=filename)
+
+
+def plot_diff_matrix(
+    matrix: np.ndarray, title: str = "Difference Matrix", filename: str = None
+) -> None:
+    """
+    Utility function to visualize a difference matrix as a grid.
+    Values must be in the range [-1, 1]. Colors range from red (-1) to white (0) to green (1).
+    """
+    if np.any(matrix < -1) or np.any(matrix > 1):
+        raise ValueError("Matrix contains values outside the range [-1, 1].")
+
+    # Custom colormap: Red (-1) -> White (0) -> Green (1)
+    cmap = LinearSegmentedColormap.from_list("RdWhGn", ["red", "white", "green"])
+
+    _plot_grid(matrix, cmap=cmap, vmin=-1, vmax=1, title=title, filename=filename)
