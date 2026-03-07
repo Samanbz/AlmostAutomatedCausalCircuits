@@ -1,4 +1,3 @@
-from collections import deque
 from typing import TYPE_CHECKING, Any, Dict, List, Type
 
 from src.utils import BitSet
@@ -55,7 +54,9 @@ class SymbolicArithmeticCircuit(DirectedAcyclicGraph[int, ArithmeticNode, Any]):
         self._adj[source][target] = data
         self._rev_adj[target][source] = data
 
-    def get_node_config(self, show_node_id=False) -> Dict[type, Dict[str, Any]]:
+    def _get_base_node_config(self) -> Dict[type, Dict[str, Any]]:
+        config = super()._get_base_node_config()
+
         def leaf_label(node: LeafNode) -> str:
             label = "Leaf"
             if hasattr(node, "scope"):
@@ -65,23 +66,20 @@ class SymbolicArithmeticCircuit(DirectedAcyclicGraph[int, ArithmeticNode, Any]):
                 label += f"\n{node.var_support}"
             return label
 
-        node_ids = {n: k for k, n in self._nodes.items()}
-
         def node_label(node: ArithmeticNode) -> str:
-            label = ""
             if isinstance(node, SumNode):
-                label = "+"
+                return "+"
             elif isinstance(node, ProductNode):
-                label = "x"
+                return "x"
             elif isinstance(node, LeafNode):
-                label = leaf_label(node)
-            if show_node_id:
-                label += f"\nID: {node_ids[node]}"
+                return leaf_label(node)
+            return ""
 
-            return label
-
-        return {
-            SumNode: {"color": "#ff9999", "label": node_label, "shape": "diamond"},
-            ProductNode: {"color": "#9999ff", "label": node_label, "shape": "box"},
-            LeafNode: {"color": "#99ff99", "label": node_label, "shape": "ellipse"},
-        }
+        config.update(
+            {
+                SumNode: {"color": "#ff9999", "label": node_label, "shape": "diamond"},
+                ProductNode: {"color": "#9999ff", "label": node_label, "shape": "box"},
+                LeafNode: {"color": "#99ff99", "label": node_label, "shape": "ellipse"},
+            }
+        )
+        return config

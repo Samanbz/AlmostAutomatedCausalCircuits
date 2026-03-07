@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Dict
 
 from src.utils import BitSet
 
@@ -33,4 +33,21 @@ class RegionGraph(DirectedAcyclicGraph[int, RegionGraphNode, Any]):
     Nodes are identified by integers and contain Node objects (RegionNode, PartitionNode, etc.).
     """
 
-    pass
+    def _get_base_node_config(self) -> Dict[type, Dict[str, Any]]:
+        config = super()._get_base_node_config()
+
+        config.update(
+            {
+                RegionNode: {
+                    "color": "#ffcc99",
+                    "label": lambda n: f"Region\nScope: {list(n.scope)}",
+                    "shape": "box",
+                },
+                PartitionNode: {
+                    "color": "#99ccff",
+                    "label": lambda n: f"Partition\nScope: {list(n.scope)}",
+                    "shape": "ellipse",
+                },
+            }
+        )
+        return config

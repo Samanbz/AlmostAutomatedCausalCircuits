@@ -4,7 +4,7 @@ import numpy as np
 
 from src.utils import BitSet, DataSlice, Support
 
-from .base import DirectedAcyclicGraph
+from .base import DirectedAcyclicGraph, Node
 from .region_graph import RegionGraphNode
 
 
@@ -36,16 +36,21 @@ class DataPartitionNode(DataRegionGraphNode):
 class DataRegionGraph(DirectedAcyclicGraph[int, DataRegionGraphNode, Any]):
     """RegionGraph that holds data slices at each node."""
 
-    def get_node_config(self) -> Dict[type, Dict[str, Any]]:
-        return {
-            DataRegionNode: {
-                "color": "#ffcc99",
-                "label": lambda n: f"Region\nScope: {list(n.scope)}\nRows: {len(n.row_ids)}\nConstraints: {n.constraints}",
-                "shape": "box",
-            },
-            DataPartitionNode: {
-                "color": "#99ccff",
-                "label": lambda n: f"Partition\nScope: {list(n.scope)}\nRows: {len(n.row_ids)}\nConstraints: {n.constraints}",
-                "shape": "ellipse",
-            },
-        }
+    def _get_base_node_config(self) -> Dict[type, Dict[str, Any]]:
+        config = super()._get_base_node_config()
+
+        config.update(
+            {
+                DataRegionNode: {
+                    "color": "#ffcc99",
+                    "label": lambda n: f"Region\nScope: {list(n.scope)}\nRows: {len(n.row_ids)}\nConstraints: {n.constraints}",
+                    "shape": "box",
+                },
+                DataPartitionNode: {
+                    "color": "#99ccff",
+                    "label": lambda n: f"Partition\nScope: {list(n.scope)}\nRows: {len(n.row_ids)}\nConstraints: {n.constraints}",
+                    "shape": "ellipse",
+                },
+            }
+        )
+        return config

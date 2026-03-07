@@ -19,14 +19,19 @@ class VNode(Node):
 class VTree(BinaryTree[int, VNode, None]):
     """A variable tree (vtree) represented as a directed acyclic graph."""
 
-    def get_node_config(self) -> Dict[type, Dict[str, Any]]:
-        return {
-            VNode: {
-                "shape": "box",
-                "label": lambda n: f"Scope: {list(n.scope)}",
-                "color": "lightblue",
+    def _get_base_node_config(self) -> Dict[type, Dict[str, Any]]:
+        config = super()._get_base_node_config()
+
+        config.update(
+            {
+                VNode: {
+                    "shape": "box",
+                    "label": lambda n: f"Scope: {list(n.scope)}",
+                    "color": "lightblue",
+                }
             }
-        }
+        )
+        return config
 
 
 class MDVNode(VNode):
@@ -90,11 +95,16 @@ class MDVTree(BinaryTree[int, MDVNode, None]):
         label_recursive(root_id)
         return md_vtree
 
-    def get_node_config(self) -> Dict[type, Dict[str, Any]]:
-        return {
-            MDVNode: {
-                "shape": "box",
-                "label": lambda n: f"Scope: {list(n.scope)}\nMD-Set: {list(n.md_set) if not n.md_set.is_universal else 'Universal'}",
-                "color": "lightgreen",
+    def _get_base_node_config(self) -> Dict[type, Dict[str, Any]]:
+        config = super()._get_base_node_config()
+
+        config.update(
+            {
+                MDVNode: {
+                    "shape": "box",
+                    "label": lambda n: f"Scope: {list(n.scope)}\nMD-Set: {list(n.md_set) if not n.md_set.is_universal else 'Universal'}",
+                    "color": "lightgreen",
+                }
             }
-        }
+        )
+        return config

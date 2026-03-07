@@ -78,12 +78,49 @@ class DirectedAcyclicGraph(Generic[K, N, E]):
         """Returns True if the node has no children."""
         return node_id not in self._adj or len(self._adj[node_id]) == 0
 
-    def get_node_config(self) -> Dict[N, Dict[str, Any]]:
+    def _get_base_node_config(self) -> Dict[type, Dict[str, Any]]:
         """
-        Returns the default node configuration for plotting.
-        Should return a dictionary mapping Node types to style attributes.
+        Returns the base node configuration for plotting.
+        Subclasses should override this method to provide specific styles.
         """
         return {}
+
+    def get_node_config(self, show_node_id: bool = False) -> Dict[type, Dict[str, Any]]:
+        """
+        Returns the node configuration for plotting.
+        If show_node_id is True, dynamically wraps labels to safely include node IDs.
+        """
+        config = self._get_base_node_config()
+
+        if show_node_id:
+            # Match nodes by object identity in case of unhashable nodes or overlapping equality
+            node_ids = {id(n): k for k, n in self._nodes.items()}
+
+            wrapped_config = {}
+            for cls, style in config.items():
+                new_style = style.copy()
+                orig_label = style.get("label", "")
+
+                def make_wrapper(orig_lbl):
+                    def wrapper(node):
+                        nid = node_ids.get(id(node), "?")
+
+                        if callable(orig_lbl):
+                            base_str = str(orig_lbl(node))
+                        else:
+                            base_str = str(orig_lbl)
+
+                        if base_str:
+                            return f"ID: {nid}\n{base_str}"
+                        return f"ID: {nid}"
+
+                    return wrapper
+
+                new_style["label"] = make_wrapper(orig_label)
+                wrapped_config[cls] = new_style
+            return wrapped_config
+
+        return config
 
     def topological_sort(self) -> Generator[K, None, None]:
         """
