@@ -22,22 +22,34 @@ class Distribution(LeafNode, ABC):
         """Sample a value from the distribution."""
         pass
 
+    @property
     @abstractmethod
-    def split_at(self, cut_point: Any) -> tuple["Distribution", "Distribution"]:
-        """Split the distribution at a cut point into two distributions."""
+    def _truncated_class(self) -> type["TruncatedDistribution"]:
+        """Return the class used for truncated versions of this distribution."""
         pass
 
-    @abstractmethod
+    def split_at(self, cut_point: Any) -> tuple["TruncatedDistribution", "TruncatedDistribution"]:
+        """Split the distribution at a cut point into two distributions."""
+        left_support, right_support = self.var_support.split_at(cut_point)
+        left_dist = self._truncated_class(self.var, self, left_support)
+        right_dist = self._truncated_class(self.var, self, right_support)
+        return left_dist, right_dist
+
     def constrain_to(self, interval: Optional[Interval]) -> "TruncatedDistribution":
-        """Return a truncated distribution constrained to the given interval. If interval is None, return self."""
-        pass
+        """Return a truncated distribution constrained to the given interval."""
+        if interval is None:
+            return self
+        return self._truncated_class(self.var, self, interval)
 
 
 class GaussianDistribution(Distribution):
     """Represents a Gaussian distribution leaf node."""
 
     def __init__(self, var: int, mean: float, stddev: float):
-        super().__init__(var, ContinuousInterval(float("-inf"), float("inf")))
+        super().__init__(
+            var,
+            ContinuousInterval(float("-inf"), float("inf"), include_low=False, include_high=False),
+        )
         self.mean = mean
         self.stddev = stddev
 
@@ -45,20 +57,9 @@ class GaussianDistribution(Distribution):
         """Sample from the Gaussian distribution."""
         return np.random.normal(self.mean, self.stddev)
 
-    def split_at(
-        self, cut_point: float
-    ) -> tuple["TruncatedGaussianDistribution", "TruncatedGaussianDistribution"]:
-        """Split the Gaussian at a cut point, returning two truncated Gaussians."""
-        left_support, right_support = self.var_support.split_at(cut_point)
-        left_dist = TruncatedGaussianDistribution(self.var, self, left_support)
-        right_dist = TruncatedGaussianDistribution(self.var, self, right_support)
-        return left_dist, right_dist
-
-    def constrain_to(self, interval: Optional[ContinuousInterval]) -> "TruncatedDistribution":
-        """Return a truncated Gaussian distribution constrained to the given interval."""
-        if interval is None:
-            return self
-        return TruncatedGaussianDistribution(self.var, self, interval)
+    @property
+    def _truncated_class(self) -> type["TruncatedGaussianDistribution"]:
+        return TruncatedGaussianDistribution
 
     def __repr__(self):
         return f"GaussianDistribution(var={self.var}, mean={self.mean}, stddev={self.stddev})"
@@ -76,20 +77,9 @@ class CategoricalDistribution(Distribution):
         """Sample from the categorical distribution according to probabilities."""
         return np.random.choice(self.categories, p=self.probabilities)
 
-    def split_at(
-        self, cut_point: Any
-    ) -> tuple["TruncatedCategoricalDistribution", "TruncatedCategoricalDistribution"]:
-        """Split the categorical distribution at a cut point."""
-        left_support, right_support = self.var_support.split_at(cut_point)
-        left_dist = TruncatedCategoricalDistribution(self.var, self, left_support)
-        right_dist = TruncatedCategoricalDistribution(self.var, self, right_support)
-        return left_dist, right_dist
-
-    def constrain_to(self, interval: Optional[DiscreteInterval]) -> "TruncatedDistribution":
-        """Return a truncated categorical distribution constrained to the given interval."""
-        if interval is None:
-            return self
-        return TruncatedCategoricalDistribution(self.var, self, interval)
+    @property
+    def _truncated_class(self) -> type["TruncatedCategoricalDistribution"]:
+        return TruncatedCategoricalDistribution
 
     def __repr__(self):
         return f"CategoricalDistribution(var={self.var}, categories={self.categories}, probabilities={self.probabilities})"
@@ -106,6 +96,10 @@ class UniformDistribution(Distribution):
     def sample(self) -> float:
         """Sample uniformly from the distribution."""
         return np.random.uniform(self.low, self.high)
+
+    @property
+    def _truncated_class(self) -> type["TruncatedUniformDistribution"]:
+        return TruncatedUniformDistribution
 
     def split_at(
         self, cut_point: float
@@ -146,6 +140,11 @@ class TruncatedDistribution(Distribution):
             f"Failed to sample from TruncatedDistribution after {max_attempts} attempts. "
             f"Support interval may be too restrictive."
         )
+
+    @property
+    def _truncated_class(self) -> type["TruncatedDistribution"]:
+        """Return the class used for further truncation."""
+        return self.__class__
 
     def split_at(self, cut_point: Any) -> tuple["TruncatedDistribution", "TruncatedDistribution"]:
         """Further split the truncated distribution at a cut point."""
