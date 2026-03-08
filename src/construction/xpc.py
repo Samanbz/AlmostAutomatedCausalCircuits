@@ -4,7 +4,7 @@ from typing import Dict, List, Tuple
 
 import numpy as np
 
-from src.logging import logger as g_logger
+from src.logger import logger as g_logger
 from src.symbolic import (
     DataPartitionNode,
     DataRegionGraph,

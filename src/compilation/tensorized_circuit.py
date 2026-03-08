@@ -4,7 +4,7 @@ from typing import List, Tuple
 import torch
 from torch import nn
 
-from src.logging import logger as g_logger
+from src.logger import logger as g_logger
 from src.symbolic import SymbolicArithmeticCircuit
 
 
