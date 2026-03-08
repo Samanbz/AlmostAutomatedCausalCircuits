@@ -3,6 +3,7 @@ from typing import Callable
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import torch
 from matplotlib.colors import LinearSegmentedColormap
 
 from src.symbolic import StructuralCausalModel
@@ -33,7 +34,12 @@ def uniform(low: float, high: float) -> Callable[[int], np.ndarray]:
 
 
 def _plot_grid(
-    matrix: np.ndarray, cmap: str, vmin: float, vmax: float, title: str, filename: str = None
+    matrix: np.ndarray | torch.Tensor,
+    cmap: str,
+    vmin: float,
+    vmax: float,
+    title: str,
+    filename: str = None,
 ) -> None:
     """Helper to plot a matrix as a grid with specific colormaps and bounds."""
     rows, cols = matrix.shape
@@ -77,7 +83,9 @@ def _plot_grid(
         plt.show()
 
 
-def plot_matrix(matrix: np.ndarray, title: str = "Connection Matrix", filename: str = None) -> None:
+def plot_matrix(
+    matrix: np.ndarray | torch.Tensor, title: str = "Connection Matrix", filename: str = None
+) -> None:
     """
     Utility function to visualize a boolean matrix as a grid.
     Black for 1 (True), White for 0 (False).
@@ -86,12 +94,15 @@ def plot_matrix(matrix: np.ndarray, title: str = "Connection Matrix", filename: 
 
 
 def plot_diff_matrix(
-    matrix: np.ndarray, title: str = "Difference Matrix", filename: str = None
+    matrix: np.ndarray | torch.Tensor, title: str = "Difference Matrix", filename: str = None
 ) -> None:
     """
     Utility function to visualize a difference matrix as a grid.
     Values must be in the range [-1, 1]. Colors range from red (-1) to white (0) to green (1).
     """
+    if isinstance(matrix, torch.Tensor):
+        matrix = matrix.detach().cpu().numpy()
+
     if np.any(matrix < -1) or np.any(matrix > 1):
         raise ValueError("Matrix contains values outside the range [-1, 1].")
 
