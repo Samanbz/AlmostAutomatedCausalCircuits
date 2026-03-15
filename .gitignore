@@ -40,3 +40,7 @@ papers/
 
 build/
 *.egg-info/
+
+
+wandb/
+.wandb/
