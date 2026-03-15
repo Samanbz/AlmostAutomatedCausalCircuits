@@ -122,13 +122,21 @@ class DirectedAcyclicGraph(Generic[K, N, E]):
 
         return config
 
-    def topological_sort(self) -> Generator[K, None, None]:
+    def topological_sort(self, reverse: bool = False) -> Generator[K, None, None]:
         """
         Yields node_ids in topological order using Kahn's Algorithm.
         """
         # Calculate in-degrees based on existing edges
-        in_degree = {u: len(self._rev_adj[u]) for u in self._nodes}
-        queue = deque([u for u, deg in in_degree.items() if deg == 0])
+        if reverse:
+            # Out-degree for reverse topological sort
+            degree = {u: len(self._adj[u]) for u in self._nodes}
+            queue = deque([u for u, deg in degree.items() if deg == 0])
+            adjacency = self._rev_adj
+        else:
+            # In-degree for normal topological sort
+            degree = {u: len(self._rev_adj[u]) for u in self._nodes}
+            queue = deque([u for u, deg in degree.items() if deg == 0])
+            adjacency = self._adj
 
         visited_count = 0
         while queue:
@@ -136,10 +144,10 @@ class DirectedAcyclicGraph(Generic[K, N, E]):
             yield u
             visited_count += 1
 
-            # Decrement in-degree for neighbors
-            for v in self._adj[u]:
-                in_degree[v] -= 1
-                if in_degree[v] == 0:
+            # Decrement degree for neighbors
+            for v in adjacency[u]:
+                degree[v] -= 1
+                if degree[v] == 0:
                     queue.append(v)
 
         if visited_count != len(self._nodes):

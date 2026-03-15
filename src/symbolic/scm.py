@@ -40,6 +40,11 @@ class AdditiveNoiseMechanism(Mechanism):
 
         return deterministic + noise
 
+    def __str__(self) -> str:
+        logic_str = str(self.logic) if self.logic else "0"
+        noise_str = str(self.noise_dist) if self.noise_dist else "Noise"
+        return f"{logic_str} + {noise_str}"
+
 
 class StructuralCausalModel(DirectedAcyclicGraph[str, Mechanism, Any]):
     """

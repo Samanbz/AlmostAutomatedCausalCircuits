@@ -8,6 +8,8 @@ import numpy as np
 import torch
 from matplotlib.colors import LinearSegmentedColormap
 
+from src.symbolic import StructuralCausalModel
+
 from .base import DirectedAcyclicGraph
 
 
@@ -43,10 +45,14 @@ def plot_dag(
 
     # 1. Determine Format from Path
     fmt = "svg"
+    is_html = False
     if output_path is not None:
         path_obj = Path(output_path)
-        fmt = path_obj.suffix.replace(".", "")
-        if not fmt:
+        fmt = path_obj.suffix.replace(".", "").lower()
+        if fmt == "html":
+            is_html = True
+            fmt = "svg"
+        elif not fmt:
             fmt = "svg"  # Default if no extension provided
 
     # 2. Configure Graphviz
@@ -113,11 +119,151 @@ def plot_dag(
     # 5. Render or Return
     if output_path is not None:
         out_file = Path(output_path)
-        # graphviz.render adds suffix automatically, but dot.render with cleanup=True allows explicit paths
         print(f"Rendering graph to {output_path}...")
         try:
-            # render(filename, subdirectory, view, cleanup)
-            dot.render(str(out_file.with_suffix("")), cleanup=True)
+            if is_html:
+                svg_data = dot.pipe(format="svg").decode("utf-8")
+                html_content = f"<!DOCTYPE html>\n<html>\n<head>\n<title>DAG Plot</title>\n</head>\n<body style='text-align: center; margin-top: 50px;'>\n{svg_data}\n</body>\n</html>"
+                out_file.write_text(html_content, encoding="utf-8")
+            else:
+                dot.render(str(out_file.with_suffix("")), cleanup=True)
+            print("Done.")
+        except Exception as e:
+            print(f"Graphviz render failed: {e}. Check if graphviz is installed on system.")
+
+    return dot
+
+
+def plot_scm(
+    scm: StructuralCausalModel,
+    output_path: Optional[Union[str, PathLike]] = None,
+    orientation: str = "vertical",
+) -> graphviz.Digraph:
+    """
+    Plots a StructuralCausalModel using Graphviz, explicitly showing the target's
+    mechanisms as edge labels.
+    """
+    fmt = "svg"
+    is_html = False
+    if output_path is not None:
+        path_obj = Path(output_path)
+        fmt = path_obj.suffix.replace(".", "").lower()
+
+        if fmt == "html":
+            is_html = True
+            fmt = "svg"
+
+        VALID_FORMATS = {
+            "bmp",
+            "canon",
+            "cgimage",
+            "cmap",
+            "cmapx",
+            "cmapx_np",
+            "dot",
+            "dot_json",
+            "eps",
+            "exr",
+            "fig",
+            "gd",
+            "gd2",
+            "gif",
+            "gtk",
+            "gv",
+            "ico",
+            "imap",
+            "imap_np",
+            "ismap",
+            "jp2",
+            "jpe",
+            "jpeg",
+            "jpg",
+            "json",
+            "json0",
+            "pct",
+            "pdf",
+            "pic",
+            "pict",
+            "plain",
+            "plain-ext",
+            "png",
+            "pov",
+            "ps",
+            "ps2",
+            "psd",
+            "sgi",
+            "svg",
+            "svg_inline",
+            "svgz",
+            "tga",
+            "tif",
+            "tiff",
+            "tk",
+            "vml",
+            "vmlz",
+            "vrml",
+            "wbmp",
+            "webp",
+            "x11",
+            "xdot",
+            "xdot1.2",
+            "xdot1.4",
+            "xdot_json",
+            "xlib",
+        }
+        if not is_html and fmt not in VALID_FORMATS:
+            print(
+                f"Warning: Extension '{fmt}' is not a valid graphviz format. Defaulting format to 'svg'."
+            )
+            fmt = "svg"
+
+    dot = graphviz.Digraph(
+        format=fmt,
+        node_attr={
+            "shape": "ellipse",
+            "style": "filled",
+            "fontname": "Helvetica",
+            "fillcolor": "lightblue",
+        },
+        engine="dot",
+    )
+
+    dot.attr(rankdir="TB" if orientation == "vertical" else "LR")
+
+    # Add Nodes
+    for node_id, mechanism in scm._nodes.items():
+        node_label = f"{node_id}\n{str(mechanism)}" if mechanism else str(node_id)
+        dot.node(str(node_id), label=node_label, tooltip=str(mechanism))
+
+    # Add Edges
+    for source_id, targets in scm._adj.items():
+        for target_id, edge_data in targets.items():
+            label_parts = []
+            if isinstance(edge_data, (int, float)):
+                label_parts.append(f"w: {edge_data:.2f}")
+            elif edge_data is not None and str(edge_data) != "{}" and str(edge_data) != "None":
+                label_parts.append(str(edge_data))
+
+            edge_label = "\n".join(label_parts) if label_parts else ""
+            
+            dot.edge(
+                str(source_id),
+                str(target_id),
+                label=edge_label,
+                fontsize="9",
+                fontcolor="darkgreen",
+            )
+
+    if output_path is not None:
+        out_file = Path(output_path)
+        print(f"Rendering SCM to {output_path}...")
+        try:
+            if is_html:
+                svg_data = dot.pipe(format="svg").decode("utf-8")
+                html_content = f"<!DOCTYPE html>\n<html>\n<head>\n<title>SCM Plot</title>\n</head>\n<body style='text-align: center; margin-top: 50px;'>\n{svg_data}\n</body>\n</html>"
+                out_file.write_text(html_content, encoding="utf-8")
+            else:
+                dot.render(str(out_file.with_suffix("")), cleanup=True)
             print("Done.")
         except Exception as e:
             print(f"Graphviz render failed: {e}. Check if graphviz is installed on system.")
