@@ -210,13 +210,20 @@ def construct_random_data_region_graph(
             for var, dist in input_dists.items()
         }
 
-        data_slices = partition_randomly(
-            data_slice=current_data_slice,
-            conj_vars=conj_vars,
-            split_arity=split_arity,
-            min_examples=min_examples,
-            input_dists=constrainted_input_dists,
-        )
+        conj_dists = {var: constrainted_input_dists[var] for var in conj_vars}
+
+        if not conj_dists:
+            data_slices = [current_data_slice]
+        else:
+            data_slices = partition_randomly(
+                data_slice=current_data_slice,
+                conj_dists=conj_dists,
+                split_arity=split_arity,
+                min_examples=min_examples,
+            )
+            if not data_slices:
+                logger.debug(f"Failed to find valid split. Falling back to single partition.")
+                data_slices = [current_data_slice]
 
         new_partitions: List[Tuple[int, DataPartitionNode]] = []
         for data_slice in data_slices:
@@ -318,12 +325,19 @@ def construct_random_md_data_region_graph(
             if var in md_vnode.md_set
         }
 
-        data_slices = partition_randomly(
-            data_slice=current_data_slice,
-            split_arity=split_arity,
-            min_examples=min_examples,
-            conj_dists=conj_dists,
-        )
+        if not conj_dists:
+            data_slices = [current_data_slice]
+        else:
+            data_slices = partition_randomly(
+                data_slice=current_data_slice,
+                split_arity=split_arity,
+                min_examples=min_examples,
+                conj_dists=conj_dists,
+            )
+            # Fall back to a single, full partition if no valid split configurations are found
+            if not data_slices:
+                logger.debug("Failed to find valid split. Falling back to single partition.")
+                data_slices = [current_data_slice]
 
         for data_slice in data_slices:
             l_md_child_id, r_md_child_id = md_var_decomp.get_children_pair(
@@ -344,7 +358,7 @@ def construct_random_md_data_region_graph(
             l_rg_node = DataRegionNode(
                 scope=l_md_child.scope,
                 row_ids=data_slice.row_ids,
-                constraints=data_slice.constraints,
+                constraints=data_slice.constraints.filter_by_vars(l_md_child.scope),
             )
             rg.add_node(l_rg_node_id, l_rg_node)
             rg_nid_to_md_vid[l_rg_node_id] = l_md_child_id
@@ -353,7 +367,7 @@ def construct_random_md_data_region_graph(
             r_rg_node = DataRegionNode(
                 scope=r_md_child.scope,
                 row_ids=data_slice.row_ids,
-                constraints=data_slice.constraints,
+                constraints=data_slice.constraints.filter_by_vars(r_md_child.scope),
             )
             rg.add_node(r_rg_node_id, r_rg_node)
             rg_nid_to_md_vid[r_rg_node_id] = r_md_child_id
@@ -407,7 +421,7 @@ def construct_spn_from_region_graph(
             circuit.add_node(prod_node_id, prod_node)
             circuit.add_edge(dummy_sum_node_id, prod_node_id, 1.0)  # Dummy weight
 
-            rg_node_vars = list(rg_node.scope)
+            rg_node_vars = list(scope)
             left_scope = rg_node_vars[: len(rg_node_vars) // 2]
             right_scope = rg_node_vars[len(rg_node_vars) // 2 :]
 
@@ -478,7 +492,11 @@ def construct_spn_from_region_graph(
             )
             rg_parent_id = rg_node_parents[0]
             rg_parent_node = rg.get_node_data(rg_parent_id)
-            proportion = len(rg_node.row_ids) / len(rg_parent_node.row_ids)
+            proportion = (
+                (len(rg_node.row_ids) / len(rg_parent_node.row_ids))
+                if len(rg_parent_node.row_ids) > 0
+                else 0.0
+            )
             ac_parent_id = rg_node_to_ac_node[rg_parent_id]
             ac_parent_node = circuit.get_node_data(ac_parent_id)
             assert isinstance(ac_parent_node, SumNode), (

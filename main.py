@@ -1,15 +1,12 @@
 import math
 
-from src.construction.rat_spn import create_rat_spn
 from src.graph import plot_dag
+
+from src.construction.rat_spn import create_rat_spn
 from src.helpers import normal, synthesize_data, uniform
 from src.symbolic import (
     AdditiveNoiseMechanism,
-    ArithmeticNode,
-    LeafNode,
-    ProductNode,
     StructuralCausalModel,
-    SumNode,
 )
 
 
@@ -52,3 +49,12 @@ plot = plot_dag(spn)
 
 # Plot in a window
 plot.view()
+
+# - Fix the XPC TensorizedCircuit compilation bug (DAG contains skip connections) -
+# likely due to the fact that the region graph can have edges that skip levels
+# (e.g. from a leaf to a product node several levels up). We may need to add dummy
+# sum nodes to break these skip connections and ensure a proper layered structure
+# for TensorizedCircuit compilation. Didn't I already do this? It was working...
+# Also, optimal vtree given DAG? optimal vtree given CPDAG?
+#
+# - Understand and verify the benchmarks

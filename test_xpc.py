@@ -4,21 +4,26 @@ import numpy as np
 import torch
 
 from src.construction.random_vtree import construct_random_vtree
-from src.construction.xpc import construct_random_data_region_graph, construct_spn_from_region_graph
-from src.graph import plot_dag
+from src.construction.xpc import (
+    construct_random_data_region_graph,
+    construct_random_md_data_region_graph,
+    construct_spn_from_region_graph,
+)
 from src.helpers import normal, synthesize_data, uniform
 from src.symbolic import (
     AdditiveNoiseMechanism,
     Decomposability,
     Determinism,
     GaussianDistribution,
+    MarginalDeterminism,
+    MDVTree,
     Smoothness,
     StructuralCausalModel,
 )
-from src.utils.bitset import BitSet
+from src.symbolic.io_utils import plot_dag
 
 
-seed = 123
+seed = 32
 random.seed(seed)
 np.random.seed(seed)
 torch.manual_seed(seed)
@@ -48,27 +53,37 @@ scm.add_variable("M", mobility_mech, parents=["H"])
 df = synthesize_data(scm, n_samples=1000)
 
 
-rand_vtree = construct_random_vtree(num_vars=4)
+rand_vtree = construct_random_vtree(vars={0, 1, 2, 3})
+md_vtree = MDVTree.from_vtree(rand_vtree, md_sets=[{0, 1, 2, 3}])
 
-
+plot_dag(md_vtree).view()
 input_dists = {
-    0: GaussianDistribution(scope=BitSet([0]), mean=df["A"].mean(), stddev=df["A"].std()),
-    1: GaussianDistribution(scope=BitSet([1]), mean=df["F"].mean(), stddev=df["F"].std()),
-    2: GaussianDistribution(scope=BitSet([2]), mean=df["H"].mean(), stddev=df["H"].std()),
-    3: GaussianDistribution(scope=BitSet([3]), mean=df["M"].mean(), stddev=df["M"].std()),
+    0: GaussianDistribution(var=0, mean=df["A"].mean(), stddev=df["A"].std()),
+    1: GaussianDistribution(var=1, mean=df["F"].mean(), stddev=df["F"].std()),
+    2: GaussianDistribution(var=2, mean=df["H"].mean(), stddev=df["H"].std()),
+    3: GaussianDistribution(var=3, mean=df["M"].mean(), stddev=df["M"].std()),
 }
 
 
-data_region_graph = construct_random_data_region_graph(
+data_region_graph = construct_random_md_data_region_graph(
     data=df.to_numpy(),
     input_dists=input_dists,
-    min_examples=100,
+    min_examples=20,
     split_arity=3,
-    var_decomp=rand_vtree,
+    md_var_decomp=md_vtree,
 )
+
+plot_dag(data_region_graph).view()
 
 spn = construct_spn_from_region_graph(data_region_graph, input_dists)
 
 print("SPN is smooth:", spn.check_property(Smoothness()))
 print("SPN is decomposable:", spn.check_property(Decomposability()))
 print("SPN is deterministic:", spn.check_property(Determinism()))
+print(
+    "SPN is marginally deterministic:",
+    spn.check_property(MarginalDeterminism(target_scope={0, 1, 2})),
+)
+
+plot = plot_dag(spn)
+plot.view()
