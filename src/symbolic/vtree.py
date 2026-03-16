@@ -1,4 +1,4 @@
-from typing import Any, Dict
+from typing import Any, Dict, List, Set
 
 from src.utils import BitSet
 
@@ -49,7 +49,7 @@ class MDVTree(BinaryTree[int, MDVNode, None]):
     """An md-vtree (marginal deterministic vtree) represented as a directed acyclic graph."""
 
     @classmethod
-    def from_vtree(cls, vtree: VTree, md_sets: Dict[int, BitSet]) -> "MDVTree":
+    def from_vtree(cls, vtree: VTree, md_sets: List[Set[int]]) -> "MDVTree":
         """
         Compute optimal labeling of a VTree given a list of marginal determinism sets following the
         algorithm described in Wang & Kwiatkowska (202?).
@@ -57,7 +57,7 @@ class MDVTree(BinaryTree[int, MDVNode, None]):
         :param vtree: The input VTree to label
         :type vtree: VTree
         :param md_sets: List of required marginal determinism sets to use for labeling
-        :type md_sets: List[BitSet]
+        :type md_sets: List[Set[int]]
         :return: An MDVTree with the same structure as the input VTree, but with optimal labels assigned to each node.
         :rtype: MDVTree
         """

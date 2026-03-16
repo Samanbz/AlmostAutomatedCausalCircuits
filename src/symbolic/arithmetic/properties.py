@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Dict
+from typing import TYPE_CHECKING, Dict, Set
 
 from src.utils import BitSet
 
@@ -56,6 +56,9 @@ class Decomposability(Property):
         for i in range(len(child_scopes)):
             for j in range(i + 1, len(child_scopes)):
                 if not child_scopes[i].intersection(child_scopes[j]).is_empty:
+                    print(
+                        f"Decomposability violated at ProductNode {node_id}. Child {children[i]} scope {child_scopes[i]} intersects with child {children[j]} scope {child_scopes[j]}"
+                    )
                     return False
         return True
 
@@ -157,8 +160,8 @@ class MarginalDeterminism(Property):
     - The sum node T is Q-deterministic (children have disjoint marginalized supports on Q).
     """
 
-    def __init__(self, target_scope: BitSet):
-        self.target_scope = target_scope
+    def __init__(self, target_scope: Set):
+        self.target_scope = BitSet(target_scope)
 
     def check(self, node_id: int, circuit: "SymbolicArithmeticCircuit") -> bool:
         node = circuit.get_node_data(node_id)
