@@ -33,80 +33,48 @@ def uniform(low: float, high: float) -> Callable[[int], np.ndarray]:
     return lambda n: np.random.uniform(low, high, size=n)
 
 
-def _plot_grid(
-    matrix: np.ndarray | torch.Tensor,
-    cmap: str,
-    vmin: float,
-    vmax: float,
-    title: str,
-    filename: str = None,
-) -> None:
-    """Helper to plot a matrix as a grid with specific colormaps and bounds."""
-    rows, cols = matrix.shape
-    plt.figure(figsize=(8, 8))
-    plt.imshow(matrix, cmap=cmap, vmin=vmin, vmax=vmax, aspect="equal", interpolation="nearest")
-
-    # Gridlines configuration
-    ax = plt.gca()
-
-    if rows * cols < 400:  # Only show labels if matrix is small enough
-        ax.set_xticks(np.arange(cols))
-        ax.set_yticks(np.arange(rows))
-    else:
-        # For large matrices, turn off labels to avoid clutter
-        ax.set_xticks([])
-        ax.set_yticks([])
-
-    # Minor ticks at half-integers (-0.5, 0.5...) for gridlines
-    # Use simpler grid generation for large matrices to avoid performance hit
-    if rows * cols < 2500:
-        ax.set_xticks(np.arange(-0.5, cols, 1), minor=True)
-        ax.set_yticks(np.arange(-0.5, rows, 1), minor=True)
-        ax.grid(which="minor", color="gray", linestyle="-", linewidth=1)
-    else:
-        # If too big, skip the gridlines or they will just make it gray block
-        pass
-
-    # Ensure major gridlines are off (in case they are on by default)
-    ax.grid(which="major", visible=False)
-    # Remove minor tick marks (the little lines sticking out)
-    ax.tick_params(which="minor", size=0)
-    ax.tick_params(which="major", size=0)
-
-    plt.title(title)
-    plt.tight_layout()
-
-    if filename:
-        plt.savefig(filename)
-        print(f"Plot saved to {filename}")
-    else:
-        plt.show()
+def create_sparse_stochastic_matrix(n, m=None, sparsity=0.9):
+    if m is None:
+        m = n
+    A = torch.rand(n, m)
+    mask = (torch.rand_like(A) > sparsity).float()
+    A_sparse = A * mask
+    zero_rows = A_sparse.sum(dim=1) == 0
+    if zero_rows.any():
+        A_sparse[zero_rows, torch.randint(0, m, (zero_rows.sum(),))] = 1.0
+    row_sums = A_sparse.sum(dim=1, keepdim=True)
+    return A_sparse / row_sums
 
 
-def plot_matrix(
-    matrix: np.ndarray | torch.Tensor, title: str = "Connection Matrix", filename: str = None
-) -> None:
+def create_banded_stochastic_matrix(n, m=None, bandwidth=1):
+    if m is None:
+        m = n
+    A = torch.zeros(n, m)
+    for i in range(n):
+        if n > 1:
+            center = i * (m - 1) / (n - 1)
+        else:
+            center = (m - 1) / 2
+
+        c = int(center + 0.5)
+        start = max(0, c - bandwidth)
+        end = min(m, c + bandwidth + 1)
+
+        if start < end:
+            A[i, start:end] = torch.rand(end - start)
+
+    row_sums = A.sum(dim=1, keepdim=True)
+    # Handle rows that might sum to zero (possible in rectangular banded matrices) by avoiding division by zero
+    row_sums[row_sums == 0] = 1.0
+    return A / row_sums
+
+
+def create_dense_stochastic_matrix(n, m=None):
     """
-    Utility function to visualize a boolean matrix as a grid.
-    Black for 1 (True), White for 0 (False).
+    Generates a dense n x m matrix where all elements are > 0 and each row sums to 1.
     """
-    _plot_grid(matrix, cmap="binary", vmin=0, vmax=1, title=title, filename=filename)
-
-
-def plot_diff_matrix(
-    matrix: np.ndarray | torch.Tensor, title: str = "Difference Matrix", filename: str = None
-) -> None:
-    """
-    Utility function to visualize a difference matrix as a grid.
-    Values must be in the range [-1, 1]. Colors range from red (-1) to white (0) to green (1).
-    """
-    if isinstance(matrix, torch.Tensor):
-        matrix = matrix.detach().cpu().numpy()
-
-    if np.any(matrix < -1) or np.any(matrix > 1):
-        raise ValueError("Matrix contains values outside the range [-1, 1].")
-
-    # Custom colormap: Red (-1) -> White (0) -> Green (1)
-    cmap = LinearSegmentedColormap.from_list("RdWhGn", ["red", "white", "green"])
-
-    _plot_grid(matrix, cmap=cmap, vmin=-1, vmax=1, title=title, filename=filename)
+    if m is None:
+        m = n
+    A = torch.rand(n, m) + 1e-6
+    row_sums = A.sum(dim=1, keepdim=True)
+    return A / row_sums
