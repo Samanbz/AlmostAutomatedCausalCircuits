@@ -4,92 +4,98 @@ import torch
 import torch.nn as nn
 
 
-def _get_slices(A: torch.Tensor):
+def _get_rectangular_slices(A: torch.Tensor, b: int, c: int, k: int, b1: int):
     """
-    Reshapes the matrix A into m^2 independent m x m slices.
+    Reshapes the rectangular matrix A into (b * k) independent (c x b1) slices.
     """
-    n = A.shape[0]
-    m = int(math.sqrt(n))
-    A_4d = A.view(m, m, m, m)
-    M_batched = A_4d.permute(1, 2, 0, 3).reshape(m * m, m, m)
+    A_4d = A.view(c, b, k, b1)  # Axes: (l, j, k, i)
+    M_batched = A_4d.permute(1, 2, 0, 3).reshape(b * k, c, b1)
     return M_batched
 
 
 def _batched_greedy_mwvc(A_batched: torch.Tensor, mask_batched: torch.Tensor):
     """
-    GPU-Parallel Greedy Minimum Weight Vertex Cover.
-    Runs entirely on device tensor math without loops over slices.
+    GPU-Parallel Greedy Minimum Weight Vertex Cover generalized for rectangular slices.
     """
-    B, m, _ = A_batched.shape
+    B, c, b1 = A_batched.shape
     device = A_batched.device
 
-    # F_curr tracks the remaining forbidden edges (1 = forbidden, 0 = allowed)
     F_curr = (1.0 - mask_batched).float()
-
-    # Calculate costs (L2 energy of ALLOWED connections in each row/col)
     allowed_A = A_batched * mask_batched
-    C_row = (allowed_A**2).sum(dim=2)  # shape: (B, m)
-    C_col = (allowed_A**2).sum(dim=1)  # shape: (B, m)
 
-    row_del = torch.zeros((B, m), dtype=torch.bool, device=device)
-    col_del = torch.zeros((B, m), dtype=torch.bool, device=device)
+    C_row = (allowed_A**2).sum(dim=2)
+    C_col = (allowed_A**2).sum(dim=1)
+
+    row_del = torch.zeros((B, c), dtype=torch.bool, device=device)
+    col_del = torch.zeros((B, b1), dtype=torch.bool, device=device)
 
     eps = 1e-8
 
-    # The loop runs at most 2m times (max possible row/col deletions)
-    for _ in range(m * 2):
+    for _ in range(c + b1):
         row_edges = F_curr.sum(dim=2)
         col_edges = F_curr.sum(dim=1)
 
-        # If no forbidden edges remain in ANY batch, we are perfectly done
         if row_edges.max() == 0:
             break
 
-        # Efficiency = Edges removed / Cost of destroying valid data
         row_eff = row_edges / (C_row + eps)
         col_eff = col_edges / (C_col + eps)
 
-        # Ignore already deleted rows/cols
         row_eff[row_del] = -1.0
         col_eff[col_del] = -1.0
 
-        # Find best row and col for each batch
         max_r_eff, best_r = row_eff.max(dim=1)
         max_c_eff, best_c = col_eff.max(dim=1)
 
         active_batches = row_edges.sum(dim=1) > 0
 
-        # Decide whether row or col is more efficient for each active batch
         choose_row = active_batches & (max_r_eff >= max_c_eff)
         choose_col = active_batches & (~choose_row)
 
         if choose_row.any():
             r_idx = best_r[choose_row]
             row_del[choose_row, r_idx] = True
-            # Zero out the forbidden edges that this row just covered
             F_curr[choose_row, r_idx, :] = 0.0
 
         if choose_col.any():
             c_idx = best_c[choose_col]
             col_del[choose_col, c_idx] = True
-            # Zero out the forbidden edges that this column just covered
             F_curr[choose_col, :, c_idx] = 0.0
 
     return row_del, col_del
 
 
 class MonarchMatrix(nn.Module):
-    def __init__(self, L: torch.Tensor, R: torch.Tensor):
+    def __init__(
+        self, b: int, c: int, k: int, b1: int, L: torch.Tensor = None, R: torch.Tensor = None
+    ):
+        """
+        Creates a Generalized Rectangular Monarch Matrix.
+        If L and R are not provided, initializes them randomly.
+        """
         super().__init__()
-        assert L.shape == R.shape and L.dim() == 3
-        self.m = L.shape[0]
-        self.n = self.m * self.m
-        self.L = nn.Parameter(L)
-        self.R = nn.Parameter(R)
+
+        self.b = b
+        self.c = c
+        self.k = k
+        self.b1 = b1
+
+        self.in_dim = k * b1
+        self.out_dim = c * b
+
+        if L is not None and R is not None:
+            assert L.shape == (b, c, k), f"Expected L shape {(b, c, k)}, got {L.shape}"
+            assert R.shape == (k, b, b1), f"Expected R shape {(k, b, b1)}, got {R.shape}"
+            self.L = nn.Parameter(L)
+            self.R = nn.Parameter(R)
+        else:
+            # Standard PyTorch initialization (scaled by 1 / sqrt(fan_in))
+            self.L = nn.Parameter(torch.randn(b, c, k) / math.sqrt(k))
+            self.R = nn.Parameter(torch.randn(k, b, b1) / math.sqrt(b1))
 
     @property
     def shape(self):
-        return (self.n, self.n)
+        return (self.out_dim, self.in_dim)
 
     def forward(self, x):
         return self.matmul(x)
@@ -98,47 +104,27 @@ class MonarchMatrix(nn.Module):
         return self.matmul(x)
 
     def matmul(self, x):
-        """
-        Steps to multiply x by a Monarch matrix M = PLP^T R:
-        1. Multiply R by x: y_{kj} = \sum_i R_{kji} x_{ki}
-        2. Multiply PLP^T by y: z_{lj} = \sum_k L_{jlk} y_{kj}
-        3. Reshape z back into a vector of size n, and return this.
-        """
-        # Assume x can be 1D (n,) or 2D (batch, n)
         is_1d = x.dim() == 1
         if is_1d:
-            x = x.unsqueeze(0)  # (1, n)
+            x = x.unsqueeze(0)
 
         batch_size = x.shape[0]
 
-        # Reshape x to (batch, m, m). x_{b, k, i}
-        x_reshaped = x.view(batch_size, self.m, self.m)
+        # 1. Reshape x and multiply by R
+        x_reshaped = x.view(batch_size, self.k, self.b1)
+        x_perm = x_reshaped.permute(1, 0, 2).contiguous()  # (k, batch, b1)
 
-        # 1. Multiply R by x: y_{b, k, j} = \sum_i R_{k, j, i} x_{b, k, i}
-        # Use BMM. Treat k as batch dim.
-        # x: (b, k, i) -> permute to (k, b, i)
-        x_perm = x_reshaped.permute(1, 0, 2).contiguous()
+        R_perm = self.R.transpose(1, 2)  # (k, b1, b)
+        y = torch.bmm(x_perm, R_perm)  # (k, batch, b)
 
-        # R: (k, j, i) -> permute to (k, i, j)
-        R_perm = self.R.transpose(1, 2)
+        # 2. Permute intermediate result and multiply by L
+        y_perm = y.permute(2, 1, 0).contiguous()  # (b, batch, k)
 
-        # y: (k, b, j)
-        y = torch.bmm(x_perm, R_perm)
+        L_perm = self.L.transpose(1, 2)  # (b, k, c)
+        z = torch.bmm(y_perm, L_perm)  # (b, batch, c)
 
-        # 2. Multiply PLP^T by y: z_{b, l, j} = \sum_k L_{j, l, k} y_{b, k, j}
-        # Use BMM. Treat j as batch dim.
-        # y: (k, b, j) -> permute to (j, b, k)
-        y_perm = y.permute(2, 1, 0).contiguous()
-
-        # L: (j, l, k) -> permute to (j, k, l)
-        L_perm = self.L.transpose(1, 2)
-
-        # z: (j, b, l)
-        z = torch.bmm(y_perm, L_perm)
-
-        # 3. Reshape z back into a vector of size n
-        # z: (j, b, l) -> permute to (b, l, j)
-        out = z.permute(1, 2, 0).contiguous().view(batch_size, self.n)
+        # 3. Permute back and flatten to output vector
+        out = z.permute(1, 2, 0).contiguous().view(batch_size, self.out_dim)
 
         if is_1d:
             out = out.squeeze(0)
@@ -146,62 +132,59 @@ class MonarchMatrix(nn.Module):
         return out
 
     @classmethod
-    def from_dense(cls, mat: torch.Tensor, m: int = None, respect_sparsity: bool = True):
-        """
-        Projection of a dense n x n matrix into Monarch factors L and R.
-        Uses greedy MWVC to handle sparsity constraints if respected_sparsity is True.
-        """
-        assert mat.dim() == 2 and mat.shape[0] == mat.shape[1]
-        n = mat.shape[0]
+    def from_dense(
+        cls,
+        mat: torch.Tensor,
+        b: int = None,
+        c: int = None,
+        k: int = None,
+        b1: int = None,
+        respect_sparsity: bool = True,
+    ):
+        assert mat.dim() == 2
+        out_dim, in_dim = mat.shape
 
-        if m is None:
-            m = int(math.sqrt(n))
-        assert n == m * m, "n must be a perfect square"
+        if b is None or c is None or k is None or b1 is None:
+            if out_dim == in_dim and math.isqrt(in_dim) ** 2 == in_dim:
+                m = math.isqrt(in_dim)
+                b, c, k, b1 = m, m, m, m
+            else:
+                raise ValueError(
+                    "For rectangular matrices, you must explicitly specify block dimensions: b, c, k, b1."
+                )
 
-        M_batched = _get_slices(mat)
+        assert out_dim == c * b, f"out_dim ({out_dim}) must equal c * b ({c * b})"
+        assert in_dim == k * b1, f"in_dim ({in_dim}) must equal k * b1 ({k * b1})"
+
+        M_batched = _get_rectangular_slices(mat, b, c, k, b1)
 
         if respect_sparsity:
             mask = (mat != 0).float()
-            mask_batched = _get_slices(mask)
+            mask_batched = _get_rectangular_slices(mask, b, c, k, b1)
 
-            # 1. Find optimal rows/cols to sacrifice to cover all zeros
             row_del, col_del = _batched_greedy_mwvc(M_batched, mask_batched)
 
-            # 2. Modify the target matrix BEFORE SVD
             M_safe = M_batched.clone()
-
-            # Broadcast col_del from (B, m) -> (B, 1, m) -> (B, m, m)
             row_mask = row_del.unsqueeze(-1)
             col_mask = col_del.unsqueeze(1)
-
-            # Zero out the sacrificed rows and columns
             M_safe = M_safe * (~row_mask).float() * (~col_mask).float()
         else:
             M_safe = M_batched
 
-        # 3. Exact SVD on the mathematically safe matrix
         U, S, Vh = torch.linalg.svd(M_safe, full_matrices=False)
 
         u = U[:, :, 0] * torch.sqrt(S[:, 0]).unsqueeze(1)
         v = Vh[:, 0, :] * torch.sqrt(S[:, 0]).unsqueeze(1)
 
-        u = u.view(m, m, m)
-        v = v.view(m, m, m)
+        u_3d = u.view(b, k, c)
+        L_tilde = u_3d.permute(0, 2, 1)  # (b, c, k)
 
-        L_tilde = u.permute(0, 2, 1)
-        R_tilde = v.permute(1, 0, 2)
+        v_3d = v.view(b, k, b1)
+        R_tilde = v_3d.permute(1, 0, 2)  # (k, b, b1)
 
-        return cls(L_tilde, R_tilde)
+        # Pass the extracted dimensions and factors to the new constructor
+        return cls(b=b, c=c, k=k, b1=b1, L=L_tilde, R=R_tilde)
 
     def to_dense(self):
-        """
-        Reconstructs the full n x n matrix from the Monarch factors L and R.
-        """
-        # Simply unpack the 0-th dimension to get the m blocks of size (m, m)
-        L = torch.block_diag(*self.L)
-        R = torch.block_diag(*self.R)
-
-        indices = torch.arange(self.n).view(self.m, self.m).t().contiguous().view(-1)
-        P = torch.eye(self.n, device=self.L.device)[indices]
-
-        return P @ L @ P.T @ R
+        M_4d = torch.einsum("blk,kbi->lbki", self.L, self.R)
+        return M_4d.reshape(self.out_dim, self.in_dim)
