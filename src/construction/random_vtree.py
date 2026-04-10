@@ -1,7 +1,7 @@
 import random
 from typing import Optional
 
-from src.symbolic.vtree import VNode, VTree
+from src.symbolic.vtree import MDVTree, VNode, VTree
 from src.utils import BitSet
 
 
@@ -83,3 +83,27 @@ def construct_random_vtree(vars: set[int], conj_len: Optional[int] = None) -> VT
         remaining.append((right_id, right_vnode, right_vars))
 
     return vt
+
+
+def construct_random_md_vtree(
+    vars: set[int], max_subset_size: int, conj_len: Optional[int] = None
+) -> MDVTree:
+    """Constructs a random binary variable tree and labels it with Marginally Deterministic sets."""
+    base_vtree = construct_random_vtree(vars, conj_len)
+
+    md_sets = []
+
+    def get_maximal(vid: int):
+        n = base_vtree.get_node_data(vid)
+        if len(n.scope) <= max_subset_size:
+            md_sets.append(set(n.scope))
+            return
+
+        children = base_vtree.get_children_pair(vid)
+        if children:
+            get_maximal(children[0])
+            get_maximal(children[1])
+
+    get_maximal(base_vtree.get_root())
+
+    return MDVTree.from_vtree(base_vtree, md_sets)
