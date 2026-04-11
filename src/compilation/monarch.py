@@ -3,6 +3,19 @@ import math
 import torch
 import torch.nn as nn
 
+from src.compilation.base_circuit import SafeLogSumExp
+
+
+def log_bmm(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
+    """
+    Batched matrix multiplication in log space using SafeLogSumExp.
+    Computes log(exp(A) @ exp(B))
+    A: (b, n, m)
+    B: (b, m, p)
+    returns: (b, n, p)
+    """
+    return SafeLogSumExp.apply(A.unsqueeze(-1) + B.unsqueeze(1), 2)
+
 
 def _get_rectangular_slices(A: torch.Tensor, b: int, c: int, k: int, b1: int):
     """
@@ -188,3 +201,102 @@ class MonarchMatrix(nn.Module):
     def to_dense(self):
         M_4d = torch.einsum("blk,kbi->lbki", self.L, self.R)
         return M_4d.reshape(self.out_dim, self.in_dim)
+
+
+class LogMonarchMatrix(nn.Module):
+    def __init__(
+        self,
+        b: int,
+        c: int,
+        k: int,
+        b1: int,
+        log_L: torch.Tensor = None,
+        log_R: torch.Tensor = None,
+    ):
+        super().__init__()
+        self.b = b
+        self.c = c
+        self.k = k
+        self.b1 = b1
+        self.out_dim = c * b
+        self.in_dim = k * b1
+
+        if log_L is not None and log_R is not None:
+            assert log_L.shape == (b, c, k), f"Expected log_L shape {(b, c, k)}, got {log_L.shape}"
+            assert log_R.shape == (k, b, b1), (
+                f"Expected log_R shape {(k, b, b1)}, got {log_R.shape}"
+            )
+            self.log_L = nn.Parameter(log_L)
+            self.log_R = nn.Parameter(log_R)
+        else:
+            self.log_L = nn.Parameter(torch.randn(b, c, k) / math.sqrt(k))
+            self.log_R = nn.Parameter(torch.randn(k, b, b1) / math.sqrt(b1))
+
+    @property
+    def shape(self):
+        return (self.out_dim, self.in_dim)
+
+    @classmethod
+    def from_dense(
+        cls,
+        mat: torch.Tensor,
+        b: int = None,
+        c: int = None,
+        k: int = None,
+        b1: int = None,
+        respect_sparsity: bool = True,
+    ):
+        base_monarch = MonarchMatrix.from_dense(
+            mat, b=b, c=c, k=k, b1=b1, respect_sparsity=respect_sparsity
+        )
+
+        L_val = torch.abs(base_monarch.L.detach())
+        R_val = torch.abs(base_monarch.R.detach())
+
+        # Add a small epsilon to avoid log(0)
+        log_L = torch.log(L_val + 1e-10)
+        log_R = torch.log(R_val + 1e-10)
+
+        return cls(
+            b=base_monarch.b,
+            c=base_monarch.c,
+            k=base_monarch.k,
+            b1=base_monarch.b1,
+            log_L=log_L,
+            log_R=log_R,
+        )
+
+    def forward(self, log_x):
+        is_1d = log_x.dim() == 1
+        if is_1d:
+            log_x = log_x.unsqueeze(0)
+
+        batch_size = log_x.shape[0]
+
+        log_x_reshaped = log_x.view(batch_size, self.k, self.b1)
+        log_x_perm = log_x_reshaped.permute(1, 0, 2).contiguous()
+
+        log_R_perm = self.log_R.transpose(1, 2)
+        log_y = log_bmm(log_x_perm, log_R_perm)
+
+        log_y_perm = log_y.permute(2, 1, 0).contiguous()
+
+        log_L_perm = self.log_L.transpose(1, 2)
+        log_z = log_bmm(log_y_perm, log_L_perm)
+
+        out = log_z.permute(1, 2, 0).contiguous().view(batch_size, self.out_dim)
+
+        if is_1d:
+            out = out.squeeze(0)
+
+        return out
+
+    def to_dense(self):
+        # We compute the dense log_M_4d shape (c, b, k, b1), which matches lbki
+        # log_L is (b, c, k). We permute to (c, b, k) -> l, b, k, and add a dimension for i
+        log_L_perm = self.log_L.permute(1, 0, 2).unsqueeze(-1)
+        # log_R is (k, b, b1). We permute to (b, k, b1) -> b, k, i, and add a dimension for l
+        log_R_perm = self.log_R.permute(1, 0, 2).unsqueeze(0)
+
+        log_M_4d = log_L_perm + log_R_perm
+        return log_M_4d.reshape(self.out_dim, self.in_dim)

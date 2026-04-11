@@ -10,29 +10,21 @@ from src.compilation.base_circuit import (
     SafeLogSumExp,
     TensorizedLayer,
 )
-from src.compilation.monarch import MonarchMatrix
-from src.compilation.padding import pad_to_uniform_depth
+from src.compilation.monarch import LogMonarchMatrix, MonarchMatrix
 from src.compilation.tensorized_circuit import SumLayer, TensorizedCircuit
 from src.symbolic import SymbolicArithmeticCircuit
 
 
-def log_bmm(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
-    """
-    Batched matrix multiplication in log space using SafeLogSumExp.
-    Computes log(exp(A) @ exp(B))
-    A: (b, n, m)
-    B: (b, m, p)
-    returns: (b, n, p)
-    """
-    return SafeLogSumExp.apply(A.unsqueeze(-1) + B.unsqueeze(1), 2)
-
-
 class MonarchSumLayer(TensorizedLayer):
     def __init__(
-        self, node_ids: List[int], connections: torch.Tensor, respect_sparsity: bool = True
+        self,
+        out_idx: List[int],
+        in_idx: List[int],
+        connections: torch.Tensor,
+        respect_sparsity: bool = True,
     ):
-        super().__init__(node_ids)
-        self.node_ids = node_ids
+        super().__init__(out_idx)
+        self.in_idx = in_idx
 
         out_dim, in_dim = connections.shape
         b, c, k, b1 = None, None, None, None
@@ -70,63 +62,91 @@ class MonarchSumLayer(TensorizedLayer):
         L_val = torch.abs(M.L.detach())
         R_val = torch.abs(M.R.detach())
 
-        R_val = R_val / R_val.sum(dim=-1, keepdim=True).clamp(min=1e-10)
-        L_val = L_val / L_val.sum(dim=-1, keepdim=True).clamp(min=1e-10)
+        log_L = torch.log(L_val.clamp(min=1e-12))
+        log_R = torch.log(R_val.clamp(min=1e-12))
 
-        self.log_L = nn.Parameter(torch.log(L_val + 1e-10), requires_grad=True)
-        self.log_R = nn.Parameter(torch.log(R_val + 1e-10), requires_grad=True)
+        self.log_monarch = LogMonarchMatrix(b, c, k, b1, log_L, log_R)
+
+        self.log_L = self.log_monarch.log_L
+        self.log_R = self.log_monarch.log_R
 
         self.register_buffer("connections_mask", connections == 0)
+        self.register_buffer("row_log_sums_cache", None)
+        self._cache_normalization()
 
-    def forward(self, input_values: torch.Tensor) -> torch.Tensor:
-        batch_size = input_values.shape[0]
+    def _cache_normalization(self):
+        with torch.no_grad():
+            zero_input = torch.zeros(
+                (1, self.log_monarch.in_dim), dtype=self.log_L.dtype, device=self.log_L.device
+            )
+            sums = self.log_monarch(zero_input)
+            self.row_log_sums_cache = torch.where(
+                torch.isneginf(sums), torch.zeros_like(sums), sums
+            )
 
-        log_x_reshaped = input_values.view(batch_size, self.k, self.b1)
-        log_x_perm = log_x_reshaped.permute(1, 0, 2).contiguous()
+    def forward(self, global_buffer: torch.Tensor) -> torch.Tensor:
+        input_values = global_buffer[:, self.in_idx]
 
-        log_R_perm = self.log_R.transpose(1, 2)
-        log_y = log_bmm(log_x_perm, log_R_perm)
+        # Fast forward pass in log space without instantiating the dense full matrix
+        out = self.log_monarch(input_values)
 
-        log_y_perm = log_y.permute(2, 1, 0).contiguous()
+        # Normalize the outputs
+        out = out - self.row_log_sums_cache
 
-        log_L_perm = self.log_L.transpose(1, 2)
-        log_z = log_bmm(log_y_perm, log_L_perm)
-
-        out = log_z.permute(1, 2, 0).contiguous().view(batch_size, self.out_dim)
-
+        global_buffer[:, self.out_idx] = out
         return out
 
     def update_params(self):
         with torch.no_grad():
             self._update_factor(self.log_R)
             self._update_factor(self.log_L)
+            self._cache_normalization()
 
     def _update_factor(self, param: nn.Parameter):
         responsibilities = param.grad
         if responsibilities is None:
             return
 
+        current_probs = torch.exp(param)
+        structural_zeros = current_probs == 0
+
         total_resp = responsibilities.sum(dim=-1, keepdim=True)
         mask = total_resp > 0
 
         smoothed_resp = responsibilities + 1e-5
-        new_probs = smoothed_resp / smoothed_resp.sum(dim=-1, keepdim=True)
+        # Do not give mass to structural zeros
+        smoothed_resp.masked_fill_(structural_zeros, 0.0)
 
-        current_probs = torch.exp(param)
+        new_probs = smoothed_resp / smoothed_resp.sum(dim=-1, keepdim=True).clamp(min=1e-10)
+
         new_probs = torch.where(mask, new_probs, current_probs)
+        new_probs.masked_fill_(structural_zeros, 0.0)
 
-        param.copy_(torch.log(new_probs))
+        param.copy_(
+            torch.where(
+                structural_zeros,
+                torch.tensor(float("-inf"), device=param.device),
+                torch.log(new_probs.clamp(min=1e-10)),
+            )
+        )
         param.grad.zero_()
 
 
 class MonarchCircuit(TensorizedCircuit):
     def __init__(self, symbolic_circuit: SymbolicArithmeticCircuit, respect_sparsity: bool = True):
         nn.Module.__init__(self)
-        symbolic_circuit = pad_to_uniform_depth(symbolic_circuit)
+
         self.layers = nn.ModuleList()
 
-        node_layers = symbolic_circuit.layered_topological_sort(reverse=True)
-        input_node_ids = next(node_layers)
+        self.node_to_idx = {}
+        idx = 0
+        node_layers_iter = symbolic_circuit.layered_topological_sort(reverse=True)
+
+        try:
+            input_node_ids = next(node_layers_iter)
+        except StopIteration:
+            self.num_nodes = 0
+            return
 
         input_nodes = [symbolic_circuit.get_node_data(n_id) for n_id in input_node_ids]
         means = [n.mean for n in input_nodes]
@@ -135,8 +155,14 @@ class MonarchCircuit(TensorizedCircuit):
         highs = [n.var_support.high for n in input_nodes]
         scopes = [n.var for n in input_nodes]
 
+        input_out_idx = []
+        for n_id in input_node_ids:
+            self.node_to_idx[n_id] = idx
+            input_out_idx.append(idx)
+            idx += 1
+
         input_layer = GaussianInputLayer(
-            input_node_ids,
+            input_out_idx,
             torch.tensor(means, dtype=torch.float32),
             torch.tensor(stds, dtype=torch.float32),
             torch.tensor(lows, dtype=torch.float32),
@@ -146,30 +172,50 @@ class MonarchCircuit(TensorizedCircuit):
 
         self.layers.append(input_layer)
 
-        for layer_node_ids in node_layers:
+        for layer_node_ids in node_layers_iter:
             is_sum_layer = all(symbolic_circuit.is_sum_node(node_id) for node_id in layer_node_ids)
             is_product_layer = all(
                 symbolic_circuit.is_product_node(node_id) for node_id in layer_node_ids
             )
             assert is_sum_layer or is_product_layer, "Mixed layer types are not supported"
 
+            out_idx = []
+            for n_id in layer_node_ids:
+                self.node_to_idx[n_id] = idx
+                out_idx.append(idx)
+                idx += 1
+
             if is_product_layer:
-                prev_layer_node_ids = self.layers[-1].node_ids
                 left_idx, right_idx = self._compute_product_layer_indices(
-                    symbolic_circuit, layer_node_ids, prev_layer_node_ids
+                    symbolic_circuit, layer_node_ids
                 )
-                layer = ProductLayer(layer_node_ids, left_idx, right_idx)
+                layer = ProductLayer(out_idx, left_idx, right_idx)
                 self.layers.append(layer)
 
             elif is_sum_layer:
-                prev_layer_node_ids = self.layers[-1].node_ids
+                child_node_ids = sorted(
+                    list(
+                        {
+                            child_id
+                            for node_id in layer_node_ids
+                            for child_id in symbolic_circuit.get_children(node_id)
+                        }
+                    )
+                )
+                in_idx = [self.node_to_idx[n_id] for n_id in child_node_ids]
                 connections = self._compute_sum_layer_connections(
-                    symbolic_circuit, layer_node_ids, prev_layer_node_ids
+                    symbolic_circuit, layer_node_ids, child_node_ids
                 )
                 try:
                     layer = MonarchSumLayer(
-                        layer_node_ids, connections, respect_sparsity=respect_sparsity
+                        out_idx,
+                        in_idx,
+                        connections,
+                        respect_sparsity=respect_sparsity,
                     )
                 except Exception as e:
-                    layer = SumLayer(layer_node_ids, connections)
+                    print(f"MonarchSumLayer error: {e}")
+                    layer = SumLayer(out_idx, in_idx, connections)
                 self.layers.append(layer)
+
+        self.num_nodes = idx

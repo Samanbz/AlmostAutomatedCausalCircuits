@@ -6,22 +6,24 @@ from torch import nn
 
 
 class TensorizedLayer(nn.Module):
-    def __init__(self, node_ids: List[int]):
+    def __init__(self, out_idx: List[int] = None):
         super().__init__()
-        self.node_ids = node_ids
+        self.out_idx = out_idx
 
-    def forward(self, input_values: torch.Tensor) -> torch.Tensor:
+    def forward(self, *args, **kwargs) -> torch.Tensor:
         raise NotImplementedError
 
 
 class ProductLayer(TensorizedLayer):
-    def __init__(self, node_ids: List[int], left_idx: List[int], right_idx: List[int]):
-        super().__init__(node_ids)
+    def __init__(self, out_idx: List[int], left_idx: List[int], right_idx: List[int]):
+        super().__init__(out_idx)
         self.left_idx = left_idx
         self.right_idx = right_idx
 
-    def forward(self, input_values: torch.Tensor) -> torch.Tensor:
-        return input_values[:, self.left_idx] + input_values[:, self.right_idx]
+    def forward(self, global_buffer: torch.Tensor) -> torch.Tensor:
+        res = global_buffer[:, self.left_idx] + global_buffer[:, self.right_idx]
+        global_buffer[:, self.out_idx] = res
+        return res
 
 
 class SafeLogSumExp(torch.autograd.Function):
@@ -53,21 +55,21 @@ class SafeLogSumExp(torch.autograd.Function):
 class GaussianInputLayer(TensorizedLayer):
     def __init__(
         self,
-        node_ids: List[int],
+        out_idx: List[int],
         means: torch.Tensor,
         stds: torch.Tensor,
         lows: torch.Tensor,
         highs: torch.Tensor,
         scopes: List[int],
     ):
-        super().__init__(node_ids)
+        super().__init__(out_idx)
         self.means = nn.Parameter(means, requires_grad=False)
         self.stds = nn.Parameter(stds, requires_grad=False)
         self.register_buffer("lows", lows)
         self.register_buffer("highs", highs)
         self.scopes = scopes
 
-    def forward(self, input_values: torch.Tensor) -> torch.Tensor:
+    def forward(self, global_buffer: torch.Tensor, input_values: torch.Tensor) -> torch.Tensor:
         x = input_values[:, self.scopes]
         self.saved_x = x.detach()
 
@@ -88,6 +90,8 @@ class GaussianInputLayer(TensorizedLayer):
 
         self.saved_log_pdf = trunc_log_pdf.requires_grad_(True)
         self.saved_log_pdf.retain_grad()
+
+        global_buffer[:, self.out_idx] = self.saved_log_pdf
 
         return trunc_log_pdf
 

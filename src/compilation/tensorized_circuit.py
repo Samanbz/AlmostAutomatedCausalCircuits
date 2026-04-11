@@ -17,15 +17,17 @@ logger = g_logger.getChild(__name__)
 
 
 class SumLayer(TensorizedLayer):
-    def __init__(self, node_ids: List[int], connections: torch.Tensor):
-        super().__init__(node_ids)
+    def __init__(self, out_idx: List[int], in_idx: List[int], connections: torch.Tensor):
+        super().__init__(out_idx)
+        self.in_idx = in_idx
         self.register_buffer("connections", connections)
         # Connections represent weights. Convert to log space.
         # Add a tiny epsilon to avoid log(0) for exactly zero weights.
         epsilon = 1e-10
         self.log_connections = nn.Parameter(torch.log(connections + epsilon), requires_grad=True)
 
-    def forward(self, input_values: torch.Tensor) -> torch.Tensor:
+    def forward(self, global_buffer: torch.Tensor) -> torch.Tensor:
+        input_values = global_buffer[:, self.in_idx]
         # input_values shape: (Batch_size, Num_children)
         # log_connections shape: (Num_nodes, Num_children)
 
@@ -46,7 +48,9 @@ class SumLayer(TensorizedLayer):
         log_terms = log_terms.masked_fill(zero_mask, float("-inf"))
 
         # LogSumExp over the children dimension (dim=2) using safe backward logic
-        return SafeLogSumExp.apply(log_terms, 2)
+        res = SafeLogSumExp.apply(log_terms, 2)
+        global_buffer[:, self.out_idx] = res
+        return res
 
     def update_params(self):
         with torch.no_grad():
@@ -74,8 +78,16 @@ class TensorizedCircuit(nn.Module):
         super().__init__()
         self.layers = nn.ModuleList()
 
-        node_layers = symbolic_circuit.layered_topological_sort(reverse=True)
-        input_node_ids = next(node_layers)
+        self.node_to_idx = {}
+        idx = 0
+
+        node_layers_iter = symbolic_circuit.layered_topological_sort(reverse=True)
+
+        try:
+            input_node_ids = next(node_layers_iter)
+        except StopIteration:
+            self.num_nodes = 0
+            return
 
         # assuming all input nodes are gaussian for now
         input_nodes = [symbolic_circuit.get_node_data(n_id) for n_id in input_node_ids]
@@ -85,8 +97,14 @@ class TensorizedCircuit(nn.Module):
         highs = [n.var_support.high for n in input_nodes]
         scopes = [n.var for n in input_nodes]
 
+        input_out_idx = []
+        for n_id in input_node_ids:
+            self.node_to_idx[n_id] = idx
+            input_out_idx.append(idx)
+            idx += 1
+
         input_layer = GaussianInputLayer(
-            input_node_ids,
+            input_out_idx,
             torch.tensor(means, dtype=torch.float32),
             torch.tensor(stds, dtype=torch.float32),
             torch.tensor(lows, dtype=torch.float32),
@@ -97,28 +115,44 @@ class TensorizedCircuit(nn.Module):
         self.layers.append(input_layer)
 
         # build layers bottom-up
-        for layer_node_ids in node_layers:
+        for layer_node_ids in node_layers_iter:
             is_sum_layer = all(symbolic_circuit.is_sum_node(node_id) for node_id in layer_node_ids)
             is_product_layer = all(
                 symbolic_circuit.is_product_node(node_id) for node_id in layer_node_ids
             )
             assert is_sum_layer or is_product_layer, "Mixed layer types are not supported"
 
+            out_idx = []
+            for n_id in layer_node_ids:
+                self.node_to_idx[n_id] = idx
+                out_idx.append(idx)
+                idx += 1
+
             if is_product_layer:
-                prev_layer_node_ids = self.layers[-1].node_ids
                 left_idx, right_idx = self._compute_product_layer_indices(
-                    symbolic_circuit, layer_node_ids, prev_layer_node_ids
+                    symbolic_circuit, layer_node_ids
                 )
-                layer = ProductLayer(layer_node_ids, left_idx, right_idx)
+                layer = ProductLayer(out_idx, left_idx, right_idx)
                 self.layers.append(layer)
 
             elif is_sum_layer:
-                prev_layer_node_ids = self.layers[-1].node_ids
-                connections = self._compute_sum_layer_connections(
-                    symbolic_circuit, layer_node_ids, prev_layer_node_ids
+                child_node_ids = sorted(
+                    list(
+                        {
+                            child_id
+                            for node_id in layer_node_ids
+                            for child_id in symbolic_circuit.get_children(node_id)
+                        }
+                    )
                 )
-                layer = SumLayer(layer_node_ids, connections)
+                in_idx = [self.node_to_idx[n_id] for n_id in child_node_ids]
+                connections = self._compute_sum_layer_connections(
+                    symbolic_circuit, layer_node_ids, child_node_ids
+                )
+                layer = SumLayer(out_idx, in_idx, connections)
                 self.layers.append(layer)
+
+        self.num_nodes = idx
 
     def _compute_sum_layer_connections(
         self, circuit: SymbolicArithmeticCircuit, sum_node_ids: List[int], child_node_ids: List[int]
@@ -132,10 +166,7 @@ class TensorizedCircuit(nn.Module):
         return connections
 
     def _compute_product_layer_indices(
-        self,
-        circuit: SymbolicArithmeticCircuit,
-        node_ids: List[int],
-        prev_layer_node_ids: List[int],
+        self, circuit: SymbolicArithmeticCircuit, node_ids: List[int]
     ) -> Tuple[List[int], List[int]]:
         left_idx = []
         right_idx = []
@@ -143,20 +174,27 @@ class TensorizedCircuit(nn.Module):
             children = circuit.get_children(node_id)
             assert len(children) == 2, "Only binary product nodes are supported"
 
-            # Find the indices of these children in the previous layer's output
-            # rather than using their absolute node_ids
-            left_pos = prev_layer_node_ids.index(children[0])
-            right_pos = prev_layer_node_ids.index(children[1])
+            left_pos = self.node_to_idx[children[0]]
+            right_pos = self.node_to_idx[children[1]]
 
             left_idx.append(left_pos)
             right_idx.append(right_pos)
         return left_idx, right_idx
 
-    def forward(self, input_values: torch.Tensor) -> torch.Tensor:
-        output = input_values
-        for layer in self.layers:
-            output = layer.forward(output)
-        return output
+    def forward(self, data: torch.Tensor) -> torch.Tensor:
+        batch_size = data.shape[0]
+        global_buffer = torch.empty(
+            (batch_size, self.num_nodes), dtype=data.dtype, device=data.device
+        )
+
+        # input layer needs data
+        self.layers[0].forward(global_buffer, data)
+
+        for layer in self.layers[1:]:
+            layer.forward(global_buffer)
+
+        output_idx = self.layers[-1].out_idx
+        return global_buffer[:, output_idx]
 
     def update_params(self):
         for layer in self.layers:

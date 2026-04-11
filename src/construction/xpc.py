@@ -387,6 +387,7 @@ def construct_random_md_data_region_graph(
 def construct_spn_from_region_graph(
     rg: DataRegionGraph,
     input_dists: Dict[int, Distribution],
+    alpha: float = 0.01,
 ) -> SymbolicArithmeticCircuit:
     node_counter = 1
 
@@ -444,11 +445,12 @@ def construct_spn_from_region_graph(
     circuit.add_node(0, ac_root)
 
     rg_node_to_ac_node: Dict[int, int] = {}
-    rg_node_to_ac_node[rg.get_roots()[0]] = 0
+    rg_root_id = rg.get_roots()[0]
+    rg_node_to_ac_node[rg_root_id] = 0
 
     for rg_node_id in rg.topological_sort():
         rg_node = rg.get_node_data(rg_node_id)
-        if rg_node_id == rg.get_roots()[0]:
+        if rg_node_id == rg_root_id:
             continue
 
         if isinstance(rg_node, DataRegionNode):
@@ -492,10 +494,9 @@ def construct_spn_from_region_graph(
             )
             rg_parent_id = rg_node_parents[0]
             rg_parent_node = rg.get_node_data(rg_parent_id)
-            proportion = (
-                (len(rg_node.row_ids) / len(rg_parent_node.row_ids))
-                if len(rg_parent_node.row_ids) > 0
-                else 0.0
+            num_partitions = len(rg.get_children(rg_parent_id))
+            proportion = (len(rg_node.row_ids) + alpha) / (
+                len(rg_parent_node.row_ids) + alpha * num_partitions
             )
             ac_parent_id = rg_node_to_ac_node[rg_parent_id]
             ac_parent_node = circuit.get_node_data(ac_parent_id)
