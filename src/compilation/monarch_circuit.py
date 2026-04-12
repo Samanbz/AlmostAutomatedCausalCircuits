@@ -148,29 +148,85 @@ class MonarchCircuit(TensorizedCircuit):
             self.num_nodes = 0
             return
 
-        input_nodes = [symbolic_circuit.get_node_data(n_id) for n_id in input_node_ids]
-        means = [n.mean for n in input_nodes]
-        stds = [n.stddev for n in input_nodes]
-        lows = [n.var_support.low for n in input_nodes]
-        highs = [n.var_support.high for n in input_nodes]
-        scopes = [n.var for n in input_nodes]
+        self.input_layers = nn.ModuleList()
+        gaussian_nodes, gaussian_ids = [], []
+        uniform_nodes, uniform_ids = [], []
+        categorical_nodes, categorical_ids = [], []
 
-        input_out_idx = []
         for n_id in input_node_ids:
-            self.node_to_idx[n_id] = idx
-            input_out_idx.append(idx)
-            idx += 1
+            node = symbolic_circuit.get_node_data(n_id)
+            if hasattr(node, "mean") and hasattr(node, "stddev"):
+                gaussian_nodes.append(node)
+                gaussian_ids.append(n_id)
+            elif hasattr(node, "var_support") and not hasattr(node, "categories") and not hasattr(node, "mean"):
+                uniform_nodes.append(node)
+                uniform_ids.append(n_id)
+            elif hasattr(node, "categories") and hasattr(node, "probabilities"):
+                categorical_nodes.append(node)
+                categorical_ids.append(n_id)
+            else:
+                raise ValueError(f"Unsupported distribution node: {node}")
 
-        input_layer = GaussianInputLayer(
-            input_out_idx,
-            torch.tensor(means, dtype=torch.float32),
-            torch.tensor(stds, dtype=torch.float32),
-            torch.tensor(lows, dtype=torch.float32),
-            torch.tensor(highs, dtype=torch.float32),
-            scopes,
-        )
+        if gaussian_nodes:
+            means = [n.mean for n in gaussian_nodes]
+            stds = [n.stddev for n in gaussian_nodes]
+            lows = [n.var_support.low for n in gaussian_nodes]
+            highs = [n.var_support.high for n in gaussian_nodes]
+            scopes = [n.var for n in gaussian_nodes]
+            out_idx = []
+            for n_id in gaussian_ids:
+                self.node_to_idx[n_id] = idx
+                out_idx.append(idx)
+                idx += 1
+            self.input_layers.append(GaussianInputLayer(
+                out_idx,
+                torch.tensor(means, dtype=torch.float32),
+                torch.tensor(stds, dtype=torch.float32),
+                torch.tensor(lows, dtype=torch.float32),
+                torch.tensor(highs, dtype=torch.float32),
+                scopes,
+            ))
 
-        self.layers.append(input_layer)
+        if uniform_nodes:
+            lows = [n.var_support.low for n in uniform_nodes]
+            highs = [n.var_support.high for n in uniform_nodes]
+            scopes = [n.var for n in uniform_nodes]
+            out_idx = []
+            for n_id in uniform_ids:
+                self.node_to_idx[n_id] = idx
+                out_idx.append(idx)
+                idx += 1
+            self.input_layers.append(UniformInputLayer(
+                out_idx,
+                torch.tensor(lows, dtype=torch.float32),
+                torch.tensor(highs, dtype=torch.float32),
+                scopes,
+            ))
+
+        if categorical_nodes:
+            scopes = [n.var for n in categorical_nodes]
+            out_idx = []
+            for n_id in categorical_ids:
+                self.node_to_idx[n_id] = idx
+                out_idx.append(idx)
+                idx += 1
+            
+            import math
+            max_cats = max(len(n.categories) for n in categorical_nodes)
+            cats_tensor = torch.full((len(categorical_nodes), max_cats), float("nan"))
+            probs_tensor = torch.full((len(categorical_nodes), max_cats), float("-inf"))
+            
+            for i, n in enumerate(categorical_nodes):
+                for j, (cat, prob) in enumerate(zip(n.categories, n.probabilities)):
+                    cats_tensor[i, j] = float(cat)
+                    probs_tensor[i, j] = math.log(prob) if prob > 0 else float("-inf")
+                    
+            self.input_layers.append(CategoricalInputLayer(
+                out_idx,
+                cats_tensor,
+                probs_tensor,
+                scopes,
+            ))
 
         for layer_node_ids in node_layers_iter:
             is_sum_layer = all(symbolic_circuit.is_sum_node(node_id) for node_id in layer_node_ids)
