@@ -15,14 +15,32 @@ class TensorizedLayer(nn.Module):
 
 
 class ProductLayer(TensorizedLayer):
-    def __init__(self, out_idx: List[int], left_idx: List[int], right_idx: List[int]):
+    def __init__(
+        self,
+        out_idx: List[int],
+        left_idx: List[int],
+        right_idx: List[int],
+        z_mask: torch.Tensor = None,
+    ):
         super().__init__(out_idx)
         self.left_idx = left_idx
         self.right_idx = right_idx
+        if z_mask is not None:
+            self.register_buffer("z_mask", z_mask)
 
-    def forward(self, global_buffer: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        global_buffer: torch.Tensor,
+        global_buffer_xz: torch.Tensor = None,
+        global_buffer_z: torch.Tensor = None,
+    ) -> torch.Tensor:
         res = global_buffer[:, self.left_idx] + global_buffer[:, self.right_idx]
         global_buffer[:, self.out_idx] = res
+        if global_buffer_xz is not None and global_buffer_z is not None:
+            res_xz = global_buffer_xz[:, self.left_idx] + global_buffer_xz[:, self.right_idx]
+            global_buffer_xz[:, self.out_idx] = res_xz
+            res_z = global_buffer_z[:, self.left_idx] + global_buffer_z[:, self.right_idx]
+            global_buffer_z[:, self.out_idx] = res_z
         return res
 
 
@@ -122,6 +140,7 @@ class GaussianInputLayer(TensorizedLayer):
             self.means.copy_(torch.where(valid_mask, new_means, self.means))
             self.stds.copy_(torch.where(valid_mask, new_stds, self.stds))
 
+
 class UniformInputLayer(TensorizedLayer):
     def __init__(
         self,
@@ -142,10 +161,10 @@ class UniformInputLayer(TensorizedLayer):
         x_safe = torch.where(is_nan, torch.zeros_like(x), x)
 
         out_of_bounds = (x_safe < self.lows) | (x_safe > self.highs)
-        
+
         batch_size = x.size(0)
         log_probs = self.log_pdf.unsqueeze(0).expand(batch_size, -1)
-        
+
         log_probs = torch.where(out_of_bounds, torch.full_like(log_probs, float("-inf")), log_probs)
         log_probs = torch.where(is_nan, torch.zeros_like(log_probs), log_probs)
 
@@ -154,6 +173,7 @@ class UniformInputLayer(TensorizedLayer):
 
     def update_params(self):
         pass
+
 
 class CategoricalInputLayer(TensorizedLayer):
     def __init__(
@@ -172,16 +192,16 @@ class CategoricalInputLayer(TensorizedLayer):
         x = input_values[:, self.scopes]
         is_nan = torch.isnan(x)
         x_safe = torch.where(is_nan, torch.zeros_like(x), x)
-        
+
         self.saved_x = x_safe.detach()
         self.nan_mask = is_nan.detach()
 
         x_expanded = x_safe.unsqueeze(-1)
-        matches = (x_expanded == self.categories.unsqueeze(0))
-        
+        matches = x_expanded == self.categories.unsqueeze(0)
+
         log_probs = self.log_probabilities.unsqueeze(0).expand(x.size(0), -1, -1)
         matched_log_probs = log_probs.masked_fill(~matches, float("-inf"))
-        
+
         node_log_probs = torch.logsumexp(matched_log_probs, dim=-1)
         node_log_probs = torch.where(is_nan, torch.zeros_like(node_log_probs), node_log_probs)
 
@@ -195,12 +215,12 @@ class CategoricalInputLayer(TensorizedLayer):
         with torch.no_grad():
             if getattr(self, "saved_log_pdf", None) is None or self.saved_log_pdf.grad is None:
                 return
-            
+
             valid_grads = torch.clamp(self.saved_log_pdf.grad, min=0.0)
             valid_grads = valid_grads.masked_fill(self.nan_mask, 0.0)
 
             x_expanded = self.saved_x.unsqueeze(-1)
-            matches = (x_expanded == self.categories.unsqueeze(0))
+            matches = x_expanded == self.categories.unsqueeze(0)
 
             responsibilities = valid_grads + 1e-15
             resp_expanded = responsibilities.unsqueeze(-1).masked_fill(~matches, 0.0)

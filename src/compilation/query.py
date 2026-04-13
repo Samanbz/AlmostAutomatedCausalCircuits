@@ -3,9 +3,11 @@ from typing import List, Optional
 import torch
 from torch import nn
 
+from compilation.tensorized_circuit import TensorizedCircuit
+
 
 def marginal(
-    circuit: nn.Module, data: torch.Tensor, marg_vars: Optional[List[int]] = None
+    circuit: TensorizedCircuit, data: torch.Tensor, marg_vars: Optional[List[int]] = None
 ) -> torch.Tensor:
     """
     Computes the log marginal probability of the data.
@@ -31,7 +33,7 @@ def marginal(
 
 
 def conditional(
-    circuit: nn.Module,
+    circuit: TensorizedCircuit,
     data: torch.Tensor,
     query_vars: List[int],
     evidence_vars: Optional[List[int]] = None,
@@ -72,3 +74,26 @@ def conditional(
 
     # log P(X_Q | X_E) = log P(X_Q, X_E) - log P(X_E)
     return log_prob_joint - log_prob_evidence
+
+
+def backdoor(
+    circuit: TensorizedCircuit,
+    data: torch.Tensor,
+    do_vars: List[int],
+    z_vars: List[int],
+    query_vars: List[int],
+) -> torch.Tensor:
+    """
+    Dynamically adjusts causal intervention masks and computes the backdoor probability
+    for P(query_vars | do(do_vars)) by marginalizing out Z across structural pathways.
+    """
+    circuit.set_target_vars(set(z_vars + do_vars))
+    d_joint = data.clone()
+    d_xz = data.clone()
+    for c in query_vars:
+        d_xz[:, c] = float("nan")
+    d_z = data.clone()
+    for c in do_vars + query_vars:
+        d_z[:, c] = float("nan")
+
+    return circuit(d_joint, d_xz, d_z)
