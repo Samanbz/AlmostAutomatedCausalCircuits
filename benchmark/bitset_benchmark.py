@@ -3,10 +3,6 @@ import timeit
 from typing import List
 
 import numpy as np
-from _bootstrap import ensure_project_root_on_path
-
-
-ensure_project_root_on_path()
 
 from src.utils.bitset import BitSet  # noqa: E402
 

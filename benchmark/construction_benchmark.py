@@ -3,10 +3,6 @@ import signal
 import time
 
 import numpy as np
-from _bootstrap import ensure_project_root_on_path
-
-
-ensure_project_root_on_path()
 
 from src.construction.random_vtree import construct_random_vtree
 from src.construction.rat_spn import create_rat_spn

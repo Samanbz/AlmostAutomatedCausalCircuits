@@ -6,10 +6,8 @@ import time
 import networkx as nx
 import numpy as np
 import torch
-from _bootstrap import ensure_project_root_on_path
 
 
-ensure_project_root_on_path()
 
 from src.construction.learned_vtree import construct_optimal_md_vtree, construct_optimal_vtree
 

@@ -1,11 +1,56 @@
 import torch
 import torch.utils.benchmark as benchmark
-from _bootstrap import ensure_project_root_on_path
-
-
-ensure_project_root_on_path()
 
 from src.compilation.monarch import MonarchMatrix  # noqa: E402
+
+
+def run_benchmark_config(config):
+    device = (
+        "cuda"
+        if torch.cuda.is_available()
+        else "mps"
+        if torch.backends.mps.is_available()
+        else "cpu"
+    )
+
+    b, c, k, b1 = config["b"], config["c"], config["k"], config["b1"]
+    batch_size = config.get("batch_size", 128)
+
+    out_dim = b * c
+    in_dim = k * b1
+
+    dense_matrix = torch.randn(out_dim, in_dim, device=device)
+    dense_matrix_t = dense_matrix.t().contiguous()
+
+    L = torch.randn(b, c, k, device=device)
+    R = torch.randn(k, b, b1, device=device)
+    monarch_matrix = MonarchMatrix(b=b, c=c, k=k, b1=b1, L=L, R=R).to(device)
+    x = torch.randn(batch_size, in_dim, device=device)
+
+    # memory calculation
+    dense_mem_mb = (dense_matrix.nelement() * dense_matrix.element_size()) / (1024 * 1024)
+    monarch_mem = sum(p.nelement() * p.element_size() for p in monarch_matrix.parameters())
+    monarch_mem_mb = monarch_mem / (1024 * 1024)
+
+    # benchmark using torch.utils.benchmark
+    t_dense = benchmark.Timer(
+        stmt="torch.matmul(x, w)" + ("; torch.mps.synchronize()" if device == "mps" else ""),
+        globals={"x": x, "w": dense_matrix_t, "m": monarch_matrix, "torch": torch},
+    )
+    t_monarch = benchmark.Timer(
+        stmt="m(x)" + ("; torch.mps.synchronize()" if device == "mps" else ""),
+        globals={"x": x, "w": dense_matrix_t, "m": monarch_matrix, "torch": torch},
+    )
+
+    b_dense = t_dense.blocked_autorange(min_run_time=0.2)
+    b_monarch = t_monarch.blocked_autorange(min_run_time=0.2)
+
+    return {
+        "dense_latency_ms": b_dense.mean * 1000,
+        "monarch_latency_ms": b_monarch.mean * 1000,
+        "dense_mem_mb": dense_mem_mb,
+        "monarch_mem_mb": monarch_mem_mb,
+    }
 
 
 def benchmark_monarch(device="cpu"):
