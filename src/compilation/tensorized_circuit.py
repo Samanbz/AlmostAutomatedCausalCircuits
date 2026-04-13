@@ -298,24 +298,6 @@ class TensorizedCircuit(nn.Module):
                 if hasattr(layer, "z_mask"):
                     layer.z_mask = torch.zeros(len(layer.out_idx), dtype=torch.bool, device=device)
 
-    def backdoor(
-        self, data: torch.Tensor, do_vars: List[int], z_vars: List[int], query_vars: List[int]
-    ) -> torch.Tensor:
-        """
-        Dynamically adjusts causal intervention masks and computes the backdoor probability
-        for P(query_vars | do(do_vars)) by marginalizing out Z across structural pathways.
-        """
-        self.set_target_vars(set(z_vars + do_vars))
-        d_joint = data.clone()
-        d_xz = data.clone()
-        for c in query_vars:
-            d_xz[:, c] = float("nan")
-        d_z = data.clone()
-        for c in do_vars + query_vars:
-            d_z[:, c] = float("nan")
-
-        return self(d_joint, d_xz, d_z)
-
     def _compute_scope_mask(
         self, circuit: SymbolicArithmeticCircuit, node_ids: List[int], target_vars: set
     ) -> torch.Tensor:
