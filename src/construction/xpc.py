@@ -16,7 +16,7 @@ from src.symbolic import (
     SymbolicArithmeticCircuit,
     VTree,
 )
-from src.utils import BitSet, DataSlice, Support
+from src.utils import BitSet, DataSlice, DiscreteInterval, Support
 
 
 logger = g_logger.getChild("xpc")
@@ -46,15 +46,22 @@ def get_factorial_constraints(
     """Generate mutually exclusive constraints forming a full factorial grid split."""
     var_splits = {}
     for var, dist in conj_dists.items():
-        rand_cut_point = dist.sample()
+        if isinstance(dist.var_support, DiscreteInterval) and len(dist.var_support.values) > 1:
+            valid_cuts = sorted(dist.var_support.values)[:-1]
+            rand_cut_point = random.choice(valid_cuts)
+        else:
+            rand_cut_point = dist.sample()
+
         logger.debug(
             f"Variable {var}: sampled cut point {rand_cut_point} from distribution {dist}."
         )
-        left_dist, right_dist = dist.split_at(rand_cut_point)
-        # Randomize left/right order to avoid bias, though combinatorial product covers all
-        opts = [left_dist.var_support, right_dist.var_support]
-        if random.random() < 0.5:
-            opts = [opts[1], opts[0]]
+        left_support, right_support = dist.var_support.split_at(rand_cut_point)
+        # Randomize left/right order to avoid bias
+        opts = (
+            [right_support, left_support]
+            if random.random() < 0.5
+            else [left_support, right_support]
+        )
         var_splits[var] = opts
 
     vars_list = list(conj_dists.keys())
@@ -222,7 +229,7 @@ def construct_random_data_region_graph(
                 min_examples=min_examples,
             )
             if not data_slices:
-                logger.debug(f"Failed to find valid split. Falling back to single partition.")
+                logger.debug("Failed to find valid split. Falling back to single partition.")
                 data_slices = [current_data_slice]
 
         new_partitions: List[Tuple[int, DataPartitionNode]] = []
