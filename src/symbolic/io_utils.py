@@ -245,7 +245,7 @@ def plot_scm(
                 label_parts.append(str(edge_data))
 
             edge_label = "\n".join(label_parts) if label_parts else ""
-            
+
             dot.edge(
                 str(source_id),
                 str(target_id),

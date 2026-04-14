@@ -1,4 +1,4 @@
-from typing import Callable, Dict
+from typing import Dict
 
 import numpy as np
 
@@ -105,6 +105,3 @@ def generate_random_scm(n_nodes: int, expected_degree: float = 2.0) -> Structura
         scm.add_variable(name, mechanism=mechanism, parents=parents)
 
     return scm
-
-
-

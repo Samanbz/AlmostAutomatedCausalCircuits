@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, List, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -46,13 +46,15 @@ class AdditiveNoiseMechanism(Mechanism):
         return f"{logic_str} + {noise_str}"
 
 
-class StructuralCausalModel(DirectedAcyclicGraph[str, Mechanism, Any]):
+class StructuralCausalModel(DirectedAcyclicGraph[Union[str, int], Mechanism, Any]):
     """
     SCM specific implementation of a DAG.
     Nodes hold Mechanisms. Edges are implicitly causal links (Any data).
     """
 
-    def add_variable(self, name: str, mechanism: Mechanism, parents: List[str] = None):
+    def add_variable(
+        self, name: Union[str, int], mechanism: Mechanism, parents: List[Union[str, int]] = None
+    ):
         """
         High-level wrapper to add a node and its incoming edges.
         """
