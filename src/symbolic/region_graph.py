@@ -8,11 +8,13 @@ from .base import DirectedAcyclicGraph, Node
 class RegionGraphNode(Node):
     """Base class for nodes in a region graph."""
 
-    def __init__(self, scope: BitSet):
+    def __init__(self, scope: BitSet, num_sums: int = 1, num_inputs: int = 1):
         self.scope = scope
+        self.num_sums = num_sums
+        self.num_inputs = num_inputs
 
     def __repr__(self):
-        return f"{self.__class__.__name__}(scope={self.scope})"
+        return f"{self.__class__.__name__}(scope={self.scope}, num_sums={self.num_sums}, num_inputs={self.num_inputs})"
 
 
 class RegionNode(RegionGraphNode):

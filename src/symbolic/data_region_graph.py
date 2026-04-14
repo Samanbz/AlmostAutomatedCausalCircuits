@@ -16,8 +16,10 @@ class DataRegionGraphNode(RegionGraphNode):
         scope: BitSet,
         row_ids: BitSet,
         constraints: Support = None,
+        num_sums: int = 1,
+        num_inputs: int = 1,
     ):
-        super().__init__(scope)
+        super().__init__(scope, num_sums, num_inputs)
         self.row_ids = row_ids
         self.constraints = constraints if constraints is not None else Support()
 
