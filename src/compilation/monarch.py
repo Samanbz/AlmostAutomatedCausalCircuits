@@ -253,9 +253,8 @@ class LogMonarchMatrix(nn.Module):
         L_val = torch.abs(base_monarch.L.detach())
         R_val = torch.abs(base_monarch.R.detach())
 
-        # Add a small epsilon to avoid log(0)
-        log_L = torch.log(L_val + 1e-10)
-        log_R = torch.log(R_val + 1e-10)
+        log_L = torch.where(L_val == 0, float("-inf"), torch.log(L_val.clamp(min=1e-12)))
+        log_R = torch.where(R_val == 0, float("-inf"), torch.log(R_val.clamp(min=1e-12)))
 
         return cls(
             b=base_monarch.b,
