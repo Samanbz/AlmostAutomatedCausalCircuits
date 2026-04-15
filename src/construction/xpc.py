@@ -118,6 +118,7 @@ def partition_randomly(
     min_examples: int,
     conj_dists: Dict[int, Distribution],
     max_tries: int = 20,
+    subsample_size: int = None,
 ) -> List[DataSlice]:
     if len(data_slice) < 2 * min_examples:
         logger.debug(
@@ -129,35 +130,55 @@ def partition_randomly(
         f"Factorial partitioning data slice with {len(data_slice)} examples on {len(conj_dists)} vars."
     )
 
+    test_slice = data_slice
+    test_min_examples = min_examples
+    if subsample_size is not None and len(data_slice) > subsample_size:
+        active_indices = np.flatnonzero(data_slice.row_ids.to_numpy(data_slice.data.shape[0]))
+        subsample_indices = np.random.choice(active_indices, size=subsample_size, replace=False)
+        sub_mask = np.zeros(data_slice.data.shape[0], dtype=bool)
+        sub_mask[subsample_indices] = True
+        test_slice = DataSlice(
+            data_slice.data,
+            BitSet.from_bool_mask(sub_mask),
+            data_slice.col_ids,
+            data_slice.constraints,
+        )
+        test_min_examples = max(1, int(min_examples * (subsample_size / len(data_slice))))
+
     for _ in range(max_tries):
         supports = get_factorial_constraints(conj_dists)
-        candidate_slices = []
         populated_branches = 0
 
+        # First pass: Test efficiency on the (sub)sample
         for constraint in supports:
             subset_row_ids = apply_constraint(
-                data_slice=data_slice,
+                data_slice=test_slice,
                 constraint=constraint,
             )
-
-            # We track populated branches to ensure the split is actually separating data
-            if len(subset_row_ids) >= min_examples:
+            if len(subset_row_ids) >= test_min_examples:
                 populated_branches += 1
 
-            new_slice = DataSlice(
-                data_slice.data,
-                subset_row_ids,
-                data_slice.col_ids,
-                constraints=data_slice.constraints.intersect(constraint),
-            )
-            candidate_slices.append(new_slice)
-
         # For a split to be useful, it should distribute data into at least 2 branches
-        if populated_branches >= 2:  # FIXME: So we just lose data if we can't find a good split!?
+        if populated_branches >= 2:
             logger.debug(
-                f"\tAccepted factorial split with {populated_branches}/{len(supports)} heavily populated branches."
+                f"\tAccepted factorial split with {populated_branches}/{len(supports)} heavily populated branches on test sample."
             )
-            # logger. debug(f"Factorial constraints: {supports}")
+
+            # Second pass: Apply accepted constraint to full data slice
+            candidate_slices = []
+            for constraint in supports:
+                full_subset_row_ids = apply_constraint(
+                    data_slice=data_slice,
+                    constraint=constraint,
+                )
+                new_slice = DataSlice(
+                    data_slice.data,
+                    full_subset_row_ids,
+                    data_slice.col_ids,
+                    constraints=data_slice.constraints.intersect(constraint),
+                )
+                candidate_slices.append(new_slice)
+
             return candidate_slices
 
     logger.debug(f"Failed to find a viable factorial partition after {max_tries} tries.")
@@ -170,6 +191,7 @@ def construct_random_data_region_graph(
     min_examples: int,
     split_arity: int,
     var_decomp: VTree,
+    subsample_size: int = None,
 ) -> DataRegionGraph:
     assert split_arity >= 2, "Split arity must be at least 2."
     assert data.ndim == 2, "Data must be a 2D array."
@@ -227,6 +249,7 @@ def construct_random_data_region_graph(
                 conj_dists=conj_dists,
                 split_arity=split_arity,
                 min_examples=min_examples,
+                subsample_size=subsample_size,
             )
             if not data_slices:
                 logger.debug("Failed to find valid split. Falling back to single partition.")
@@ -286,6 +309,10 @@ def construct_random_md_data_region_graph(
     min_examples: int,
     split_arity: int,
     md_var_decomp: MDVTree,
+    num_repetitions: int = 1,
+    num_sums: int = 1,
+    num_inputs: int = 1,
+    subsample_size: int = None,
 ) -> DataRegionGraph:
     assert split_arity >= 2, "Split arity must be at least 2."
     assert data.ndim == 2, "Data must be a 2D array."
@@ -304,12 +331,21 @@ def construct_random_md_data_region_graph(
     rg = DataRegionGraph()
     num_rows, num_cols = data.shape
 
-    root_region = DataRegionNode(scope=BitSet.full(num_cols), row_ids=BitSet.full(num_rows))
+    root_md_vid = md_var_decomp.get_root()
+    root_md_vnode = md_var_decomp.get_node_data(root_md_vid)
+    root_is_universal = root_md_vnode.md_set.is_universal
+
+    root_region = DataRegionNode(
+        scope=BitSet.full(num_cols),
+        row_ids=BitSet.full(num_rows),
+        num_sums=num_sums if root_is_universal else 1,
+        num_inputs=num_inputs if root_is_universal else 1,
+    )
     root_id = next_id()
     rg.add_node(root_id, root_region)
 
     # Map DataRegionNode ID -> VTree Node ID
-    rg_nid_to_md_vid: Dict[int, int] = {root_id: md_var_decomp.get_root()}
+    rg_nid_to_md_vid: Dict[int, int] = {root_id: root_md_vid}
 
     def partition_recursive(rg_node_id: int):
         rg_node = rg.get_node_data(rg_node_id)
@@ -326,13 +362,17 @@ def construct_random_md_data_region_graph(
         current_constraints = rg_node.constraints
         # logger.debug(f"Current constraints: {current_constraints}")
 
+        is_universal = md_vnode.md_set.is_universal
+
         conj_dists = {
             var: dist.constrain_to(current_constraints[var]) if var in current_constraints else dist
             for var, dist in input_dists.items()
-            if var in md_vnode.md_set
+            if var in md_vnode.md_set and var in rg_node.scope
         }
 
-        if not conj_dists:
+        if is_universal:
+            data_slices = [current_data_slice for _ in range(num_repetitions)]
+        elif not conj_dists:
             data_slices = [current_data_slice]
         else:
             data_slices = partition_randomly(
@@ -340,6 +380,7 @@ def construct_random_md_data_region_graph(
                 split_arity=split_arity,
                 min_examples=min_examples,
                 conj_dists=conj_dists,
+                subsample_size=subsample_size,
             )
             # Fall back to a single, full partition if no valid split configurations are found
             if not data_slices:
@@ -362,10 +403,15 @@ def construct_random_md_data_region_graph(
             rg.add_node(p_node_id, p_node)
 
             l_rg_node_id = next_id()
+            print(
+                f"Creating left region with scope {l_md_child.scope} and constraints {data_slice.constraints.filter_by_vars(l_md_child.scope)} from md_vnode {md_vid} with md_set {md_vnode.md_set}"
+            )
             l_rg_node = DataRegionNode(
                 scope=l_md_child.scope,
                 row_ids=data_slice.row_ids,
                 constraints=data_slice.constraints.filter_by_vars(l_md_child.scope),
+                num_sums=num_sums if l_md_child.md_set.is_universal else 1,
+                num_inputs=num_inputs if l_md_child.md_set.is_universal else 1,
             )
             rg.add_node(l_rg_node_id, l_rg_node)
             rg_nid_to_md_vid[l_rg_node_id] = l_md_child_id
@@ -375,6 +421,8 @@ def construct_random_md_data_region_graph(
                 scope=r_md_child.scope,
                 row_ids=data_slice.row_ids,
                 constraints=data_slice.constraints.filter_by_vars(r_md_child.scope),
+                num_sums=num_sums if r_md_child.md_set.is_universal else 1,
+                num_inputs=num_inputs if r_md_child.md_set.is_universal else 1,
             )
             rg.add_node(r_rg_node_id, r_rg_node)
             rg_nid_to_md_vid[r_rg_node_id] = r_md_child_id
@@ -404,116 +452,104 @@ def construct_spn_from_region_graph(
         node_counter += 1
         return nid
 
-    def handle_leaf(scope: BitSet, constraints: Support, p_ac_id: int):
-        if len(scope) == 1:
-            var = next(iter(scope))
-            leaf_node = input_dists[var].constrain_to(constraints.get(var))
-            leaf_id = next_id()
-            circuit.add_node(leaf_id, leaf_node)
-            circuit.add_edge(p_ac_id, leaf_id)
-        else:
-            dummy_sum_node_id = next_id()
-            dummy_sum_node = SumNode(
-                support=Support({var: input_dists[var].var_support for var in scope}).intersect(
-                    constraints
-                )
-            )
-            circuit.add_node(dummy_sum_node_id, dummy_sum_node)
-            circuit.add_edge(p_ac_id, dummy_sum_node_id)
-            prod_node_id = next_id()
-            prod_node = ProductNode(
-                support=Support(
-                    {var: input_dists[var].var_support for var in rg_node.scope}
-                ).intersect(rg_node.constraints)
-            )
-            circuit.add_node(prod_node_id, prod_node)
-            circuit.add_edge(dummy_sum_node_id, prod_node_id, 1.0)  # Dummy weight
-
-            rg_node_vars = list(scope)
-            left_scope = rg_node_vars[: len(rg_node_vars) // 2]
-            right_scope = rg_node_vars[len(rg_node_vars) // 2 :]
-
-            handle_leaf(
-                BitSet(left_scope), constraints.filter_by_vars(BitSet(left_scope)), prod_node_id
-            )
-            handle_leaf(
-                BitSet(right_scope), constraints.filter_by_vars(BitSet(right_scope)), prod_node_id
-            )
-
     circuit = SymbolicArithmeticCircuit()
 
-    rg_root = rg.get_node_data(rg.get_roots()[0])
-    ac_root = SumNode(
-        support=Support({var: input_dists[var].var_support for var in rg_root.scope}).intersect(
-            rg_root.constraints
-        )
-    )
-
-    circuit.add_node(0, ac_root)
-
-    rg_node_to_ac_node: Dict[int, int] = {}
     rg_root_id = rg.get_roots()[0]
-    rg_node_to_ac_node[rg_root_id] = 0
+    region_to_ac_nodes: Dict[int, List[int]] = {}
 
+    import copy
+
+    # Pass 1: Regions
     for rg_node_id in rg.topological_sort():
         rg_node = rg.get_node_data(rg_node_id)
-        if rg_node_id == rg_root_id:
+        if not isinstance(rg_node, DataRegionNode):
             continue
 
-        if isinstance(rg_node, DataRegionNode):
-            rg_node_parents = rg.get_parents(rg_node_id)  # TODO Use tree?
-            assert len(rg_node_parents) == 1, (
-                "DataRegionNode must have exactly one parent DataPartitionNode."
-            )
-            p_id = rg_node_parents[0]
-            p_ac_id = rg_node_to_ac_node[p_id]
-            p_ac_node = circuit.get_node_data(p_ac_id)
-            assert isinstance(p_ac_node, ProductNode), (
-                "Parent AC node must be a ProductNode corresponding to the partition."
-            )
+        is_leaf_region = len(rg._adj[rg_node_id]) == 0
+        ac_ids = []
 
-            if rg.is_leaf(rg_node_id):
-                handle_leaf(rg_node.scope, rg_node.constraints, p_ac_id)
-            else:
-                # Create SumNode for inner RegionNode
-                region_ac_node = SumNode(
-                    support=Support(
-                        {var: input_dists[var].var_support for var in rg_node.scope}
-                    ).intersect(rg_node.constraints)
-                )
-                region_ac_id = next_id()
-                circuit.add_node(region_ac_id, region_ac_node)
-                circuit.add_edge(p_ac_id, region_ac_id)
-                rg_node_to_ac_node[rg_node_id] = region_ac_id
+        if is_leaf_region:
+            assert len(rg_node.scope) == 1, f"Leaf region scope must be 1, got {rg_node.scope}"
+            var_id = list(rg_node.scope)[0]
+            base_dist = input_dists[var_id]
 
-        elif isinstance(rg_node, DataPartitionNode):
-            partition_ac_node = ProductNode(
-                support=Support(
-                    {var: input_dists[var].var_support for var in rg_node.scope}
-                ).intersect(rg_node.constraints)
-            )
-            partition_ac_id = next_id()
-            circuit.add_node(partition_ac_id, partition_ac_node)
-
-            rg_node_parents = rg.get_parents(rg_node_id)
-            assert len(rg_node_parents) == 1, (
-                "DataPartitionNode must have exactly one parent DataRegionNode."
-            )
-            rg_parent_id = rg_node_parents[0]
-            rg_parent_node = rg.get_node_data(rg_parent_id)
-            num_partitions = len(rg.get_children(rg_parent_id))
-            proportion = (len(rg_node.row_ids) + alpha) / (
-                len(rg_parent_node.row_ids) + alpha * num_partitions
-            )
-            ac_parent_id = rg_node_to_ac_node[rg_parent_id]
-            ac_parent_node = circuit.get_node_data(ac_parent_id)
-            assert isinstance(ac_parent_node, SumNode), (
-                "Parent AC node must be a SumNode corresponding to the region."
-            )
-
-            circuit.add_edge(ac_parent_id, partition_ac_id, proportion)
-            rg_node_to_ac_node[rg_node_id] = partition_ac_id
+            for _ in range(rg_node.num_inputs):
+                leaf_id = next_id()
+                # Use deepcopy for independence
+                dist_copy = copy.deepcopy(base_dist)
+                leaf_node = dist_copy.constrain_to(rg_node.constraints.get(var_id))
+                circuit.add_node(leaf_id, leaf_node)
+                ac_ids.append(leaf_id)
         else:
-            raise ValueError(f"Unknown region graph node type: {type(rg_node)}")
+            # Need some standard Support for the node
+            full_support = Support({var: input_dists[var].var_support for var in rg_node.scope})
+            node_support = full_support.intersect(rg_node.constraints)
+
+            for _ in range(rg_node.num_sums):
+                print(
+                    f"Creating SumNode for region {rg_node_id} with scope {rg_node.scope} and support {node_support}, num_sums={rg_node.num_sums}"
+                )
+                sum_id = next_id()
+                sum_node = SumNode(support=node_support)
+                circuit.add_node(sum_id, sum_node)
+                ac_ids.append(sum_id)
+
+        region_to_ac_nodes[rg_node_id] = ac_ids
+
+    # Pass 2: Partitions
+    for p_id in rg.topological_sort():
+        p_node = rg.get_node_data(p_id)
+        if not isinstance(p_node, DataPartitionNode):
+            continue
+
+        parents = rg.get_parents(p_id)
+        assert len(parents) == 1, "DataPartitionNode must have exactly one parent."
+        parent_region_id = parents[0]
+        parent_r_node = rg.get_node_data(parent_region_id)
+
+        children = list(rg._adj[p_id].keys())
+        assert len(children) == 2, "Partition node must have exactly two child regions."
+        l_r_id, r_r_id = children
+
+        parent_sums = region_to_ac_nodes.get(parent_region_id, [])
+        l_children = region_to_ac_nodes.get(l_r_id, [])
+        r_children = region_to_ac_nodes.get(r_r_id, [])
+
+        full_support = Support({var: input_dists[var].var_support for var in parent_r_node.scope})
+        node_support = full_support.intersect(p_node.constraints)
+
+        # XPC proportions
+        num_partitions = len(rg.get_children(parent_region_id))
+        proportion_base = (len(p_node.row_ids) + alpha) / (
+            len(parent_r_node.row_ids) + alpha * num_partitions
+        )
+
+        for l_ac in l_children:
+            for r_ac in r_children:
+                prod_id = next_id()
+                prod_node = ProductNode(support=node_support)
+                circuit.add_node(prod_id, prod_node)
+
+                circuit.add_edge(prod_id, l_ac)
+                circuit.add_edge(prod_id, r_ac)
+
+                for parent_sum_id in parent_sums:
+                    # Break symmetry if dense RAT-SPN style, else standard proportion
+                    weight = proportion_base
+                    if parent_r_node.num_sums > 1 or num_partitions > 1:
+                        weight = proportion_base * (0.5 + random.random())
+                    circuit.add_edge(parent_sum_id, prod_id, data=weight)
+
+    # Normalize weights
+    for node_id in circuit.topological_sort():
+        if isinstance(circuit.get_node_data(node_id), SumNode):
+            outgoing = circuit.get_outgoing_edges(node_id)
+            if not outgoing:
+                continue
+
+            total_weight = sum(edge[1] for edge in outgoing)
+            if total_weight > 0:
+                for child_id, weight in outgoing:
+                    circuit.set_edge_data(node_id, child_id, weight / total_weight)
 
     return circuit
