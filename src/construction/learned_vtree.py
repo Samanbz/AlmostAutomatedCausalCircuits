@@ -5,7 +5,7 @@ import numpy as np
 import torch
 
 from src.symbolic.vtree import MDVTree, VNode, VTree
-from src.utils import BitSet, estimate_pairwise_mi
+from src.utils import BitSet, NodeAllocator, estimate_pairwise_mi
 
 
 def build_skeleton(dag: nx.DiGraph | None, num_variables: int) -> nx.Graph:
@@ -70,100 +70,88 @@ def evaluate_data_mi(skeleton: nx.Graph, data: torch.Tensor):
             skeleton[u][v]["weight"] = mi_scores[(u, v)] + 1e-6
 
 
-def partition_recursively(
-    vt: VTree, parent_id: int, G: nx.Graph, node_counter: int, prioritize: str = "hardware"
-) -> tuple[int, int]:
-    """
-    Phase 3: Recursive Partitioning.
-    If prioritize="hardware", uses Kernighan-Lin to strictly bisect variables (balanced trees).
-    If prioritize="expressivity", uses unconstrained Stoer-Wagner min-cut (unbalanced trees with fewer correlation cuts).
-    """
-    scope_list = list(G.nodes)
-    if len(scope_list) == 1:
-        # We are at a leaf
-        leaf_scope = BitSet(scope_list)
-        leaf_vnode = VNode(scope=leaf_scope)
-        leaf_id = node_counter
-        vt.add_node(leaf_id, leaf_vnode)
-        return leaf_id, node_counter + 1
+class LearnedVTreeBuilder:
+    def __init__(self, prioritize: str = "hardware"):
+        self.vt = VTree()
+        self.allocator = NodeAllocator(start=0)
+        self.prioritize = prioritize
 
-    # Attempt bisection
-    # If the sub-graph is extremely disconnected, try to get connected components
-    components = list(nx.connected_components(G))
-    if len(components) > 1:
-        # Found completely disconnected components, split along that!
-        left_vars = list(components[0])
-        right_vars = [node for c in components[1:] for node in c]
-    else:
+    def _apply_pymetis(self, G: nx.Graph) -> tuple[list[int], list[int]]:
+        import pymetis
+
+        nodes = list(G.nodes())
+        node_to_idx = {n: i for i, n in enumerate(nodes)}
+
+        adjacency = []
+        eweights = []
+
+        for n in nodes:
+            neighbors = list(G.neighbors(n))
+            adj_n = [node_to_idx[nbr] for nbr in neighbors]
+            adjacency.append(np.array(adj_n, dtype=np.int32))
+            weights_n = [int(G[n][nbr]["weight"] * 1e5) for nbr in neighbors]
+            eweights.extend(weights_n)
+
+        _, parts = pymetis.part_graph(2, adjacency=adjacency, eweights=eweights)
+
+        left_vars = [nodes[i] for i, p in enumerate(parts) if p == 0]
+        right_vars = [nodes[i] for i, p in enumerate(parts) if p == 1]
+        return left_vars, right_vars
+
+    def _apply_greedy_modularity(self, G: nx.Graph) -> tuple[list[int], list[int]]:
+        communities = nx.community.greedy_modularity_communities(G, weight="weight")
+        left_vars = list(communities[0])
+        right_vars = [node for c in communities[1:] for node in c]
+        return left_vars, right_vars
+
+    def _apply_kernighan_lin(self, G: nx.Graph) -> tuple[list[int], list[int]]:
+        set_left, set_right = nx.community.kernighan_lin_bisection(G, weight="weight", max_iter=10)
+        return list(set_left), list(set_right)
+
+    def _bisect_graph(self, G: nx.Graph, scope_list: list[int]) -> tuple[list[int], list[int]]:
+        components = list(nx.connected_components(G))
+        if len(components) > 1:
+            left_vars = list(components[0])
+            right_vars = [node for c in components[1:] for node in c]
+            return left_vars, right_vars
+
         try:
-            if prioritize == "expressivity":
+            if self.prioritize == "expressivity":
                 try:
-                    import pymetis
-
-                    nodes = list(G.nodes())
-                    node_to_idx = {n: i for i, n in enumerate(nodes)}
-
-                    adjacency = []
-                    eweights = []
-
-                    for n in nodes:
-                        neighbors = list(G.neighbors(n))
-                        adj_n = [node_to_idx[nbr] for nbr in neighbors]
-                        adjacency.append(np.array(adj_n, dtype=np.int32))
-
-                        # PyMetis expects integer weights. Our weights are typically
-                        # +1e9 for MD-Sets or 0.0 - 1.0 for correlations.
-                        weights_n = [int(G[n][nbr]["weight"] * 1e5) for nbr in neighbors]
-                        eweights.extend(weights_n)
-
-                    # Unbalanced C++ min-cut solver
-                    _, parts = pymetis.part_graph(2, adjacency=adjacency, eweights=eweights)
-
-                    left_vars = [nodes[i] for i, p in enumerate(parts) if p == 0]
-                    right_vars = [nodes[i] for i, p in enumerate(parts) if p == 1]
-
+                    left_vars, right_vars = self._apply_pymetis(G)
                 except ImportError:
-                    # Fallback to greedy python heuristic if pymetis is missing
-                    communities = nx.community.greedy_modularity_communities(G, weight="weight")
-                    left_vars = list(communities[0])
-                    right_vars = [node for c in communities[1:] for node in c]
+                    left_vars, right_vars = self._apply_greedy_modularity(G)
             else:
-                # Use kernighan lin bisection. It tries to divide into two roughly equal halves
-                # while minimizing edge cut weights.
-                set_left, set_right = nx.community.kernighan_lin_bisection(
-                    G, weight="weight", max_iter=10
-                )
-                left_vars, right_vars = list(set_left), list(set_right)
+                left_vars, right_vars = self._apply_kernighan_lin(G)
 
-            # Failsafe if partition returns an empty set
             if not left_vars or not right_vars:
                 raise ValueError("Bisection failed")
-
+            return left_vars, right_vars
         except (nx.NetworkXError, ValueError):
-            # Fallback: simple split if the graph structure causes bisection failure
             half = len(scope_list) // 2
-            left_vars = scope_list[:half]
-            right_vars = scope_list[half:]
+            return scope_list[:half], scope_list[half:]
 
-    # Recursive steps
-    # Internal node
-    curr_scope = BitSet(scope_list)
-    curr_vnode = VNode(scope=curr_scope)
-    curr_id = node_counter
-    vt.add_node(curr_id, curr_vnode)
+    def _partition_recursively(self, G: nx.Graph) -> int:
+        scope_list = list(G.nodes)
+        curr_id = self.allocator.next_id()
+        curr_scope = BitSet(scope_list)
+        curr_vnode = VNode(scope=curr_scope)
+        self.vt.add_node(curr_id, curr_vnode)
 
-    node_counter += 1
+        if len(scope_list) == 1:
+            return curr_id
 
-    left_id, node_counter = partition_recursively(
-        vt, curr_id, G.subgraph(left_vars), node_counter, prioritize
-    )
-    right_id, node_counter = partition_recursively(
-        vt, curr_id, G.subgraph(right_vars), node_counter, prioritize
-    )
+        left_vars, right_vars = self._bisect_graph(G, scope_list)
 
-    vt.add_children(curr_id, left_id, right_id)
+        left_id = self._partition_recursively(G.subgraph(left_vars))
+        right_id = self._partition_recursively(G.subgraph(right_vars))
 
-    return curr_id, node_counter
+        self.vt.add_children(curr_id, left_id, right_id)
+        return curr_id
+
+    def build(self, skeleton: nx.Graph) -> VTree:
+        self._partition_recursively(skeleton)
+        return self.vt
 
 
 def construct_optimal_vtree(
@@ -176,10 +164,8 @@ def construct_optimal_vtree(
     skeleton = build_skeleton(dag, n_vars)
     evaluate_data_mi(skeleton, data)
 
-    vt = VTree()
-    root_id, _ = partition_recursively(vt, -1, skeleton, 0, prioritize)
-
-    return vt
+    builder = LearnedVTreeBuilder(prioritize=prioritize)
+    return builder.build(skeleton)
 
 
 def construct_optimal_md_vtree(
@@ -194,18 +180,11 @@ def construct_optimal_md_vtree(
     thus guaranteeing causal tractability.
     """
     n_vars = data.shape[1]
-
-    # 1. Structural Skeleton Extraction
     skeleton = build_skeleton(dag, n_vars)
-
-    # 2. Causal constraints via supernodes (+infty weights)
     apply_md_constraints(skeleton, md_sets, md_weight=1e9)
-
-    # 3. Massively Parallel Batch Correlation
     evaluate_data_mi(skeleton, data)
 
-    # 4. Constrained VTree Instantiation (Min-Cut)
-    vt = VTree()
-    root_id, _ = partition_recursively(vt, -1, skeleton, 0, prioritize)
+    builder = LearnedVTreeBuilder(prioritize=prioritize)
+    vt = builder.build(skeleton)
 
     return MDVTree.from_vtree(vt, md_sets)
