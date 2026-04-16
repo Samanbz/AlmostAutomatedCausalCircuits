@@ -2,6 +2,7 @@ from .bitset import BitSet
 from .correlations import estimate_pairwise_mi
 from .data_slice import DataSlice
 from .interval import ContinuousInterval, DiscreteInterval, Interval
+from .node_allocator import NodeAllocator
 from .support import Support
 
 
@@ -13,4 +14,5 @@ __all__ = [
     "ContinuousInterval",
     "DiscreteInterval",
     "estimate_pairwise_mi",
+    "NodeAllocator",
 ]
