@@ -82,3 +82,43 @@ class StructuralCausalModel(DirectedAcyclicGraph[Union[str, int], Mechanism, Any
             data[node_id] = mechanism(n_samples=n_samples, **parent_data)
 
         return pd.DataFrame(data, index=range(n_samples))
+
+
+class LinearLogic:
+    def __init__(self, coefficients: dict[str, float]):
+        self.coefficients = coefficients
+
+    def __call__(self, **kwargs) -> np.ndarray:
+        first_val = next(iter(kwargs.values()))
+        res = np.zeros_like(first_val, dtype=np.float64)
+        for k, v in kwargs.items():
+            res += self.coefficients[k] * v
+        return res
+
+    def __str__(self):
+        terms = [f"{v:.2f}*{k}" for k, v in self.coefficients.items()]
+        return " + ".join(terms) if terms else "0"
+
+
+class GaussianNoise:
+    def __init__(self, loc: float, scale: float):
+        self.loc = loc
+        self.scale = scale
+
+    def __call__(self, n_samples: int) -> np.ndarray:
+        return np.random.normal(self.loc, self.scale, size=n_samples)
+
+    def __str__(self):
+        return f"N({self.loc:.2f}, {self.scale:.2f})"
+
+
+class UniformNoise:
+    def __init__(self, low: float, high: float):
+        self.low = low
+        self.high = high
+
+    def __call__(self, n_samples: int) -> np.ndarray:
+        return np.random.uniform(self.low, self.high, size=n_samples)
+
+    def __str__(self):
+        return f"U({self.low:.2f}, {self.high:.2f})"

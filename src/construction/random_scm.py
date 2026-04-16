@@ -2,47 +2,7 @@ from typing import Dict
 
 import numpy as np
 
-from src.symbolic.scm import AdditiveNoiseMechanism, StructuralCausalModel
-
-
-class LinearLogic:
-    def __init__(self, coefficients: Dict[str, float]):
-        self.coefficients = coefficients
-
-    def __call__(self, **kwargs) -> np.ndarray:
-        first_val = next(iter(kwargs.values()))
-        res = np.zeros_like(first_val, dtype=np.float64)
-        for k, v in kwargs.items():
-            res += self.coefficients[k] * v
-        return res
-
-    def __str__(self):
-        terms = [f"{v:.2f}*{k}" for k, v in self.coefficients.items()]
-        return " + ".join(terms) if terms else "0"
-
-
-class GaussianNoise:
-    def __init__(self, loc: float, scale: float):
-        self.loc = loc
-        self.scale = scale
-
-    def __call__(self, n_samples: int) -> np.ndarray:
-        return np.random.normal(self.loc, self.scale, size=n_samples)
-
-    def __str__(self):
-        return f"N({self.loc:.2f}, {self.scale:.2f})"
-
-
-class UniformNoise:
-    def __init__(self, low: float, high: float):
-        self.low = low
-        self.high = high
-
-    def __call__(self, n_samples: int) -> np.ndarray:
-        return np.random.uniform(self.low, self.high, size=n_samples)
-
-    def __str__(self):
-        return f"U({self.low:.2f}, {self.high:.2f})"
+from src.symbolic.scm import AdditiveNoiseMechanism, StructuralCausalModel, LinearLogic, GaussianNoise, UniformNoise
 
 
 def generate_random_scm(n_nodes: int, expected_degree: float = 2.0) -> StructuralCausalModel:
