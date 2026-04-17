@@ -18,13 +18,7 @@ from .arithmetic import (
     TruncatedUniformDistribution,
     UniformDistribution,
 )
-from .data_region_graph import (
-    DataPartitionNode,
-    DataRegionGraph,
-    DataRegionGraphNode,
-    DataRegionNode,
-)
-from .region_graph import PartitionNode, RegionGraph, RegionGraphNode, RegionNode
+from .region_graph import MDRegionGraph, PartitionNode, RegionGraph, RegionGraphNode, RegionNode
 from .scm import AdditiveNoiseMechanism, Mechanism, StructuralCausalModel
 from .vtree import MDVNode, MDVTree, VNode, VTree
 
@@ -48,9 +42,7 @@ __all__ = [
     "TruncatedUniformDistribution",
     "TruncatedCategoricalDistribution",
     "ArithmeticNode",
-    "DataRegionGraphNode",
     "RegionGraphNode",
-    "AdditiveNoiseMechanism",
     "AdditiveNoiseMechanism",
     "Mechanism",
     "StructuralCausalModel",
@@ -58,10 +50,8 @@ __all__ = [
     "ProductNode",
     "SumNode",
     "SymbolicArithmeticCircuit",
-    "DataRegionGraph",
-    "DataRegionNode",
-    "DataPartitionNode",
     "RegionGraph",
+    "MDRegionGraph",
     "RegionNode",
     "PartitionNode",
 ]
