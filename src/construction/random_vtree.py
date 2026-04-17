@@ -1,5 +1,5 @@
 import random
-from typing import List, Optional, Set
+from typing import Optional, Set
 
 from src.symbolic.vtree import MDVTree, VNode, VTree
 from src.utils import BitSet, NodeAllocator
