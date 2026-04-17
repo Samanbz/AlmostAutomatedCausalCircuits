@@ -144,6 +144,31 @@ class MonarchMatrix(nn.Module):
 
         return out
 
+    @staticmethod
+    def _auto_factorize(out_dim: int, in_dim: int) -> tuple[int, int, int, int]:
+        """Automatically compute integer block factors for arbitrary rectangular dimensions."""
+        if out_dim == in_dim and math.isqrt(in_dim) ** 2 == in_dim:
+            m = math.isqrt(in_dim)
+            return m, m, m, m
+
+        def get_mid_factor(n):
+            for i in range(math.isqrt(n), 0, -1):
+                if n % i == 0:
+                    return i
+            return 1
+
+        c = get_mid_factor(out_dim)
+        b = out_dim // c
+
+        if in_dim % c == 0:
+            k = c
+            b1 = in_dim // k
+        else:
+            k = get_mid_factor(in_dim)
+            b1 = in_dim // k
+
+        return b, c, k, b1
+
     @classmethod
     def from_dense(
         cls,
@@ -158,13 +183,7 @@ class MonarchMatrix(nn.Module):
         out_dim, in_dim = mat.shape
 
         if b is None or c is None or k is None or b1 is None:
-            if out_dim == in_dim and math.isqrt(in_dim) ** 2 == in_dim:
-                m = math.isqrt(in_dim)
-                b, c, k, b1 = m, m, m, m
-            else:
-                raise ValueError(
-                    "For rectangular matrices, you must explicitly specify block dimensions: b, c, k, b1."
-                )
+            b, c, k, b1 = cls._auto_factorize(out_dim, in_dim)
 
         assert out_dim == c * b, f"out_dim ({out_dim}) must equal c * b ({c * b})"
         assert in_dim == k * b1, f"in_dim ({in_dim}) must equal k * b1 ({k * b1})"
@@ -176,23 +195,53 @@ class MonarchMatrix(nn.Module):
             mask_batched = _get_rectangular_slices(mask, b, c, k, b1)
             row_del, col_del = _batched_greedy_mwvc(M_batched, mask_batched)
 
-        # 1. Initialize FULL RANK (Full Support) random blocks in strictly positive space
-        u_3d = torch.rand(b, k, c, device=mat.device) + 1e-4  # L_tilde shape
-        v_3d = torch.rand(b, k, b1, device=mat.device) + 1e-4  # R_tilde shape
+        # Use SVD to get the best rank-1 approximation for each slice
+        # M_batched is (b*k, c, b1)
+        U, S, Vh = torch.linalg.svd(M_batched, full_matrices=False)
+        # Take first singular value and vectors
+        u = U[:, :, 0] * torch.sqrt(S[:, 0:1])  # (b*k, c)
+        v = Vh[:, 0, :] * torch.sqrt(S[:, 0:1])  # (b*k, b1)
 
-        # 2. Compute the MWVC Causal Mask from the XPC Dense Matrix
         if respect_sparsity:
-            # 3. Surgically apply the causal mask to the random blocks!
-            # row_del is (b*k, c) and col_del is (b*k, b1).
-            # u_3d is (b, k, c) and v_3d is (b, k, b1).
-            u_3d = u_3d.masked_fill(row_del.view(b, k, c), 0.0)
-            v_3d = v_3d.masked_fill(col_del.view(b, k, b1), 0.0)
+            u = u.masked_fill(row_del, 0.0)
+            v = v.masked_fill(col_del, 0.0)
 
-        # Pass the extracted dimensions and factors to the new constructor
-        L_tilde = u_3d.permute(0, 2, 1)  # (b, c, k)
-        R_tilde = v_3d.permute(1, 0, 2)  # (k, b, b1)
+        L_tilde = u.view(b, k, c).permute(0, 2, 1)  # (b, c, k)
+        R_tilde = v.view(b, k, b1).permute(1, 0, 2)  # (k, b, b1)
 
         return cls(b=b, c=c, k=k, b1=b1, L=L_tilde, R=R_tilde)
+
+    @classmethod
+    def random_like(
+        cls,
+        mat: torch.Tensor,
+        b: int = None,
+        c: int = None,
+        k: int = None,
+        b1: int = None,
+        respect_sparsity: bool = True,
+    ):
+        assert mat.dim() == 2
+        out_dim, in_dim = mat.shape
+
+        if b is None or c is None or k is None or b1 is None:
+            b, c, k, b1 = cls._auto_factorize(out_dim, in_dim)
+
+        # 1. Initialize random blocks
+        L = torch.randn(b, c, k, device=mat.device) / math.sqrt(k)
+        R = torch.randn(k, b, b1, device=mat.device) / math.sqrt(b1)
+
+        if respect_sparsity:
+            mask = (mat != 0).float()
+            mask_batched = _get_rectangular_slices(mask, b, c, k, b1)
+            row_del, col_del = _batched_greedy_mwvc(
+                torch.ones_like(mask_batched), mask_batched
+            )  # weight by ones since we don't care about values
+
+            L = L.masked_fill(row_del.view(b, k, c).permute(0, 2, 1), 0.0)
+            R = R.masked_fill(col_del.view(b, k, b1).permute(1, 0, 2), 0.0)
+
+        return cls(b=b, c=c, k=k, b1=b1, L=L, R=R)
 
     def to_dense(self):
         M_4d = torch.einsum("blk,kbi->lbki", self.L, self.R)
@@ -243,6 +292,51 @@ class LogMonarchMatrix(nn.Module):
         respect_sparsity: bool = True,
     ):
         base_monarch = MonarchMatrix.from_dense(
+            mat, b=b, c=c, k=k, b1=b1, respect_sparsity=respect_sparsity
+        )
+
+        L_val = torch.abs(base_monarch.L.detach())
+        R_val = torch.abs(base_monarch.R.detach())
+
+        # Normalize factors to properly initialize log-sum layer parameters
+        L_sums = L_val.sum(dim=-1, keepdim=True)
+        L_val = torch.where(L_sums == 0, L_val, L_val / L_sums)
+
+        R_sums = R_val.sum(dim=-1, keepdim=True)
+        R_val = torch.where(R_sums == 0, R_val, R_val / R_sums)
+
+        # Any exactly 0 values map to -inf, the rest use log
+        log_L = torch.where(
+            L_val == 0,
+            torch.tensor(float("-inf"), device=L_val.device),
+            torch.log(L_val.clamp(min=1e-12)),
+        )
+        log_R = torch.where(
+            R_val == 0,
+            torch.tensor(float("-inf"), device=R_val.device),
+            torch.log(R_val.clamp(min=1e-12)),
+        )
+
+        return cls(
+            b=base_monarch.b,
+            c=base_monarch.c,
+            k=base_monarch.k,
+            b1=base_monarch.b1,
+            log_L=log_L,
+            log_R=log_R,
+        )
+
+    @classmethod
+    def random_like(
+        cls,
+        mat: torch.Tensor,
+        b: int = None,
+        c: int = None,
+        k: int = None,
+        b1: int = None,
+        respect_sparsity: bool = True,
+    ):
+        base_monarch = MonarchMatrix.random_like(
             mat, b=b, c=c, k=k, b1=b1, respect_sparsity=respect_sparsity
         )
 

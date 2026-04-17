@@ -53,6 +53,8 @@ class BitSet:
         self._val &= ~(1 << int(element))
 
     def __contains__(self, element: int) -> bool:
+        if self._val < 0:
+            return True  # Universal set contains all elements
         return bool((self._val >> int(element)) & 1)
 
     def __iter__(self):

@@ -18,6 +18,16 @@ class Support:
     def scope(self) -> BitSet:
         return BitSet(self.intervals.keys())
 
+    def __eq__(self, other):
+        if not isinstance(other, Support):
+            return False
+        if len(self.intervals) != len(other.intervals):
+            return False
+        for var, interval in self.intervals.items():
+            if var not in other.intervals or interval != other.intervals[var]:
+                return False
+        return True
+
     def intersect(self, other: "Support") -> "Support":
         new_intervals = {}
         for var, interval in self.intervals.items():
