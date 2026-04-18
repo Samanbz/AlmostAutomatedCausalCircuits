@@ -1,5 +1,5 @@
 import math
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 import torch
 from torch import nn
@@ -19,141 +19,173 @@ from src.symbolic import SymbolicArithmeticCircuit
 logger = g_logger.getChild(__name__)
 
 
-class SumLayer(TensorizedLayer):
+class TuckerLayer(TensorizedLayer):
+    """
+    Computes a fused Sum-Product layer in probability space using einsum.
+    """
+
     def __init__(
         self,
         out_idx: List[int],
-        in_idx: List[int],
-        connections: torch.Tensor,
+        left_indices: List[int],
+        right_indices: List[int],
+        W: torch.Tensor,
         z_mask: torch.Tensor = None,
     ):
         super().__init__(out_idx)
-        self.in_idx = in_idx
-        self.register_buffer("connections", connections)
+        # W shape: (G_P, G_L, G_R, h_out, h_l, h_r)
+        self.register_buffer("left_indices", torch.tensor(left_indices, dtype=torch.long))
+        self.register_buffer("right_indices", torch.tensor(right_indices, dtype=torch.long))
 
         if z_mask is None:
             z_mask = torch.zeros(len(out_idx), dtype=torch.bool)
         self.register_buffer("z_mask", z_mask)
 
-        # Connections represent weights. Convert to log space.
-        # Add a tiny epsilon to avoid log(0) for exactly zero weights.
-        epsilon = 1e-10
-        self.log_connections = nn.Parameter(torch.log(connections + epsilon), requires_grad=True)
+        # Keep weights in probability space directly for einsum
+        self.weights = nn.Parameter(W)
+        self.G_P, self.G_L, self.G_R, self.h_out, self.h_l, self.h_r = W.shape
 
-    def _compute_logsumexp(self, global_buffer: torch.Tensor) -> torch.Tensor:
-        input_values = global_buffer[:, self.in_idx]
-        input_expanded = input_values.unsqueeze(1)
-        log_conn_expanded = self.log_connections.unsqueeze(0)
+    def _compute_tucker(self, global_buffer: torch.Tensor) -> torch.Tensor:
+        # global_buffer is in PROBABILITY SPACE
+        L = global_buffer[:, self.left_indices].view(-1, self.G_L, self.h_l)
+        R = global_buffer[:, self.right_indices].view(-1, self.G_R, self.h_r)
 
-        log_terms = input_expanded + log_conn_expanded
-
-        zero_mask = (self.connections == 0).unsqueeze(0)
-        log_terms = log_terms.masked_fill(zero_mask, float("-inf"))
-
-        res = SafeLogSumExp.apply(log_terms, 2)
-        return res
+        # 'bli, brj, plroij -> bpo'
+        out = torch.einsum("bli, brj, plroij -> bpo", L, R, self.weights)
+        return out.flatten(1)  # (B, G_P * h_out)
 
     def forward(
         self, buf_joint: torch.Tensor, buf_xz: torch.Tensor = None, buf_z: torch.Tensor = None
     ) -> torch.Tensor:
-        res_joint = self._compute_logsumexp(buf_joint)
+        res_joint = self._compute_tucker(buf_joint)
 
         if buf_xz is None or buf_z is None:
             buf_joint[:, self.out_idx] = res_joint
             return res_joint
 
-        res_xz = self._compute_logsumexp(buf_xz)
-        res_z = self._compute_logsumexp(buf_z)
+        res_xz = self._compute_tucker(buf_xz)
+        res_z = self._compute_tucker(buf_z)
 
         interventional_math = res_joint - res_xz + res_z
-        interventional_math = torch.nan_to_num(interventional_math, nan=float("-inf"))
+        interventional_math = torch.nan_to_num(interventional_math, nan=0.0)
 
         z_mask_expanded = self.z_mask.unsqueeze(0).expand_as(res_joint)
         res_final = torch.where(z_mask_expanded, interventional_math, res_joint)
 
         buf_joint[:, self.out_idx] = res_final
-        # Also propagate down correctly to the underlying path buffers if needed
-        # (Assuming the network will read them)
         buf_xz[:, self.out_idx] = res_xz
         buf_z[:, self.out_idx] = res_z
 
         return res_final
-
-    def update_params(self):
-        with torch.no_grad():
-            responsibilities = self.log_connections.grad
-            total_resp = responsibilities.sum(dim=-1, keepdim=True)
-
-            # Only update nodes that received some gradient.
-            # Dead nodes (total_resp == 0) keep their previous parameters.
-            mask = total_resp > 0
-
-            # Using Laplace smoothing (1e-5) only for nodes we are updating
-            smoothed_resp = responsibilities + 1e-5
-            new_probs = smoothed_resp / smoothed_resp.sum(dim=-1, keepdim=True)
-
-            # Apply new probabilities where mask is True, keep old where False
-            current_probs = torch.exp(self.log_connections)
-            new_probs = torch.where(mask, new_probs, current_probs)
-
-            self.log_connections.copy_(torch.log(new_probs))
-            self.log_connections.grad.zero_()
 
 
 class TensorizedCircuit(nn.Module):
     def __init__(self, symbolic_circuit: SymbolicArithmeticCircuit, target_vars: set = None):
         super().__init__()
         self.layers = nn.ModuleList()
+        self.input_layers = nn.ModuleList()
+        self.output_idx = []
+        self.num_nodes = 0
+        self.max_var_index = -1
+        self.identity_idx = -1
 
-        self.node_to_idx = {}
+        self.node_to_idx: Dict[int, List[int]] = {}
         idx = 0
 
-        node_layers_iter = symbolic_circuit.layered_topological_sort(reverse=True)
-
-        try:
-            input_node_ids = next(node_layers_iter)
-        except StopIteration:
-            self.num_nodes = 0
-            return
-
-        self.input_layers = nn.ModuleList()
-        gaussian_nodes, gaussian_ids = [], []
-        uniform_nodes, uniform_ids = [], []
-        categorical_nodes, categorical_ids = [], []
-
-        for n_id in input_node_ids:
+        # Pass 1: Setup Leaf Nodes
+        gaussian_nodes, uniform_nodes, categorical_nodes = [], [], []
+        leaf_ids = symbolic_circuit.get_leaves()
+        for n_id in leaf_ids:
             node = symbolic_circuit.get_node_data(n_id)
+            node_unit_count = getattr(node, "unit_count", 1)
+            self.node_to_idx[n_id] = list(range(idx, idx + node_unit_count))
+            idx += node_unit_count
+
             if hasattr(node, "mean") and hasattr(node, "stddev"):
-                gaussian_nodes.append(node)
-                gaussian_ids.append(n_id)
+                gaussian_nodes.append((node, self.node_to_idx[n_id]))
             elif (
                 hasattr(node, "var_support")
                 and not hasattr(node, "categories")
                 and not hasattr(node, "mean")
             ):
-                # Uniform distributions
-                uniform_nodes.append(node)
-                uniform_ids.append(n_id)
-            elif hasattr(node, "categories") and hasattr(node, "probabilities"):
-                categorical_nodes.append(node)
-                categorical_ids.append(n_id)
-            else:
-                raise ValueError(f"Unsupported distribution node: {node}")
+                uniform_nodes.append((node, self.node_to_idx[n_id]))
+            elif hasattr(node, "categories"):
+                categorical_nodes.append((node, self.node_to_idx[n_id]))
 
+        # Initialize input layers (we'll modify them slightly to output probabilities instead of log-probs, or we just exp() after)
+        self._init_input_layers(gaussian_nodes, uniform_nodes, categorical_nodes)
+
+        self.identity_idx = idx
+        idx += 1
+
+        # We must build layers by depth to guarantee topological ordering
+        # Since the SPN alternates Sum and Product, and we want to fuse Sum->Product->Sum,
+        # we extract the "SumNode" layers.
+
+        sum_nodes = [
+            n
+            for n in symbolic_circuit.topological_sort(reverse=True)
+            if symbolic_circuit.is_sum_node(n) and n not in leaf_ids
+        ]
+
+        # We need to group sum nodes by depth.
+        # Compute depth of each node
+        depths = {}
+        for n in symbolic_circuit.topological_sort():
+            parents = symbolic_circuit.get_parents(n)
+            if not parents:
+                depths[n] = 0
+            else:
+                depths[n] = max(depths[p] for p in parents) + 1
+
+        # Group sum nodes by depth
+        depth_to_sums = {}
+        for n in sum_nodes:
+            d = depths[n]
+            if d not in depth_to_sums:
+                depth_to_sums[d] = []
+            depth_to_sums[d].append(n)
+
+        # Process layers from highest depth (bottom) to lowest (root)
+        for d in sorted(depth_to_sums.keys(), reverse=True):
+            layer_sum_ids = depth_to_sums[d]
+
+            # Allocate indices for these sum nodes
+            layer_out_idx = []
+            for n_id in layer_sum_ids:
+                node = symbolic_circuit.get_node_data(n_id)
+                node_unit_count = getattr(node, "unit_count", 1)
+                self.node_to_idx[n_id] = list(range(idx, idx + node_unit_count))
+                layer_out_idx.extend(self.node_to_idx[n_id])
+                idx += node_unit_count
+
+            layer = self._build_tucker_layer(symbolic_circuit, layer_sum_ids, layer_out_idx)
+            self.layers.append(layer)
+
+        # Roots are depth 0
+        self.output_idx = []
+        for n in depth_to_sums.get(0, []):
+            self.output_idx.extend(self.node_to_idx[n])
+
+        self.num_nodes = idx
+
+        if target_vars is not None:
+            self.set_target_vars(target_vars)
+
+    def _init_input_layers(self, gaussian_nodes, uniform_nodes, categorical_nodes):
         if gaussian_nodes:
-            means = [n.mean for n in gaussian_nodes]
-            stds = [n.stddev for n in gaussian_nodes]
-            lows = [n.var_support.low for n in gaussian_nodes]
-            highs = [n.var_support.high for n in gaussian_nodes]
-            scopes = [n.var for n in gaussian_nodes]
-            out_idx = []
-            for n_id in gaussian_ids:
-                self.node_to_idx[n_id] = idx
-                out_idx.append(idx)
-                idx += 1
+            layer_out_idx = [i for _, indices in gaussian_nodes for i in indices]
+            means, stds, lows, highs, scopes = [], [], [], [], []
+            for node, indices in gaussian_nodes:
+                for _ in indices:
+                    means.append(node.mean)
+                    stds.append(node.stddev)
+                    lows.append(node.var_support.low)
+                    highs.append(node.var_support.high)
+                    scopes.append(node.var)
             self.input_layers.append(
                 GaussianInputLayer(
-                    out_idx,
+                    layer_out_idx,
                     torch.tensor(means, dtype=torch.float32),
                     torch.tensor(stds, dtype=torch.float32),
                     torch.tensor(lows, dtype=torch.float32),
@@ -161,243 +193,174 @@ class TensorizedCircuit(nn.Module):
                     scopes,
                 )
             )
+            self.max_var_index = max([s for s in scopes] + [-1])
 
         if uniform_nodes:
-            lows = [n.var_support.low for n in uniform_nodes]
-            highs = [n.var_support.high for n in uniform_nodes]
-            scopes = [n.var for n in uniform_nodes]
-            out_idx = []
-            for n_id in uniform_ids:
-                self.node_to_idx[n_id] = idx
-                out_idx.append(idx)
-                idx += 1
+            layer_out_idx = [i for _, indices in uniform_nodes for i in indices]
+            lows, highs, scopes = [], [], []
+            for node, indices in uniform_nodes:
+                for _ in indices:
+                    lows.append(node.var_support.low)
+                    highs.append(node.var_support.high)
+                    scopes.append(node.var)
             self.input_layers.append(
                 UniformInputLayer(
-                    out_idx,
+                    layer_out_idx,
                     torch.tensor(lows, dtype=torch.float32),
                     torch.tensor(highs, dtype=torch.float32),
                     scopes,
                 )
             )
 
-        if categorical_nodes:
-            scopes = [n.var for n in categorical_nodes]
-            out_idx = []
-            for n_id in categorical_ids:
-                self.node_to_idx[n_id] = idx
-                out_idx.append(idx)
-                idx += 1
+    def _build_tucker_layer(
+        self, circuit: SymbolicArithmeticCircuit, sum_node_ids: List[int], out_idx: List[int]
+    ):
+        # We need to discover the G_P, G_L, G_R groups.
+        G_P = len(sum_node_ids)
+        h_out = circuit.get_node_data(sum_node_ids[0]).unit_count
 
-            # Categories might have different lengths. Pad them.
-            max_cats = max(len(n.categories) for n in categorical_nodes)
-            cats_tensor = torch.full((len(categorical_nodes), max_cats), float("nan"))
-            probs_tensor = torch.full((len(categorical_nodes), max_cats), float("-inf"))
+        # Discover left and right children groups.
+        # The sum nodes connect to ProductNodes. The ProductNodes connect to (left_child, right_child)
+        left_nodes = set()
+        right_nodes = set()
 
-            for i, n in enumerate(categorical_nodes):
-                for j, (cat, prob) in enumerate(zip(n.categories, n.probabilities)):
-                    cats_tensor[i, j] = float(cat)
-                    probs_tensor[i, j] = math.log(prob) if prob > 0 else float("-inf")
+        for p_id in sum_node_ids:
+            prod_children = circuit.get_children(p_id)
+            for prod_id in prod_children:
+                children = circuit.get_children(prod_id)
+                if len(children) == 2:
+                    left_nodes.add(children[0])
+                    right_nodes.add(children[1])
+                elif len(children) == 1:
+                    left_nodes.add(children[0])
 
-            self.input_layers.append(
-                CategoricalInputLayer(
-                    out_idx,
-                    cats_tensor,
-                    probs_tensor,
-                    scopes,
-                )
-            )
+        left_nodes = sorted(list(left_nodes))
+        right_nodes = sorted(list(right_nodes))
 
-        # build layers bottom-up
-        for layer_node_ids in node_layers_iter:
-            is_sum_layer = all(symbolic_circuit.is_sum_node(node_id) for node_id in layer_node_ids)
-            is_product_layer = all(
-                symbolic_circuit.is_product_node(node_id) for node_id in layer_node_ids
-            )
-            assert is_sum_layer or is_product_layer, "Mixed layer types are not supported"
+        G_L = max(1, len(left_nodes))
+        G_R = max(1, len(right_nodes))
 
-            out_idx = []
-            for n_id in layer_node_ids:
-                self.node_to_idx[n_id] = idx
-                out_idx.append(idx)
-                idx += 1
+        h_l = circuit.get_node_data(left_nodes[0]).unit_count if left_nodes else 1
+        h_r = circuit.get_node_data(right_nodes[0]).unit_count if right_nodes else 1
 
-            if is_product_layer:
-                left_idx, right_idx = self._compute_product_layer_indices(
-                    symbolic_circuit, layer_node_ids
-                )
-                # Prepare and store node scopes for the layer before building
-                node_scopes = []
-                for n_id in layer_node_ids:
-                    node = symbolic_circuit.get_node_data(n_id)
-                    node_scopes.append(
-                        set(node.scope.features)
-                        if hasattr(node.scope, "features")
-                        else set(node.scope)
-                    )
-                layer = self._build_product_layer(out_idx, left_idx, right_idx)
-                layer.node_scopes = node_scopes
-                self.layers.append(layer)
+        W = torch.zeros(G_P, G_L, G_R, h_out, h_l, h_r)
 
-            elif is_sum_layer:
-                child_node_ids = sorted(
-                    {
-                        child_id
-                        for node_id in layer_node_ids
-                        for child_id in symbolic_circuit.get_children(node_id)
-                    }
-                )
-                in_idx = [self.node_to_idx[n_id] for n_id in child_node_ids]
-                connections = self._compute_sum_layer_connections(
-                    symbolic_circuit, layer_node_ids, child_node_ids
-                )
+        for p_idx, p_id in enumerate(sum_node_ids):
+            prod_children = circuit.get_children(p_id)
+            for prod_id in prod_children:
+                weight_matrix = circuit.get_edge_data(p_id, prod_id)  # (h_out, h_l * h_r)
 
-                node_scopes = []
-                for n_id in layer_node_ids:
-                    node = symbolic_circuit.get_node_data(n_id)
-                    node_scopes.append(
-                        set(node.scope.features)
-                        if hasattr(node.scope, "features")
-                        else set(node.scope)
-                    )
+                children = circuit.get_children(prod_id)
+                if len(children) == 2:
+                    l_id, r_id = children
+                    l_idx = left_nodes.index(l_id)
+                    r_idx = right_nodes.index(r_id)
+                    W[p_idx, l_idx, r_idx] = weight_matrix.view(h_out, h_l, h_r)
+                elif len(children) == 1:
+                    l_id = children[0]
+                    l_idx = left_nodes.index(l_id)
+                    W[p_idx, l_idx, 0] = weight_matrix.view(h_out, h_l, 1)
 
-                layer = self._build_sum_layer(out_idx, in_idx, connections)
-                layer.node_scopes = node_scopes
-                self.layers.append(layer)
+        # Normalize W so that each sum node (G_P, h_out) marginalizes to 1 over its children (G_L, G_R, h_l, h_r)
+        W = W / W.sum(dim=(1, 2, 4, 5), keepdim=True).clamp(min=1e-10)
 
-        self.num_nodes = idx
-        if target_vars is not None:
-            self.set_target_vars(target_vars)
+        left_indices = []
+        for l_id in left_nodes:
+            left_indices.extend(self.node_to_idx[l_id])
+        if not left_indices:
+            left_indices = [self.identity_idx]
 
-    def _build_sum_layer(
-        self,
-        out_idx: List[int],
-        in_idx: List[int],
-        connections: torch.Tensor,
-        z_mask: torch.Tensor = None,
-    ) -> TensorizedLayer:
-        return SumLayer(out_idx, in_idx, connections, z_mask=z_mask)
+        right_indices = []
+        for r_id in right_nodes:
+            right_indices.extend(self.node_to_idx[r_id])
+        if not right_indices:
+            right_indices = [self.identity_idx]
 
-    def _build_product_layer(
-        self,
-        out_idx: List[int],
-        left_idx: List[int],
-        right_idx: List[int],
-        z_mask: torch.Tensor = None,
-    ) -> TensorizedLayer:
-        return ProductLayer(out_idx, left_idx, right_idx, z_mask=z_mask)
+        return TuckerLayer(out_idx, left_indices, right_indices, W)
 
     def set_target_vars(self, target_vars: set):
         device = next(self.parameters()).device if list(self.parameters()) else torch.device("cpu")
         for layer in self.layers:
-            if hasattr(layer, "node_scopes") and layer.node_scopes:
-                mask = []
-                for scope in layer.node_scopes:
-                    mask.append(not scope.isdisjoint(target_vars))
-                layer.z_mask = torch.tensor(mask, dtype=torch.bool, device=device)
-            else:
-                if hasattr(layer, "z_mask"):
-                    layer.z_mask = torch.zeros(len(layer.out_idx), dtype=torch.bool, device=device)
-
-    def _compute_scope_mask(
-        self, circuit: SymbolicArithmeticCircuit, node_ids: List[int], target_vars: set
-    ) -> torch.Tensor:
-        mask = torch.zeros(len(node_ids), dtype=torch.bool)
-        if not target_vars:
-            return mask
-
-        for i, n_id in enumerate(node_ids):
-            node = circuit.get_node_data(n_id)
-            if hasattr(node, "scope"):
-                # scope is an iterable/set
-                scope_set = set(node.scope)
-                if not scope_set.isdisjoint(target_vars):
-                    mask[i] = True
-
-        return mask
-
-    def _compute_sum_layer_connections(
-        self, circuit: SymbolicArithmeticCircuit, sum_node_ids: List[int], child_node_ids: List[int]
-    ) -> torch.Tensor:
-        connections = torch.zeros(len(sum_node_ids), len(child_node_ids), dtype=torch.float32)
-        for i, sum_node_id in enumerate(sum_node_ids):
-            child_id_to_weight = dict(circuit.get_outgoing_edges(sum_node_id))
-            for j, child_id in enumerate(child_node_ids):
-                if child_id in child_id_to_weight:
-                    connections[i, j] = child_id_to_weight[child_id]
-        return connections
-
-    def _compute_product_layer_indices(
-        self, circuit: SymbolicArithmeticCircuit, node_ids: List[int]
-    ) -> Tuple[List[int], List[int]]:
-        left_idx = []
-        right_idx = []
-        for node_id in node_ids:
-            children = circuit.get_children(node_id)
-            assert len(children) == 2, "Only binary product nodes are supported"
-
-            left_pos = self.node_to_idx[children[0]]
-            right_pos = self.node_to_idx[children[1]]
-
-            left_idx.append(left_pos)
-            right_idx.append(right_pos)
-        return left_idx, right_idx
+            layer.z_mask = torch.zeros(len(layer.out_idx), dtype=torch.bool, device=device)
 
     def forward(
         self, data_joint: torch.Tensor, data_xz: torch.Tensor = None, data_z: torch.Tensor = None
     ) -> torch.Tensor:
+        def _pad_if_needed(data: torch.Tensor) -> torch.Tensor:
+            if data is None:
+                return None
+            if data.shape[1] <= self.max_var_index:
+                padding = torch.full(
+                    (data.shape[0], self.max_var_index + 1 - data.shape[1]),
+                    float("nan"),
+                    device=data.device,
+                    dtype=data.dtype,
+                )
+                return torch.cat([data, padding], dim=1)
+            return data
+
+        data_joint = _pad_if_needed(data_joint)
         batch_size = data_joint.shape[0]
 
-        buf_joint = torch.empty(
+        buf_joint = torch.zeros(
             (batch_size, self.num_nodes), dtype=data_joint.dtype, device=data_joint.device
         )
-        buf_xz = None
-        buf_z = None
 
-        if data_xz is not None and data_z is not None:
-            buf_xz = torch.empty(
-                (batch_size, self.num_nodes), dtype=data_xz.dtype, device=data_xz.device
-            )
-            buf_z = torch.empty(
-                (batch_size, self.num_nodes), dtype=data_z.dtype, device=data_z.device
-            )
-
-        # evaluate all input layers
+        # Input layers evaluate in LOG space. We must torch.exp them to probability space!
         for layer in self.input_layers:
             layer.forward(buf_joint, data_joint)
-            if buf_xz is not None and buf_z is not None:
-                layer.forward(buf_xz, data_xz)
-                layer.forward(buf_z, data_z)
 
-        # evaluate internal layers
+        # Convert log-probabilities to probabilities
+        buf_joint = torch.exp(buf_joint)
+
+        # Handle identity node
+        buf_joint = buf_joint.clone()
+        buf_joint[:, self.identity_idx] = 1.0
+
         for layer in self.layers:
-            if buf_xz is not None and buf_z is not None:
-                layer.forward(buf_joint, buf_xz, buf_z)
-            else:
-                layer.forward(buf_joint)
+            buf_joint = buf_joint.clone()
+            # If layer.forward modifies buf_joint inplace, we need to return it, or pass it and the layer modifies the cloned one. Wait, if layer modifies the cloned tensor inplace, the caller's buf_joint won't see the modification unless layer.forward mutates the tensor we pass.
+            # But wait, buf_joint.clone() creates a NEW tensor. If we pass buf_joint to layer.forward, it mutates the new tensor. And buf_joint will point to that new tensor.
+            layer.forward(buf_joint)
 
-        output_idx = self.layers[-1].out_idx
-        return buf_joint[:, output_idx]
-
-    def update_params(self):
-        for layer in self.layers:
-            if isinstance(layer, SumLayer):
-                layer.update_params()
-        for layer in getattr(self, "input_layers", []):
-            if isinstance(layer, (GaussianInputLayer, CategoricalInputLayer)):
-                layer.update_params()
+        # Return in LOG space
+        out_prob = buf_joint[:, self.output_idx]
+        return torch.log(out_prob.clamp(min=1e-30))
 
 
-def em(circuit: TensorizedCircuit, data: torch.Tensor):
-    # E-step: Forward pass to compute responsibilities
-    log_likelihoods = circuit.forward(data)
-    logger.info(f"LLs: {log_likelihoods}")
+def em(circuit: TensorizedCircuit, data: torch.Tensor, iterations: int = 5):
+    # E-step: Forward pass to compute likelihoods
+    for i in range(iterations):
+        # Forward pass returns log probabilities
+        log_probs = circuit.forward(data)
 
-    # Clear previous gradients
-    circuit.zero_grad()
+        # Compute log-likelihood
+        log_likelihood = log_probs.sum()
+        print(f"Iteration {i}: Log-Likelihood = {log_likelihood.item():.4f}")
 
-    # M-step: Backward pass to populate .grad with responsibilities
-    loss = log_likelihoods.sum()
-    loss.backward()
+        # Standard backprop to compute gradients (responsibilities)
+        circuit.zero_grad()
+        log_likelihood.backward()
 
-    # Update parameters using computed responsibilities
-    circuit.update_params()
+        # M-step: Update parameters using the gradients
+        with torch.no_grad():
+            for layer in circuit.layers:
+                if isinstance(layer, TuckerLayer):
+                    pass
+            # Standard SGD update for weights in self.parameters()
+            with torch.no_grad():
+                for param in circuit.parameters():
+                    if param.grad is not None:
+                        # EM update: expected counts = param.data * param.grad
+                        expected_counts = param.data * param.grad.clamp(min=0.0)
+                        param.data = expected_counts + 1e-4
+
+                        if param.data.ndim == 6:
+                            # Normalize TuckerLayer weights: (G_P, G_L, G_R, h_out, h_l, h_r)
+                            param.data /= param.data.sum(dim=(1, 2, 4, 5), keepdim=True).clamp(
+                                min=1e-10
+                            )
+                        else:
+                            param.data /= param.data.sum(dim=-1, keepdim=True).clamp(min=1e-10)
+
+                        param.grad.zero_()
