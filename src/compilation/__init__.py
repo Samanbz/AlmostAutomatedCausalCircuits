@@ -5,9 +5,7 @@ from .base_circuit import (
     TensorizedLayer,
     UniformInputLayer,
 )
-from .monarch_circuit import MonarchCircuit, MonarchSumLayer
-from .query import conditional, marginal
-from .tensorized_circuit import SumLayer, TensorizedCircuit
+from .query import backdoor, conditional, marginal
 
 
 __all__ = [
@@ -16,10 +14,6 @@ __all__ = [
     "UniformInputLayer",
     "CategoricalInputLayer",
     "ProductLayer",
-    "SumLayer",
-    "TensorizedCircuit",
-    "MonarchCircuit",
-    "MonarchSumLayer",
     "marginal",
     "conditional",
     "backdoor",
