@@ -1,20 +1,20 @@
 import copy
-import random
-from typing import Dict, List
+from typing import Dict
+
+import torch
 
 from src.symbolic import (
-    DataPartitionNode,
-    DataRegionGraph,
-    DataRegionNode,
     Distribution,
+    MDRegionGraph,
     PartitionNode,
     ProductNode,
-    RegionGraph,
     RegionNode,
     SumNode,
     SymbolicArithmeticCircuit,
 )
+from src.symbolic.vtree import MDVTree
 from src.utils import BitSet, Support
+from src.utils.node_allocator import NodeAllocator
 
 
 def get_support(scope: BitSet, input_dists: Dict[int, Distribution]) -> Support:
@@ -23,187 +23,120 @@ def get_support(scope: BitSet, input_dists: Dict[int, Distribution]) -> Support:
     return Support(intervals)
 
 
-def normalize_circuit_weights(circuit: SymbolicArithmeticCircuit):
-    for node_id in circuit.topological_sort():
-        if isinstance(circuit.get_node_data(node_id), SumNode):
-            outgoing = circuit.get_outgoing_edges(node_id)
-            if not outgoing:
+class MDCircuitBuilder:
+    def __init__(self, h: int):
+        self.h = h
+        self.node_allocator = NodeAllocator()
+
+    def build(self, rg: MDRegionGraph) -> SymbolicArithmeticCircuit:
+        """
+        Constructs a blockified SymbolicArithmeticCircuit from an MDRegionGraph.
+        Each symbolic SumNode represents a block of h units, except for the root(s) which have 1 unit.
+        ProductNodes represent h*h units.
+        """
+        circuit = SymbolicArithmeticCircuit()
+
+        srg_roots = [n for n in rg._nodes if not rg.get_parents(n)]
+        srg_id_to_circuit_id: Dict[int, int] = {}
+
+        # Pass 1: Create Region Nodes (Sums and Leaves)
+        for rg_id in rg.topological_sort():
+            rg_node = rg.get_node_data(rg_id)
+            if not isinstance(rg_node, RegionNode):
                 continue
 
-            total_weight = sum(edge[1] for edge in outgoing)
-            if total_weight > 0:
-                for child_id, weight in outgoing:
-                    circuit.set_edge_data(node_id, child_id, weight / total_weight)
+            is_leaf_region = len(rg.get_children(rg_id)) == 0
+            circuit_id = self.node_allocator.next_id()
+            node_h = 1 if rg_id in srg_roots else self.h
 
+            if is_leaf_region:
+                var_id = list(rg_node.scope)[0]
+                base_dist = rg_node.support[var_id]
+                leaf_node = copy.deepcopy(base_dist)
+                leaf_node.unit_count = node_h
+                circuit.add_node(circuit_id, leaf_node)
+            else:
+                node_support = Support({v: d.var_support for v, d in rg_node.support.items()})
+                sum_node = SumNode(support=node_support, unit_count=node_h)
+                circuit.add_node(circuit_id, sum_node)
 
+            srg_id_to_circuit_id[rg_id] = circuit_id
 
+        # Pass 2: Create Partition Nodes (Products) and connect them
+        for p_id in rg.topological_sort():
+            p_node = rg.get_node_data(p_id)
+            if not isinstance(p_node, PartitionNode):
+                continue
 
+            parents = rg.get_parents(p_id)
+            children = rg.get_children(p_id)
 
-def build_circuit_from_region_graph(
-    rg: RegionGraph,
-    num_classes: int,
-    num_sums: int,
-    num_inputs: int,
-    input_dists: Dict[int, Distribution],
-) -> SymbolicArithmeticCircuit:
-    spn = SymbolicArithmeticCircuit()
-    node_allocator = NodeAllocator()
-    region_to_spn_nodes: Dict[int, List[int]] = {}
+            # Only support arity 1 (unary root merging) or 2 (standard product)
+            arity = len(children)
 
-    rg_root_ids = [n for n in rg._nodes if not rg.get_parents(n)]
-    if not rg_root_ids:
-        raise ValueError("Invalid RegionGraph: No root found.")
-    rg_root_id = rg_root_ids[0]
+            # Create a ProductNode representing h*h units (or h*1 for unary)
+            prod_id = self.node_allocator.next_id()
+            p_node_support = Support({v: d.var_support for v, d in p_node.support.items()})
 
-    # Pass 1
-    for rid in rg.topological_sort():
-        r_node = rg.get_node_data(rid)
-        if not isinstance(r_node, RegionNode):
-            continue
+            if arity == 2:
+                l_rg_id, r_rg_id = children
+                l_circuit_id = srg_id_to_circuit_id[l_rg_id]
+                r_circuit_id = srg_id_to_circuit_id[r_rg_id]
 
-        outgoing_edges = rg._adj[rid]
-        is_leaf_region = len(outgoing_edges) == 0
-        is_root_region = rid == rg_root_id
+                h_l = circuit.get_node_data(l_circuit_id).unit_count
+                h_r = circuit.get_node_data(r_circuit_id).unit_count
 
-        spn_ids = []
-        if is_leaf_region:
-            for _ in range(num_inputs):
-                sid = node_allocator.next_id()
-                if len(r_node.scope) != 1:
-                    raise ValueError(f"Leaf region scope must be size 1, got {len(r_node.scope)}")
-                var_id = list(r_node.scope)[0]
-                leaf_dist = copy.deepcopy(input_dists[var_id])
-                spn.add_node(sid, leaf_dist)
-                spn_ids.append(sid)
-        else:
-            count = num_classes if is_root_region else num_sums
-            for _ in range(count):
-                sid = node_allocator.next_id()
-                s_node = SumNode(support=get_support(r_node.scope, input_dists))
-                spn.add_node(sid, s_node)
-                spn_ids.append(sid)
-
-        region_to_spn_nodes[rid] = spn_ids
-
-    # Pass 2
-    for pid in rg.topological_sort():
-        p_node = rg.get_node_data(pid)
-        if not isinstance(p_node, PartitionNode):
-            continue
-
-        parents = rg.get_parents(pid)
-        if not parents:
-            raise ValueError("Partition node has no parent region.")
-        parent_region_id = parents[0]
-
-        children = list(rg._adj[pid].keys())
-        if len(children) != 2:
-            raise ValueError("Partition node must have exactly two child regions.")
-        r1_id, r2_id = children
-
-        parent_spn_ids = region_to_spn_nodes.get(parent_region_id, [])
-        r1_spn_ids = region_to_spn_nodes.get(r1_id, [])
-        r2_spn_ids = region_to_spn_nodes.get(r2_id, [])
-
-        parent_r_node = rg.get_node_data(parent_region_id)
-
-        for n1 in r1_spn_ids:
-            for n2 in r2_spn_ids:
-                prod_id = node_allocator.next_id()
-                prod_node = ProductNode(support=get_support(parent_r_node.scope, input_dists))
-                spn.add_node(prod_id, prod_node)
-                spn.add_edge(prod_id, n1)
-                spn.add_edge(prod_id, n2)
-
-                for parent_sum_id in parent_spn_ids:
-                    weight = random.random()
-                    spn.add_edge(parent_sum_id, prod_id, data=weight)
-
-    normalize_circuit_weights(spn)
-    return spn
-
-
-def build_circuit_from_data_region_graph(
-    rg: DataRegionGraph,
-    input_dists: Dict[int, Distribution],
-    alpha: float = 0.01,
-) -> SymbolicArithmeticCircuit:
-    circuit = SymbolicArithmeticCircuit()
-    node_allocator = NodeAllocator()
-    region_to_ac_nodes: Dict[int, List[int]] = {}
-
-    # Pass 1
-    for rg_node_id in rg.topological_sort():
-        rg_node = rg.get_node_data(rg_node_id)
-        if not isinstance(rg_node, DataRegionNode):
-            continue
-
-        is_leaf_region = len(rg._adj[rg_node_id]) == 0
-        ac_ids = []
-
-        if is_leaf_region:
-            assert len(rg_node.scope) == 1, f"Leaf region scope must be 1, got {rg_node.scope}"
-            var_id = list(rg_node.scope)[0]
-            base_dist = input_dists[var_id]
-
-            for _ in range(rg_node.num_inputs):
-                leaf_id = node_allocator.next_id()
-                dist_copy = copy.deepcopy(base_dist)
-                leaf_node = dist_copy.constrain_to(rg_node.constraints.get(var_id))
-                circuit.add_node(leaf_id, leaf_node)
-                ac_ids.append(leaf_id)
-        else:
-            full_support = Support({var: input_dists[var].var_support for var in rg_node.scope})
-            node_support = full_support.intersect(rg_node.constraints)
-
-            for _ in range(rg_node.num_sums):
-                sum_id = node_allocator.next_id()
-                sum_node = SumNode(support=node_support)
-                circuit.add_node(sum_id, sum_node)
-                ac_ids.append(sum_id)
-
-        region_to_ac_nodes[rg_node_id] = ac_ids
-
-    # Pass 2
-    for p_id in rg.topological_sort():
-        p_node = rg.get_node_data(p_id)
-        if not isinstance(p_node, DataPartitionNode):
-            continue
-
-        parents = rg.get_parents(p_id)
-        assert len(parents) == 1, "DataPartitionNode must have exactly one parent."
-        parent_region_id = parents[0]
-        parent_r_node = rg.get_node_data(parent_region_id)
-
-        children = list(rg._adj[p_id].keys())
-        assert len(children) == 2, "Partition node must have exactly two child regions."
-        l_r_id, r_r_id = children
-
-        parent_sums = region_to_ac_nodes.get(parent_region_id, [])
-        l_children = region_to_ac_nodes.get(l_r_id, [])
-        r_children = region_to_ac_nodes.get(r_r_id, [])
-
-        full_support = Support({var: input_dists[var].var_support for var in parent_r_node.scope})
-        node_support = full_support.intersect(p_node.constraints)
-
-        num_partitions = len(rg.get_children(parent_region_id))
-        proportion_base = (len(p_node.row_ids) + alpha) / (
-            len(parent_r_node.row_ids) + alpha * num_partitions
-        )
-
-        for l_ac in l_children:
-            for r_ac in r_children:
-                prod_id = node_allocator.next_id()
-                prod_node = ProductNode(support=node_support)
+                prod_node = ProductNode(support=p_node_support, unit_count=h_l * h_r)
                 circuit.add_node(prod_id, prod_node)
-                circuit.add_edge(prod_id, l_ac)
-                circuit.add_edge(prod_id, r_ac)
+                circuit.add_edge(prod_id, l_circuit_id)
+                circuit.add_edge(prod_id, r_circuit_id)
 
-                for parent_sum_id in parent_sums:
-                    weight = proportion_base
-                    if parent_r_node.num_sums > 1 or num_partitions > 1:
-                        weight = proportion_base * (0.5 + random.random())
-                    circuit.add_edge(parent_sum_id, prod_id, data=weight)
+                for parent_rg_id in parents:
+                    parent_circuit_id = srg_id_to_circuit_id[parent_rg_id]
+                    h_out = circuit.get_node_data(parent_circuit_id).unit_count
 
-    normalize_circuit_weights(circuit)
-    return circuit
+                    # We use dense weights over the implicit blocks
+                    weight_matrix = torch.randn(h_out, h_l * h_r)
+                    # We can store it as (h_out, h_l, h_r) for the Tucker layer to parse
+                    weight_matrix = torch.softmax(weight_matrix.view(h_out, -1), dim=-1).view(
+                        h_out, h_l, h_r
+                    )
+                    circuit.add_edge(parent_circuit_id, prod_id, data=weight_matrix)
+
+            elif arity == 1:
+                c_rg_id = children[0]
+                c_circuit_id = srg_id_to_circuit_id[c_rg_id]
+                h_c = circuit.get_node_data(c_circuit_id).unit_count
+
+                prod_node = ProductNode(support=p_node_support, unit_count=h_c)
+                circuit.add_node(prod_id, prod_node)
+                circuit.add_edge(prod_id, c_circuit_id)
+
+                for parent_rg_id in parents:
+                    parent_circuit_id = srg_id_to_circuit_id[parent_rg_id]
+                    h_out = circuit.get_node_data(parent_circuit_id).unit_count
+
+                    weight_matrix = torch.randn(h_out, h_c)
+                    weight_matrix = torch.softmax(weight_matrix, dim=-1)
+                    circuit.add_edge(parent_circuit_id, prod_id, data=weight_matrix)
+
+        return circuit
+
+
+def create_md_circuit(
+    input_dists: Dict[int, Distribution],
+    md_var_decomp: MDVTree,
+    h: int,
+    num_sums: int = 1,
+    num_inputs: int = 1,
+) -> SymbolicArithmeticCircuit:
+    """
+    Creates an MD-Circuit end-to-end.
+    """
+    from src.construction.region_graph_builder import MDRegionGraphBuilder
+
+    rg_builder = MDRegionGraphBuilder(input_dists, md_var_decomp, num_sums, num_inputs)
+    rg = rg_builder.build()
+
+    c_builder = MDCircuitBuilder(h=h)
+    return c_builder.build(rg)
