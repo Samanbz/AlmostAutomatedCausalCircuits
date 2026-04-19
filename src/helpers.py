@@ -1,10 +1,8 @@
 from typing import Callable
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
-from matplotlib.colors import LinearSegmentedColormap
 
 from src.symbolic import StructuralCausalModel
 

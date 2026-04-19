@@ -8,7 +8,6 @@ import numpy as np
 import torch
 
 
-
 from src.construction.learned_vtree import construct_optimal_md_vtree, construct_optimal_vtree
 
 

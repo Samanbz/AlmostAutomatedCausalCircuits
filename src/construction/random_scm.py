@@ -1,8 +1,12 @@
-from typing import Dict
-
 import numpy as np
 
-from src.symbolic.scm import AdditiveNoiseMechanism, StructuralCausalModel, LinearLogic, GaussianNoise, UniformNoise
+from src.symbolic.scm import (
+    AdditiveNoiseMechanism,
+    GaussianNoise,
+    LinearLogic,
+    StructuralCausalModel,
+    UniformNoise,
+)
 
 
 def generate_random_scm(n_nodes: int, expected_degree: float = 2.0) -> StructuralCausalModel:
