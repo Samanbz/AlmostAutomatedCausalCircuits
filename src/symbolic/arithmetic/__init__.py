@@ -9,12 +9,16 @@ from .distributions import (
     TruncatedUniformDistribution,
     UniformDistribution,
 )
-from .nodes import ArithmeticNode, LeafNode, ProductNode, SumNode
+from .nodes import (
+    ArithmeticNode,
+    LeafNode,
+    ProductNode,
+    SumNode,
+)
 from .properties import (
     Decomposability,
     Determinism,
     MarginalDeterminism,
-    Property,
     Smoothness,
     StructuredDecomposability,
 )
@@ -22,9 +26,9 @@ from .properties import (
 
 __all__ = [
     "ArithmeticNode",
-    "LeafNode",
-    "ProductNode",
     "SumNode",
+    "ProductNode",
+    "LeafNode",
     "SymbolicArithmeticCircuit",
     "Distribution",
     "CategoricalDistribution",

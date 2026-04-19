@@ -67,13 +67,17 @@ class SymbolicArithmeticCircuit(DirectedAcyclicGraph[int, ArithmeticNode, Any]):
             return label
 
         def node_label(node: ArithmeticNode) -> str:
+            label = ""
             if isinstance(node, SumNode):
-                return "+"
+                label = "+"
             elif isinstance(node, ProductNode):
-                return "x"
+                label = "x"
             elif isinstance(node, LeafNode):
-                return leaf_label(node)
-            return ""
+                label = leaf_label(node)
+
+            if hasattr(node, "unit_count") and node.unit_count > 1:
+                label += f"\n(units={node.unit_count})"
+            return label
 
         config.update(
             {

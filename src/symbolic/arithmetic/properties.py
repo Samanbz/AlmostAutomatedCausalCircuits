@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Dict, Set
 
-from src.utils import BitSet
+from src.utils import BitSet, Support
 
 from .nodes import LeafNode, ProductNode, SumNode
 
@@ -30,7 +30,7 @@ class Smoothness(Property):
 
     def check(self, node_id: int, circuit: "SymbolicArithmeticCircuit") -> bool:
         node = circuit.get_node_data(node_id)
-        if isinstance(node, ProductNode) or isinstance(node, LeafNode):
+        if isinstance(node, (ProductNode, LeafNode)):
             return True  # Smoothness only applies to SumNodes
 
         children = circuit.get_children(node_id)
@@ -46,7 +46,7 @@ class Decomposability(Property):
 
     def check(self, node_id: int, circuit: "SymbolicArithmeticCircuit") -> bool:
         node = circuit.get_node_data(node_id)
-        if isinstance(node, SumNode) or isinstance(node, LeafNode):
+        if isinstance(node, (SumNode, LeafNode)):
             return True  # Decomposability only applies to ProductNodes
 
         children = circuit.get_children(node_id)
@@ -72,7 +72,7 @@ class Determinism(Property):
 
     def check(self, node_id: int, circuit: "SymbolicArithmeticCircuit") -> bool:
         node = circuit.get_node_data(node_id)
-        if isinstance(node, ProductNode) or isinstance(node, LeafNode):
+        if isinstance(node, (ProductNode, LeafNode)):
             return True  # Determinism only applies to SumNodes
 
         children = circuit.get_children(node_id)
@@ -102,12 +102,8 @@ class StructuredDecomposability(Property):
 
     def check(self, node_id: int, circuit: "SymbolicArithmeticCircuit") -> bool:
         node = circuit.get_node_data(node_id)
-        if isinstance(node, SumNode) or isinstance(node, LeafNode):
+        if isinstance(node, (SumNode, LeafNode)):
             return True  # Structured decomposability only applies to ProductNodes
-
-        # We don't need to check the decomposition against a vtree. We'll use the alternative
-        # definition that the circuit is structured decomposable if it is decomposable and every
-        # pair of product nodes with the same scope decomposes in the same way.
 
         # Check if the result is already cached for this node's scope
         if node.scope in self.cache:
@@ -157,38 +153,108 @@ class MarginalDeterminism(Property):
 
     A circuit is marginal deterministic with respect to a subset Q ⊆ V if for every sum node T:
     - The restricted scope φ_Q(T) is empty (i.e., NO overlap between node scope and Q).
-    - The sum node T is Q-deterministic (children have disjoint marginalized supports on Q).
+    - The sum node T is Q-deterministic (children are functionally disjoint or identical on Q).
     """
 
     def __init__(self, target_scope: Set):
         self.target_scope = BitSet(target_scope)
+        self.sig_cache: Dict[int, frozenset] = {}
+        self.supp_cache: Dict[int, Support] = {}
+
+    def _get_marginal_signature(self, node_id: int, circuit: "SymbolicArithmeticCircuit") -> frozenset:
+        if node_id in self.sig_cache:
+            return self.sig_cache[node_id]
+
+        node = circuit.get_node_data(node_id)
+        intersection_scope = node.scope.intersection(self.target_scope)
+
+        if intersection_scope.is_empty:
+            res = frozenset()
+            self.sig_cache[node_id] = res
+            return res
+
+        if isinstance(node, LeafNode):
+            res = frozenset([node_id])
+            self.sig_cache[node_id] = res
+            return res
+
+        children = circuit.get_children(node_id)
+        if isinstance(node, ProductNode):
+            res = set()
+            for child_id in children:
+                child_sig = self._get_marginal_signature(child_id, circuit)
+                res.update(child_sig)
+            res = frozenset(res)
+            self.sig_cache[node_id] = res
+            return res
+
+        if isinstance(node, SumNode):
+            res = set()
+            for child_id in children:
+                child_sig = self._get_marginal_signature(child_id, circuit)
+                res.update(child_sig)
+            res = frozenset(res)
+            self.sig_cache[node_id] = res
+            return res
+
+        raise ValueError(f"Unknown node type: {type(node)}")
+
+    def _get_marginal_support(self, node_id: int, circuit: "SymbolicArithmeticCircuit") -> Support:
+        if node_id in self.supp_cache:
+            return self.supp_cache[node_id]
+
+        node = circuit.get_node_data(node_id)
+        intersection_scope = node.scope.intersection(self.target_scope)
+
+        if intersection_scope.is_empty:
+            res = Support()
+            self.supp_cache[node_id] = res
+            return res
+
+        if isinstance(node, LeafNode):
+            res = node.support.filter_by_vars(intersection_scope)
+            self.supp_cache[node_id] = res
+            return res
+
+        children = circuit.get_children(node_id)
+        res = Support()
+        for child_id in children:
+            child_support = self._get_marginal_support(child_id, circuit)
+            res = res.union(child_support)
+        self.supp_cache[node_id] = res
+        return res
 
     def check(self, node_id: int, circuit: "SymbolicArithmeticCircuit") -> bool:
         node = circuit.get_node_data(node_id)
 
-        # Marginal determinism applies only to SumNodes
-        if isinstance(node, ProductNode) or isinstance(node, LeafNode):
+        if not isinstance(node, SumNode):
             return True
 
-        # Check condition 1: Restricted scope, no overlap with Q
-        if node.scope.intersection(self.target_scope).is_empty:
+        intersection_scope = node.scope.intersection(self.target_scope)
+        if intersection_scope.is_empty:
             return True
 
-        # Check condition 2: The sum node T is Q-deterministic.
-        # This means children have distinct marginalized supports on Q.
         children = circuit.get_children(node_id)
-        child_marginalized_supports = []
+        child_sigs = []
+        child_supports = []
 
-        # Project each child's support onto Q.
         for child_id in children:
-            child_node = circuit.get_node_data(child_id)
-            marginal_support = child_node.support.filter_by_vars(self.target_scope)
-            child_marginalized_supports.append(marginal_support)
+            child_sigs.append(self._get_marginal_signature(child_id, circuit))
+            child_supports.append(self._get_marginal_support(child_id, circuit))
 
-        for i in range(len(child_marginalized_supports)):
-            for j in range(i + 1, len(child_marginalized_supports)):
-                s1 = child_marginalized_supports[i]
-                s2 = child_marginalized_supports[j]
+        for i in range(len(children)):
+            for j in range(i + 1, len(children)):
+                sig1 = child_sigs[i]
+                sig2 = child_sigs[j]
+
+                # If the children use the EXACT SAME subcircuit for the variables in Q,
+                # they are functionally identical on Q, so it's a valid mixing operation over non-Q.
+                if len(sig1) > 0 and sig1 == sig2:
+                    continue
+
+                # Otherwise, they represent a mixture on Q, so their supports on Q MUST be mutually exclusive.
+                s1 = child_supports[i]
+                s2 = child_supports[j]
 
                 intersection = s1.intersect(s2)
                 if not intersection.is_empty:
