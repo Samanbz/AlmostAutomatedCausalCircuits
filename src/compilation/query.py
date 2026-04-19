@@ -1,9 +1,8 @@
 from typing import List, Optional
 
 import torch
-from torch import nn
 
-from compilation.tensorized_circuit import TensorizedCircuit
+from src.compilation.tensorized_circuit import TensorizedCircuit
 
 
 def marginal(
