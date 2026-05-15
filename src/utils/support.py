@@ -5,6 +5,8 @@ from .interval import Interval
 
 
 class Support:
+    __slots__ = ("intervals",)
+
     def __init__(self, intervals: Dict[int, Interval] = None):
         self.intervals = intervals if intervals is not None else {}
 
@@ -29,6 +31,11 @@ class Support:
         return True
 
     def intersect(self, other: "Support") -> "Support":
+        if not self.intervals:
+            return self
+        if not other.intervals:
+            return other
+
         new_intervals = {}
         for var, interval in self.intervals.items():
             if var in other.intervals:
@@ -41,16 +48,25 @@ class Support:
         return Support(new_intervals)
 
     def union(self, other: "Support") -> "Support":
-        new_intervals = {}
-        for var, interval in self.intervals.items():
-            if var in other.intervals:
-                new_intervals[var] = interval.union(other.intervals[var])
+        if not self.intervals:
+            return other
+        if not other.intervals:
+            return self
+
+        new_intervals = self.intervals.copy()
+        for var, other_interval in other.intervals.items():
+            if var in new_intervals:
+                self_interval = new_intervals[var]
+                if self_interval is not other_interval:
+                    new_intervals[var] = self_interval.union(other_interval)
             else:
-                new_intervals[var] = interval
-        for var, interval in other.intervals.items():
-            if var not in self.intervals:
-                new_intervals[var] = interval
+                new_intervals[var] = other_interval
         return Support(new_intervals)
+
+    @staticmethod
+    def fast_disjoint_union(s1: "Support", s2: "Support") -> "Support":
+        """Fast union for supports with disjoint scopes."""
+        return Support({**s1.intervals, **s2.intervals})
 
     def filter_by_vars(self, vars: BitSet) -> "Support":
         """
@@ -68,7 +84,7 @@ class Support:
     @property
     def is_empty(self) -> bool:
         if not self.intervals:
-            return False  # Empty dict implies full support (no constraints)
+            return True
         return any(interval.is_empty for interval in self.intervals.values())
 
     def __iter__(self):

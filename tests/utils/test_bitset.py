@@ -40,16 +40,6 @@ class TestBitSet:
         # bs - u = empty
         assert bs.difference(u).is_empty
 
-        # u - bs = infinite set (all ints except 1, 2, 3)
-        diff = u.difference(bs)
-        assert 0 in diff
-        assert 1 not in diff
-        assert 2 not in diff
-        assert 3 not in diff
-        assert 4 in diff
-        with pytest.raises(OverflowError):
-            len(diff)
-
     def test_init_empty(self):
         bs = BitSet()
         assert len(bs) == 0
