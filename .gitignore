@@ -44,3 +44,9 @@ build/
 
 wandb/
 .wandb/
+# AI Agents
+.aiexclude
+.geminiignore
+CLAUDE.md
+GEMINI.md
+.claude/
