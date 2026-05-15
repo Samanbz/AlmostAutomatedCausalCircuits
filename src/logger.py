@@ -21,6 +21,6 @@ formatter = colorlog.ColoredFormatter(
 
 handler.setFormatter(formatter)
 logger = logging.getLogger("mcc")
-logger.setLevel(logging.WARN)
+logger.setLevel(logging.DEBUG)
 logger.addHandler(handler)
 logging.getLogger("graphviz").setLevel(logging.WARNING)

@@ -1,0 +1,1 @@
+rsync -avzP --exclude={'build/','.git/','.DS_Store/','.claude/','wandb/','**/__pycache__/','papers/'} dgx:~/dev/MonarchCausalCircuits ./'
