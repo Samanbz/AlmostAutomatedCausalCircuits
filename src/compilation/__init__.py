@@ -1,11 +1,10 @@
 from .base_circuit import (
     CategoricalInputLayer,
     GaussianInputLayer,
-    ProductLayer,
     TensorizedLayer,
     UniformInputLayer,
 )
-from .query import backdoor, conditional, marginal
+from .estimand_eval import eval_estimand
 
 
 __all__ = [
@@ -13,8 +12,5 @@ __all__ = [
     "GaussianInputLayer",
     "UniformInputLayer",
     "CategoricalInputLayer",
-    "ProductLayer",
-    "marginal",
-    "conditional",
-    "backdoor",
+    "eval_estimand",
 ]

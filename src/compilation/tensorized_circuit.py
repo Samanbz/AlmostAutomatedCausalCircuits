@@ -1,366 +1,702 @@
+"""
+Tensorized Circuit: GPU-optimized nn.Module compiled from a FusedCircuit.
+
+All operations in log-semiring. Forward pass uses a flat unit buffer of shape
+[total_units, B] (units-first, batch-last) for maximally coalesced memory
+access. Each layer has precomputed gather/scatter index tensors registered as
+non-trainable buffers so the forward pass contains only indexed reads/writes
+and no shape arithmetic.
+"""
+
 import math
-from typing import Dict, List, Tuple
+from abc import ABC
+from typing import List
 
 import torch
-from torch import nn
+import torch.nn as nn
 
-from src.compilation.base_circuit import (
-    CategoricalInputLayer,
-    GaussianInputLayer,
-    ProductLayer,
-    SafeLogSumExp,
-    TensorizedLayer,
-    UniformInputLayer,
+from src.compilation.folded_circuit import FoldedGaussianInputLayer
+from src.compilation.fused_circuit import (
+    CPTLayer,
+    FusedCircuit,
+    FusedInputLayer,
+    SparseHadamardLayer,
+    SparseKroneckerLayer,
+    TuckerLayer,
 )
-from src.logger import logger as g_logger
-from src.symbolic import SymbolicArithmeticCircuit
 
 
-logger = g_logger.getChild(__name__)
+class TensorizedGaussianInput(nn.Module):
+    """Truncated Gaussian input layer in log-space.
 
-
-class TuckerLayer(TensorizedLayer):
-    """
-    Computes a fused Sum-Product layer in probability space using einsum.
+    Returns output in [N, h, B] layout (units-first, batch-last) to match
+    the flat buffer's coalesced memory layout.
     """
 
     def __init__(
         self,
-        out_idx: List[int],
-        left_indices: List[int],
-        right_indices: List[int],
-        W: torch.Tensor,
-        z_mask: torch.Tensor = None,
+        means: torch.Tensor,
+        stds: torch.Tensor,
+        lows: torch.Tensor,
+        highs: torch.Tensor,
+        scopes: List[int],
+        leaf_modes: torch.Tensor | None = None,
     ):
-        super().__init__(out_idx)
-        # W shape: (G_P, G_L, G_R, h_out, h_l, h_r)
-        self.register_buffer("left_indices", torch.tensor(left_indices, dtype=torch.long))
-        self.register_buffer("right_indices", torch.tensor(right_indices, dtype=torch.long))
-
-        if z_mask is None:
-            z_mask = torch.zeros(len(out_idx), dtype=torch.bool)
-        self.register_buffer("z_mask", z_mask)
-
-        # Keep weights in probability space directly for einsum
-        self.weights = nn.Parameter(W)
-        self.G_P, self.G_L, self.G_R, self.h_out, self.h_l, self.h_r = W.shape
-
-    def _compute_tucker(self, global_buffer: torch.Tensor) -> torch.Tensor:
-        # global_buffer is in PROBABILITY SPACE
-        L = global_buffer[:, self.left_indices].view(-1, self.G_L, self.h_l)
-        R = global_buffer[:, self.right_indices].view(-1, self.G_R, self.h_r)
-
-        # 'bli, brj, plroij -> bpo'
-        out = torch.einsum("bli, brj, plroij -> bpo", L, R, self.weights)
-        return out.flatten(1)  # (B, G_P * h_out)
-
-    def forward(
-        self, buf_joint: torch.Tensor, buf_xz: torch.Tensor = None, buf_z: torch.Tensor = None
-    ) -> torch.Tensor:
-        res_joint = self._compute_tucker(buf_joint)
-
-        if buf_xz is None or buf_z is None:
-            buf_joint[:, self.out_idx] = res_joint
-            return res_joint
-
-        res_xz = self._compute_tucker(buf_xz)
-        res_z = self._compute_tucker(buf_z)
-
-        interventional_math = res_joint - res_xz + res_z
-        interventional_math = torch.nan_to_num(interventional_math, nan=0.0)
-
-        z_mask_expanded = self.z_mask.unsqueeze(0).expand_as(res_joint)
-        res_final = torch.where(z_mask_expanded, interventional_math, res_joint)
-
-        buf_joint[:, self.out_idx] = res_final
-        buf_xz[:, self.out_idx] = res_xz
-        buf_z[:, self.out_idx] = res_z
-
-        return res_final
-
-
-class TensorizedCircuit(nn.Module):
-    def __init__(self, symbolic_circuit: SymbolicArithmeticCircuit, target_vars: set = None):
         super().__init__()
-        self.layers = nn.ModuleList()
-        self.input_layers = nn.ModuleList()
-        self.output_idx = []
-        self.num_nodes = 0
-        self.max_var_index = -1
-        self.identity_idx = -1
 
-        self.node_to_idx: Dict[int, List[int]] = {}
-        idx = 0
+        # Add a small amount of random jitter to break symmetry for un-split Gaussians.
+        jitter = torch.randn_like(means) * 0.1
+        means = means + jitter
 
-        # Pass 1: Setup Leaf Nodes
-        gaussian_nodes, uniform_nodes, categorical_nodes = [], [], []
-        leaf_ids = symbolic_circuit.get_leaves()
-        for n_id in leaf_ids:
-            node = symbolic_circuit.get_node_data(n_id)
-            node_unit_count = getattr(node, "unit_count", 1)
-            self.node_to_idx[n_id] = list(range(idx, idx + node_unit_count))
-            idx += node_unit_count
+        self.means = nn.Parameter(means)
+        self.stds = nn.Parameter(stds)
+        self.register_buffer("lows", lows)
+        self.register_buffer("highs", highs)
 
-            if hasattr(node, "mean") and hasattr(node, "stddev"):
-                gaussian_nodes.append((node, self.node_to_idx[n_id]))
-            elif (
-                hasattr(node, "var_support")
-                and not hasattr(node, "categories")
-                and not hasattr(node, "mean")
-            ):
-                uniform_nodes.append((node, self.node_to_idx[n_id]))
-            elif hasattr(node, "categories"):
-                categorical_nodes.append((node, self.node_to_idx[n_id]))
+        signs = torch.ones_like(means)
+        self.register_buffer("signs", signs)
+        self.scopes = scopes
+        self.num_nodes = means.shape[0]
+        self.h_out = means.shape[1]
 
-        # Initialize input layers (we'll modify them slightly to output probabilities instead of log-probs, or we just exp() after)
-        self._init_input_layers(gaussian_nodes, uniform_nodes, categorical_nodes)
+        # Per-node leaf mode: 0=normal, 1=constant(log1=0), 2=inverse(-log_pdf)
+        if leaf_modes is None:
+            leaf_modes = torch.zeros(self.num_nodes, dtype=torch.long)
+        self.register_buffer("leaf_modes", leaf_modes)
 
-        self.identity_idx = idx
-        idx += 1
+    def forward(self, data: torch.Tensor) -> torch.Tensor:
+        # data: [B, num_features]
+        x_raw = data[:, self.scopes]  # [B, N]
+        x = x_raw.T.unsqueeze(1)  # [N, 1, B]
+        is_nan = torch.isnan(x)
+        x_safe = torch.where(is_nan, torch.zeros_like(x), x)
 
-        # We must build layers by depth to guarantee topological ordering
-        # Since the SPN alternates Sum and Product, and we want to fuse Sum->Product->Sum,
-        # we extract the "SumNode" layers.
+        self._saved_x = x_safe.detach()  # [N, 1, B]
+        self._nan_mask = is_nan.detach()  # [N, 1, B]
 
-        sum_nodes = [
-            n
-            for n in symbolic_circuit.topological_sort(reverse=True)
-            if symbolic_circuit.is_sum_node(n) and n not in leaf_ids
-        ]
+        means = self.means.unsqueeze(-1)  # [N, h, 1]
+        stds = self.stds.unsqueeze(-1)  # [N, h, 1]
 
-        # We need to group sum nodes by depth.
-        # Compute depth of each node
-        depths = {}
-        for n in symbolic_circuit.topological_sort():
-            parents = symbolic_circuit.get_parents(n)
-            if not parents:
-                depths[n] = 0
-            else:
-                depths[n] = max(depths[p] for p in parents) + 1
+        z = (x_safe - means) / stds  # [N, h, B]
+        log_pdf = -0.5 * math.log(2 * math.pi) - 0.5 * z**2 - torch.log(stds)
 
-        # Group sum nodes by depth
-        depth_to_sums = {}
-        for n in sum_nodes:
-            d = depths[n]
-            if d not in depth_to_sums:
-                depth_to_sums[d] = []
-            depth_to_sums[d].append(n)
+        sqrt2 = math.sqrt(2)
+        z_hi = (self.highs.unsqueeze(-1) - means) / (stds * sqrt2)  # [N, h, 1]
+        z_lo = (self.lows.unsqueeze(-1) - means) / (stds * sqrt2)  # [N, h, 1]
 
-        # Process layers from highest depth (bottom) to lowest (root)
-        for d in sorted(depth_to_sums.keys(), reverse=True):
-            layer_sum_ids = depth_to_sums[d]
+        cdf_hi = 0.5 * (1 + torch.erf(z_hi))
+        cdf_lo = 0.5 * (1 + torch.erf(z_lo))
+        log_Z = torch.log((cdf_hi - cdf_lo).clamp(min=1e-10))
+        log_pdf = log_pdf - log_Z
 
-            # Allocate indices for these sum nodes
-            layer_out_idx = []
-            for n_id in layer_sum_ids:
-                node = symbolic_circuit.get_node_data(n_id)
-                node_unit_count = getattr(node, "unit_count", 1)
-                self.node_to_idx[n_id] = list(range(idx, idx + node_unit_count))
-                layer_out_idx.extend(self.node_to_idx[n_id])
-                idx += node_unit_count
+        oob = (x_safe < self.lows.unsqueeze(-1)) | (x_safe > self.highs.unsqueeze(-1))
+        # Use -1e30 rather than finfo.min: two finfo.min values added together in a
+        # Hadamard product overflow float32 to -inf, which then causes NaN via -inf - (-inf).
+        log_zero = -1e30
+        log_pdf = torch.where(oob, torch.full_like(log_pdf, log_zero), log_pdf)
+        log_pdf = torch.where(is_nan, torch.zeros_like(log_pdf), log_pdf)
 
-            layer = self._build_tucker_layer(symbolic_circuit, layer_sum_ids, layer_out_idx)
-            self.layers.append(layer)
+        # Apply leaf modes: 0=normal, 1=constant(0), 2=inverse(-log_pdf), 3=indicator
+        if self.leaf_modes.any():
+            modes = self.leaf_modes.view(-1, 1, 1)  # [N, 1, 1]
+            is_constant = modes == 1
+            is_inverse = modes == 2
+            is_indicator = modes == 3
 
-        # Roots are depth 0
-        self.output_idx = []
-        for n in depth_to_sums.get(0, []):
-            self.output_idx.extend(self.node_to_idx[n])
+            log_pdf = torch.where(is_constant, torch.zeros_like(log_pdf), log_pdf)
 
-        self.num_nodes = idx
-
-        if target_vars is not None:
-            self.set_target_vars(target_vars)
-
-    def _init_input_layers(self, gaussian_nodes, uniform_nodes, categorical_nodes):
-        if gaussian_nodes:
-            layer_out_idx = [i for _, indices in gaussian_nodes for i in indices]
-            means, stds, lows, highs, scopes = [], [], [], [], []
-            for node, indices in gaussian_nodes:
-                for _ in indices:
-                    means.append(node.mean)
-                    stds.append(node.stddev)
-                    lows.append(node.var_support.low)
-                    highs.append(node.var_support.high)
-                    scopes.append(node.var)
-            self.input_layers.append(
-                GaussianInputLayer(
-                    layer_out_idx,
-                    torch.tensor(means, dtype=torch.float32),
-                    torch.tensor(stds, dtype=torch.float32),
-                    torch.tensor(lows, dtype=torch.float32),
-                    torch.tensor(highs, dtype=torch.float32),
-                    scopes,
-                )
+            # Inverse: negate but preserve OOB entries
+            inv_result = -log_pdf
+            inv_result = torch.where(
+                log_pdf < -1e10, torch.full_like(log_pdf, log_zero), inv_result
             )
-            self.max_var_index = max([s for s in scopes] + [-1])
+            log_pdf = torch.where(is_inverse, inv_result, log_pdf)
 
-        if uniform_nodes:
-            layer_out_idx = [i for _, indices in uniform_nodes for i in indices]
-            lows, highs, scopes = [], [], []
-            for node, indices in uniform_nodes:
-                for _ in indices:
-                    lows.append(node.var_support.low)
-                    highs.append(node.var_support.high)
-                    scopes.append(node.var)
-            self.input_layers.append(
-                UniformInputLayer(
-                    layer_out_idx,
-                    torch.tensor(lows, dtype=torch.float32),
-                    torch.tensor(highs, dtype=torch.float32),
-                    scopes,
-                )
+            # Indicator: 0 if in-support, -inf if OOB.
+            # This is the result of Gaussian × InverseGaussian: the density
+            # cancels but the support structure (which bin contains x) is preserved.
+            indicator_result = torch.where(
+                oob, torch.full_like(log_pdf, log_zero), torch.zeros_like(log_pdf)
             )
+            indicator_result = torch.where(is_nan, torch.zeros_like(log_pdf), indicator_result)
+            log_pdf = torch.where(is_indicator, indicator_result, log_pdf)
 
-    def _build_tucker_layer(
-        self, circuit: SymbolicArithmeticCircuit, sum_node_ids: List[int], out_idx: List[int]
+        self._saved_log_pdf = log_pdf
+        log_pdf.requires_grad_(True)
+        log_pdf.retain_grad()
+        self._leaf_output = log_pdf
+
+        return log_pdf  # [N, h, B]
+
+    def update_params(self, responsibilities: torch.Tensor) -> None:
+        """Update means, stds and truncation bounds via EM sufficient statistics.
+
+        Args:
+            responsibilities: [N, h, B] — gradient of log-likelihood w.r.t. log_pdf.
+        """
+        with torch.no_grad():
+            x = self._saved_x  # [N, 1, B]
+            nan_mask = self._nan_mask  # [N, 1, B]
+            N, h = self.means.shape
+
+            resp = responsibilities.clamp(min=0)
+            resp = resp.masked_fill(nan_mask.expand_as(resp), 0)  # [N, h, B]
+
+            is_split = ~((self.lows[:, 0] == float("-inf")) & (self.highs[:, 0] == float("inf")))
+
+            if is_split.any():
+                node_resp = resp.sum(dim=1)  # [N, B] — aggregate over h
+                node_resp = node_resp.masked_fill(nan_mask.squeeze(1), 0)
+                total_md = node_resp.sum(dim=-1)  # [N]
+                valid_md = total_md > 1e-5
+
+                x_flat = x.squeeze(1)  # [N, B]
+                weighted_x = (node_resp * x_flat).sum(dim=-1)  # [N]
+                weighted_x2 = (node_resp * x_flat**2).sum(dim=-1)  # [N]
+
+                new_mean_md = weighted_x / total_md.clamp(min=1e-15)
+                new_var_md = weighted_x2 / total_md.clamp(min=1e-15) - new_mean_md**2
+                new_std_md = torch.sqrt(new_var_md.clamp(min=1e-5))
+
+                probs = torch.linspace(0, 1, h + 1, device=self.means.device)
+                z_quantiles = torch.erfinv(2 * probs - 1) * math.sqrt(2)
+
+                new_lows = self.lows.clone()
+                new_highs = self.highs.clone()
+
+                m_expanded = new_mean_md.unsqueeze(-1).expand(N, h)
+                s_expanded = new_std_md.unsqueeze(-1).expand(N, h)
+                v_expanded_md = valid_md.unsqueeze(-1).expand(N, h)
+
+                for i in range(N):
+                    if is_split[i] and valid_md[i]:
+                        for j in range(h):
+                            new_lows[i, j] = new_mean_md[i] + new_std_md[i] * z_quantiles[j]
+                            new_highs[i, j] = new_mean_md[i] + new_std_md[i] * z_quantiles[j + 1]
+
+                mask_md = is_split.unsqueeze(-1).expand(N, h) & v_expanded_md
+                self.means.data.copy_(torch.where(mask_md, m_expanded, self.means))
+                self.stds.data.copy_(torch.where(mask_md, s_expanded, self.stds))
+                self.lows.data.copy_(torch.where(mask_md, new_lows, self.lows))
+                self.highs.data.copy_(torch.where(mask_md, new_highs, self.highs))
+
+            if (~is_split).any():
+                total_std = resp.sum(dim=-1)  # [N, h] — sum over B
+                valid_std = total_std > 1e-5
+
+                weighted_x_std = (resp * x).sum(dim=-1)  # [N, h]
+                weighted_x2_std = (resp * x**2).sum(dim=-1)  # [N, h]
+
+                new_mean_std = weighted_x_std / total_std.clamp(min=1e-15)
+                new_var_std = weighted_x2_std / total_std.clamp(min=1e-15) - new_mean_std**2
+                new_std_std = torch.sqrt(new_var_std.clamp(min=1e-5))
+
+                mask_std = (~is_split).unsqueeze(-1).expand(N, h) & valid_std
+                self.means.data.copy_(torch.where(mask_std, new_mean_std, self.means))
+                self.stds.data.copy_(torch.where(mask_std, new_std_std, self.stds))
+
+
+class TensorizedFusedLayer(ABC, nn.Module):
+    weights: torch.Tensor
+    log_coeff: torch.Tensor
+    left_idx: torch.Tensor
+    right_idx: torch.Tensor
+    num_nodes: int
+    h_out: int
+    h_in: int
+
+    gather_L: torch.Tensor
+    gather_R: torch.Tensor
+    scatter_idx: torch.Tensor
+
+    def __init__(
+        self,
+        num_nodes: int,
+        h_out: int,
+        h_in: int,
     ):
-        # We need to discover the G_P, G_L, G_R groups.
-        G_P = len(sum_node_ids)
-        h_out = circuit.get_node_data(sum_node_ids[0]).unit_count
+        super().__init__()
 
-        # Discover left and right children groups.
-        # The sum nodes connect to ProductNodes. The ProductNodes connect to (left_child, right_child)
-        left_nodes = set()
-        right_nodes = set()
+        self.num_nodes = num_nodes
+        self.h_out = h_out
+        self.h_in = h_in
 
-        for p_id in sum_node_ids:
-            prod_children = circuit.get_children(p_id)
-            for prod_id in prod_children:
-                children = circuit.get_children(prod_id)
-                if len(children) == 2:
-                    left_nodes.add(children[0])
-                    right_nodes.add(children[1])
-                elif len(children) == 1:
-                    left_nodes.add(children[0])
+        weights = torch.rand(num_nodes, h_out, h_in)
+        weights = weights / weights.sum(dim=-1, keepdim=True)
+        self.log_w = nn.Parameter(torch.log(weights.clamp(min=1e-12)))
+        self.register_buffer("log_coeff", torch.zeros(num_nodes, h_out))
 
-        left_nodes = sorted(list(left_nodes))
-        right_nodes = sorted(list(right_nodes))
 
-        G_L = max(1, len(left_nodes))
-        G_R = max(1, len(right_nodes))
+class TensorizedSparseKronecker(TensorizedFusedLayer):
+    """Block-diagonal Kronecker contraction in log-semiring.
 
-        h_l = circuit.get_node_data(left_nodes[0]).unit_count if left_nodes else 1
-        h_r = circuit.get_node_data(right_nodes[0]).unit_count if right_nodes else 1
+    Reads children via precomputed flat gather indices. All computation in
+    [N, h, B] layout (units-first) for coalesced memory access.
+    """
 
-        W = torch.zeros(G_P, G_L, G_R, h_out, h_l, h_r)
-
-        for p_idx, p_id in enumerate(sum_node_ids):
-            prod_children = circuit.get_children(p_id)
-            for prod_id in prod_children:
-                weight_matrix = circuit.get_edge_data(p_id, prod_id)  # (h_out, h_l * h_r)
-
-                children = circuit.get_children(prod_id)
-                if len(children) == 2:
-                    l_id, r_id = children
-                    l_idx = left_nodes.index(l_id)
-                    r_idx = right_nodes.index(r_id)
-                    W[p_idx, l_idx, r_idx] = weight_matrix.view(h_out, h_l, h_r)
-                elif len(children) == 1:
-                    l_id = children[0]
-                    l_idx = left_nodes.index(l_id)
-                    W[p_idx, l_idx, 0] = weight_matrix.view(h_out, h_l, 1)
-
-        # Normalize W so that each sum node (G_P, h_out) marginalizes to 1 over its children (G_L, G_R, h_l, h_r)
-        W = W / W.sum(dim=(1, 2, 4, 5), keepdim=True).clamp(min=1e-10)
-
-        left_indices = []
-        for l_id in left_nodes:
-            left_indices.extend(self.node_to_idx[l_id])
-        if not left_indices:
-            left_indices = [self.identity_idx]
-
-        right_indices = []
-        for r_id in right_nodes:
-            right_indices.extend(self.node_to_idx[r_id])
-        if not right_indices:
-            right_indices = [self.identity_idx]
-
-        return TuckerLayer(out_idx, left_indices, right_indices, W)
-
-    def set_target_vars(self, target_vars: set):
-        device = next(self.parameters()).device if list(self.parameters()) else torch.device("cpu")
-        for layer in self.layers:
-            layer.z_mask = torch.zeros(len(layer.out_idx), dtype=torch.bool, device=device)
-
-    def forward(
-        self, data_joint: torch.Tensor, data_xz: torch.Tensor = None, data_z: torch.Tensor = None
-    ) -> torch.Tensor:
-        def _pad_if_needed(data: torch.Tensor) -> torch.Tensor:
-            if data is None:
-                return None
-            if data.shape[1] <= self.max_var_index:
-                padding = torch.full(
-                    (data.shape[0], self.max_var_index + 1 - data.shape[1]),
-                    float("nan"),
-                    device=data.device,
-                    dtype=data.dtype,
-                )
-                return torch.cat([data, padding], dim=1)
-            return data
-
-        data_joint = _pad_if_needed(data_joint)
-        batch_size = data_joint.shape[0]
-
-        buf_joint = torch.zeros(
-            (batch_size, self.num_nodes), dtype=data_joint.dtype, device=data_joint.device
+    def __init__(
+        self,
+        num_nodes: int,
+        h_out: int,
+        h_in: int,
+        h_left: int,
+        h_right: int,
+    ):
+        super().__init__(
+            num_nodes=num_nodes,
+            h_out=h_out,
+            h_in=h_in,
         )
 
-        # Input layers evaluate in LOG space. We must torch.exp them to probability space!
-        for layer in self.input_layers:
-            layer.forward(buf_joint, data_joint)
+        self.h_left = h_left
+        self.h_right = h_right
 
-        # Convert log-probabilities to probabilities
-        buf_joint = torch.exp(buf_joint)
+    def forward(self, buf: torch.Tensor) -> torch.Tensor:
+        # buf: [total_units, B]
+        B = buf.shape[1]
+        N = self.num_nodes
 
-        # Handle identity node
-        buf_joint = buf_joint.clone()
-        buf_joint[:, self.identity_idx] = 1.0
+        L = buf[self.gather_L].reshape(N, self.h_left, B)  # [N, h_left, B]
+        R = buf[self.gather_R].reshape(N, self.h_right, B)  # [N, h_right, B]
+
+        # Log-domain outer product → [N, h_out, h_in, B]
+        S = (L.unsqueeze(2) + R.unsqueeze(1)).reshape(N, self.h_out, self.h_in, B)
+
+        m = S.max(dim=2, keepdim=True)[0]  # [N, h_out, 1, B]
+        exp_S = torch.exp(S - m)  # [N, h_out, h_in, B]
+
+        # Block-diagonal weight dot products via bmm: [N*h_out, 1, h_in] @ [N*h_out, h_in, B]
+        exp_W = torch.exp(self.log_w).reshape(N * self.h_out, 1, self.h_in)
+        exp_S_flat = exp_S.reshape(N * self.h_out, self.h_in, B)
+        out = torch.bmm(exp_W, exp_S_flat).reshape(N, self.h_out, B)
+
+        result = torch.log(out.clamp(min=1e-20)) + m.squeeze(2)  # [N, h_out, B]
+        return result + self.log_coeff.unsqueeze(-1)  # apply per-unit coefficient
+
+
+class TensorizedSparseHadamard(TensorizedFusedLayer):
+    """Diagonal mixing contraction in log-semiring.
+
+    Reads children via precomputed flat gather indices. All computation in
+    [N, h, B] layout (units-first) for coalesced memory access.
+    """
+
+    def __init__(
+        self,
+        num_nodes: int,
+        h_out: int,
+        h_in: int,
+        h_child: int,
+    ):
+        super().__init__(
+            num_nodes=num_nodes,
+            h_out=h_out,
+            h_in=h_in,
+        )
+
+        self.h_child = h_child
+
+    def forward(self, buf: torch.Tensor) -> torch.Tensor:
+        # buf: [total_units, B]
+        B = buf.shape[1]
+        N = self.num_nodes
+
+        # Diagonal pairing: same index k from each child, reshaped into [h_out, h_in] blocks
+        L = buf[self.gather_L].reshape(N, self.h_out, self.h_in, B)
+        R = buf[self.gather_R].reshape(N, self.h_out, self.h_in, B)
+
+        S = L + R  # [N, h_out, h_in, B]
+
+        m = S.max(dim=2, keepdim=True)[0]  # [N, h_out, 1, B]
+        exp_S = torch.exp(S - m)  # [N, h_out, h_in, B]
+
+        exp_W = torch.exp(self.log_w).reshape(N * self.h_out, 1, self.h_in)
+        exp_S_flat = exp_S.reshape(N * self.h_out, self.h_in, B)
+        out = torch.bmm(exp_W, exp_S_flat).reshape(N, self.h_out, B)
+
+        result = torch.log(out.clamp(min=1e-20)) + m.squeeze(2)  # [N, h_out, B]
+        return result + self.log_coeff.unsqueeze(-1)  # apply per-unit coefficient
+
+
+class TensorizedCPT(TensorizedFusedLayer):
+    """Dense Hadamard-product contraction in log-semiring (Candecomp-Transposed).
+
+    Like SparseHadamard but with dense (non-partitioned) weights: each output
+    unit sums over ALL h_child Hadamard product units.  Structurally identical
+    to Tucker but the product is Hadamard (L[k]+R[k]) rather than Kronecker
+    (L[i]+R[j] for all i,j).
+    """
+
+    def __init__(
+        self,
+        num_nodes: int,
+        h_out: int,
+        h_child: int,
+    ):
+        super().__init__(
+            num_nodes=num_nodes,
+            h_out=h_out,
+            h_in=h_child,  # dense: all h_child product units
+        )
+        self.h_child = h_child
+
+    def forward(self, buf: torch.Tensor) -> torch.Tensor:
+        B = buf.shape[1]
+        N = self.num_nodes
+
+        # Hadamard product: diagonal pairing L[k] + R[k]
+        L = buf[self.gather_L].reshape(N, self.h_child, B)  # [N, h_child, B]
+        R = buf[self.gather_R].reshape(N, self.h_child, B)  # [N, h_child, B]
+        S = L + R  # [N, h_child, B]
+
+        m = S.max(dim=1, keepdim=True)[0]  # [N, 1, B]
+        exp_S = torch.exp(S - m)  # [N, h_child, B]
+
+        # Dense weight contraction: [N, h_out, h_child] @ [N, h_child, B]
+        exp_W = torch.exp(self.log_w)
+        out = torch.bmm(exp_W, exp_S)  # [N, h_out, B]
+
+        result = torch.log(out.clamp(min=1e-20)) + m  # [N, h_out, B]
+        return result + self.log_coeff.unsqueeze(-1)
+
+
+class TensorizedTucker(TensorizedFusedLayer):
+    """Dense Kronecker-product contraction in log-semiring (Universal Layer).
+
+    Reads children via precomputed flat gather indices. All computation in
+    [N, h, B] layout (units-first) for coalesced memory access.
+    """
+
+    def __init__(
+        self,
+        num_nodes: int,
+        h_out: int,
+        h_left: int,
+        h_right: int,
+        weights: torch.Tensor = None,
+    ):
+        super().__init__(
+            num_nodes=num_nodes,
+            h_out=h_out,
+            h_in=h_left * h_right,
+            weights=weights,
+        )
+
+        self.h_left = h_left
+        self.h_right = h_right
+        self.h_child = h_left * h_right
+
+    def forward(self, buf: torch.Tensor) -> torch.Tensor:
+        # buf: [total_units, B]
+        B = buf.shape[1]
+        N = self.num_nodes
+
+        L = buf[self.gather_L].reshape(N, self.h_left, B)  # [N, h_left, B]
+        R = buf[self.gather_R].reshape(N, self.h_right, B)  # [N, h_right, B]
+
+        # Log-domain outer product → [N, h_child, B]
+        S = (L.unsqueeze(2) + R.unsqueeze(1)).reshape(N, self.h_child, B)
+
+        m = S.max(dim=1, keepdim=True)[0]  # [N, 1, B]
+        exp_S = torch.exp(S - m)  # [N, h_child, B]
+
+        # Dense weight contraction: [N, h_out, h_child] @ [N, h_child, B] → [N, h_out, B]
+        exp_W = torch.exp(self.log_w)
+        out = torch.bmm(exp_W, exp_S)  # [N, h_out, B]
+
+        result = torch.log(out.clamp(min=1e-20)) + m  # [N, h_out, B]
+        return result + self.log_coeff.unsqueeze(-1)  # apply per-unit coefficient
+
+
+class CompiledCircuit(nn.Module):
+    """Base class for compiled circuits. Subclasses only override layer creation."""
+
+    def __init__(self):
+        super().__init__()
+        self.input_layers = nn.ModuleList()
+        self.layers = nn.ModuleList()
+        self.max_var_index = 0
+        # Per-node variable-scope sets, populated by subclass __init__.
+        self.node_scopes: List[set] = []
+        # Per-node marginal determinism sets (BitSet or None), populated by subclass __init__.
+        self.node_md_sets: list = []
+
+        # Flat buffer tracking — populated by _register_input_flat / _register_layer_flat.
+        self._node_flat_offsets: List[int] = []  # flat unit start for each logical node
+        self._total_units: int = 0
+
+    # ------------------------------------------------------------------
+    # Flat buffer helpers — called once per layer during __init__
+    # ------------------------------------------------------------------
+
+    def _register_input_flat(self, layer: nn.Module, num_nodes: int, h_out: int) -> None:
+        """Register scatter index on an input layer and update flat buffer tracking."""
+        write_start = self._total_units
+        scatter = (
+            torch.arange(num_nodes * h_out, dtype=torch.long) + write_start
+        )  # [N*h_out] — contiguous block
+        layer.register_buffer("scatter_idx", scatter)
+        for i in range(num_nodes):
+            self._node_flat_offsets.append(write_start + i * h_out)
+        self._total_units += num_nodes * h_out
+
+    def _register_layer_flat(
+        self,
+        layer: nn.Module,
+        left_idx: torch.Tensor,
+        right_idx: torch.Tensor,
+        num_nodes: int,
+        h_left: int,
+        h_right: int,
+        h_out: int,
+    ) -> None:
+        """Register gather/scatter indices on an internal layer and update flat buffer tracking."""
+        write_start = self._total_units
+        offsets = torch.tensor(self._node_flat_offsets, dtype=torch.long)
+
+        # Gather indices: for each child node, read h contiguous units starting at its offset.
+        lo = offsets[left_idx]  # [N] — flat start of each left child
+        ro = offsets[right_idx]  # [N] — flat start of each right child
+
+        gather_L = (lo.unsqueeze(1) + torch.arange(h_left)).reshape(-1)  # [N*h_left]
+        gather_R = (ro.unsqueeze(1) + torch.arange(h_right)).reshape(-1)  # [N*h_right]
+
+        scatter = torch.arange(num_nodes * h_out, dtype=torch.long) + write_start  # [N*h_out]
+
+        layer.register_buffer("gather_L", gather_L)
+        layer.register_buffer("gather_R", gather_R)
+        layer.register_buffer("scatter_idx", scatter)
+
+        for i in range(num_nodes):
+            self._node_flat_offsets.append(write_start + i * h_out)
+        self._total_units += num_nodes * h_out
+
+    # ------------------------------------------------------------------
+    # Forward pass
+    # ------------------------------------------------------------------
+
+    def _compile_input(self, fnode: FusedInputLayer) -> nn.Module:
+        fl = fnode.folded_layer
+        if isinstance(fl, FoldedGaussianInputLayer):
+            scopes = fnode.scopes if fnode.scopes else list(range(fl.num_nodes))
+            self.max_var_index = max(self.max_var_index, max(scopes) if scopes else 0)
+            leaf_modes = getattr(fl, "leaf_modes", None)
+            return TensorizedGaussianInput(
+                fl.means.clone(),
+                fl.stddevs.clone(),
+                fl.lows.clone(),
+                fl.highs.clone(),
+                scopes,
+                leaf_modes=leaf_modes.clone() if leaf_modes is not None else None,
+            )
+        raise NotImplementedError(f"Input layer type {type(fl).__name__} not yet compiled")
+
+    def forward(self, data: torch.Tensor) -> torch.Tensor:
+        data = self._pad(data)
+        B = data.shape[0]
+
+        buf = torch.full((self._total_units, B), -1e20, device=data.device, dtype=data.dtype)
+
+        for il in self.input_layers:
+            out = il(data)  # [N, h, B]
+            buf[il.scatter_idx] = out.reshape(-1, B)
 
         for layer in self.layers:
-            buf_joint = buf_joint.clone()
-            # If layer.forward modifies buf_joint inplace, we need to return it, or pass it and the layer modifies the cloned one. Wait, if layer modifies the cloned tensor inplace, the caller's buf_joint won't see the modification unless layer.forward mutates the tensor we pass.
-            # But wait, buf_joint.clone() creates a NEW tensor. If we pass buf_joint to layer.forward, it mutates the new tensor. And buf_joint will point to that new tensor.
-            layer.forward(buf_joint)
+            out = layer(buf)  # [N, h_out, B]
+            buf[layer.scatter_idx] = out.reshape(-1, B)
 
-        # Return in LOG space
-        out_prob = buf_joint[:, self.output_idx]
-        return torch.log(out_prob.clamp(min=1e-30))
+        return buf[self._node_flat_offsets[-1]]  # [B]
+
+    def forward_buffer(self, data: torch.Tensor) -> torch.Tensor:
+        """Forward pass that returns the full flat buffer (per-unit values at every node).
+
+        Used by circuit-algebraic operations (e.g., conditional) that need
+        intermediate per-unit values for normalization corrections.
+        """
+        data = self._pad(data)
+        B = data.shape[0]
+
+        buf = torch.full((self._total_units, B), -1e20, device=data.device, dtype=data.dtype)
+
+        for il in self.input_layers:
+            out = il(data)  # [N, h, B]
+            buf[il.scatter_idx] = out.reshape(-1, B)
+
+        for layer in self.layers:
+            out = layer(buf)  # [N, h_out, B]
+            buf[layer.scatter_idx] = out.reshape(-1, B)
+
+        return buf
+
+    def _pad(self, data: torch.Tensor) -> torch.Tensor:
+        if data.shape[1] <= self.max_var_index:
+            pad = torch.full(
+                (data.shape[0], self.max_var_index + 1 - data.shape[1]),
+                float("nan"),
+                device=data.device,
+                dtype=data.dtype,
+            )
+            return torch.cat([data, pad], dim=1)
+        return data
+
+    def em_step(self, data: torch.Tensor, step_size: float = 1.0, smoothing: float = 1e-6) -> float:
+        """Executes one online/mini-batch EM step.
+
+        Args:
+            data: batch of observations.
+            step_size: blend factor (1.0 = full replacement, <1.0 = online EM).
+            smoothing: Laplace smoothing to prevent dead paths.
+        """
+        self.train()
+        log_probs = self.forward(data)
+        mean_ll = log_probs.mean().item()
+
+        loss = log_probs.sum()
+        loss.backward()
+
+        for il in self.input_layers:
+            if hasattr(il, "_leaf_output") and il._leaf_output.grad is not None:
+                il.update_params(il._leaf_output.grad)
+
+        for layer in self.layers:
+            if not hasattr(layer, "log_w") or layer.log_w.grad is None:
+                continue
+
+            grad_clean = layer.log_w.grad.nan_to_num(0.0).clamp(min=0.0)
+            batch_counts = grad_clean + smoothing
+            batch_probs = batch_counts / batch_counts.sum(dim=-1, keepdim=True)
+
+            current_probs = torch.exp(layer.log_w.data)
+            new_probs = (1.0 - step_size) * current_probs + step_size * batch_probs
+            layer.log_w.data.copy_(torch.log(new_probs.clamp(min=1e-12)))
+            layer.log_w.grad.zero_()
+
+        self.zero_grad()
+        return mean_ll
 
 
-def em(circuit: TensorizedCircuit, data: torch.Tensor, iterations: int = 5):
-    # E-step: Forward pass to compute likelihoods
-    for i in range(iterations):
-        # Forward pass returns log probabilities
-        log_probs = circuit.forward(data)
+class TensorizedCircuit(CompiledCircuit):
+    """Dense compiled circuit from a FusedCircuit."""
 
-        # Compute log-likelihood
-        log_likelihood = log_probs.sum()
-        print(f"Iteration {i}: Log-Likelihood = {log_likelihood.item():.4f}")
+    def __init__(self, fused: FusedCircuit):
+        super().__init__()
 
-        # Standard backprop to compute gradients (responsibilities)
-        circuit.zero_grad()
-        log_likelihood.backward()
+        for fid in fused.topological_sort():
+            fnode = fused.get_node_data(fid)
 
-        # M-step: Update parameters using the gradients
-        with torch.no_grad():
-            for layer in circuit.layers:
-                if isinstance(layer, TuckerLayer):
-                    pass
-            # Standard SGD update for weights in self.parameters()
-            with torch.no_grad():
-                for param in circuit.parameters():
-                    if param.grad is not None:
-                        # EM update: expected counts = param.data * param.grad
-                        expected_counts = param.data * param.grad.clamp(min=0.0)
-                        param.data = expected_counts + 1e-4
+            if isinstance(fnode, FusedInputLayer):
+                layer = self._compile_input(fnode)
+                self.input_layers.append(layer)
 
-                        if param.data.ndim == 6:
-                            # Normalize TuckerLayer weights: (G_P, G_L, G_R, h_out, h_l, h_r)
-                            param.data /= param.data.sum(dim=(1, 2, 4, 5), keepdim=True).clamp(
-                                min=1e-10
-                            )
-                        else:
-                            param.data /= param.data.sum(dim=-1, keepdim=True).clamp(min=1e-10)
+                scopes_list = fnode.scopes if fnode.scopes else list(range(layer.num_nodes))
+                fnode_md_sets = getattr(fnode, "md_sets", None)
+                for i, var_idx in enumerate(scopes_list):
+                    self.node_scopes.append({var_idx})
+                    self.node_md_sets.append(fnode_md_sets[i] if fnode_md_sets else None)
 
-                        param.grad.zero_()
+                self._register_input_flat(layer, layer.num_nodes, layer.h_out)
+
+            elif isinstance(fnode, SparseKroneckerLayer):
+                layer = TensorizedSparseKronecker(
+                    fnode.num_nodes,
+                    fnode.h_out,
+                    fnode.h_in,
+                    fnode.h_left,
+                    fnode.h_right,
+                )
+                self.layers.append(layer)
+
+                fnode_md_sets = getattr(fnode, "md_sets", None)
+                for i in range(fnode.num_nodes):
+                    l_idx = fnode.left_indices[i].item()
+                    r_idx = fnode.right_indices[i].item()
+                    self.node_scopes.append(self.node_scopes[l_idx] | self.node_scopes[r_idx])
+                    self.node_md_sets.append(fnode_md_sets[i] if fnode_md_sets else None)
+
+                self._register_layer_flat(
+                    layer,
+                    fnode.left_indices,
+                    fnode.right_indices,
+                    fnode.num_nodes,
+                    fnode.h_left,
+                    fnode.h_right,
+                    fnode.h_out,
+                )
+
+            elif isinstance(fnode, SparseHadamardLayer):
+                layer = TensorizedSparseHadamard(
+                    fnode.num_nodes,
+                    fnode.h_out,
+                    fnode.h_in,
+                    fnode.h_child,
+                )
+                self.layers.append(layer)
+
+                fnode_md_sets = getattr(fnode, "md_sets", None)
+                for i in range(fnode.num_nodes):
+                    l_idx = fnode.left_indices[i].item()
+                    r_idx = fnode.right_indices[i].item()
+                    self.node_scopes.append(self.node_scopes[l_idx] | self.node_scopes[r_idx])
+                    self.node_md_sets.append(fnode_md_sets[i] if fnode_md_sets else None)
+
+                self._register_layer_flat(
+                    layer,
+                    fnode.left_indices,
+                    fnode.right_indices,
+                    fnode.num_nodes,
+                    fnode.h_child,
+                    fnode.h_child,
+                    fnode.h_out,
+                )
+
+            elif isinstance(fnode, CPTLayer):
+                layer = TensorizedCPT(
+                    fnode.num_nodes,
+                    fnode.h_out,
+                    fnode.h_child,
+                    weights=getattr(fnode, "weights", None),
+                )
+                self.layers.append(layer)
+
+                fnode_md_sets = getattr(fnode, "md_sets", None)
+                for i in range(fnode.num_nodes):
+                    l_idx = fnode.left_indices[i].item()
+                    r_idx = fnode.right_indices[i].item()
+                    self.node_scopes.append(self.node_scopes[l_idx] | self.node_scopes[r_idx])
+                    self.node_md_sets.append(fnode_md_sets[i] if fnode_md_sets else None)
+
+                self._register_layer_flat(
+                    layer,
+                    fnode.left_indices,
+                    fnode.right_indices,
+                    fnode.num_nodes,
+                    fnode.h_child,
+                    fnode.h_child,
+                    fnode.h_out,
+                )
+
+            elif isinstance(fnode, TuckerLayer):
+                layer = TensorizedTucker(
+                    fnode.num_nodes,
+                    fnode.h_out,
+                    fnode.h_left,
+                    fnode.h_right,
+                )
+                self.layers.append(layer)
+
+                fnode_md_sets = getattr(fnode, "md_sets", None)
+                for i in range(fnode.num_nodes):
+                    l_idx = fnode.left_indices[i].item()
+                    r_idx = fnode.right_indices[i].item()
+                    self.node_scopes.append(self.node_scopes[l_idx] | self.node_scopes[r_idx])
+                    self.node_md_sets.append(fnode_md_sets[i] if fnode_md_sets else None)
+
+                self._register_layer_flat(
+                    layer,
+                    fnode.left_indices,
+                    fnode.right_indices,
+                    fnode.num_nodes,
+                    fnode.h_left,
+                    fnode.h_right,
+                    fnode.h_out,
+                )

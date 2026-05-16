@@ -14,62 +14,6 @@ class TensorizedLayer(nn.Module):
         raise NotImplementedError
 
 
-class ProductLayer(TensorizedLayer):
-    def __init__(
-        self,
-        out_idx: List[int],
-        left_idx: List[int],
-        right_idx: List[int],
-        z_mask: torch.Tensor = None,
-    ):
-        super().__init__(out_idx)
-        self.left_idx = left_idx
-        self.right_idx = right_idx
-        if z_mask is not None:
-            self.register_buffer("z_mask", z_mask)
-
-    def forward(
-        self,
-        global_buffer: torch.Tensor,
-        global_buffer_xz: torch.Tensor = None,
-        global_buffer_z: torch.Tensor = None,
-    ) -> torch.Tensor:
-        res = global_buffer[:, self.left_idx] + global_buffer[:, self.right_idx]
-        global_buffer[:, self.out_idx] = res
-        if global_buffer_xz is not None and global_buffer_z is not None:
-            res_xz = global_buffer_xz[:, self.left_idx] + global_buffer_xz[:, self.right_idx]
-            global_buffer_xz[:, self.out_idx] = res_xz
-            res_z = global_buffer_z[:, self.left_idx] + global_buffer_z[:, self.right_idx]
-            global_buffer_z[:, self.out_idx] = res_z
-        return res
-
-
-class SafeLogSumExp(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, input, dim):
-        output = torch.logsumexp(input, dim=dim)
-        ctx.save_for_backward(input, output)
-        ctx.dim = dim
-        return output
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        input, output = ctx.saved_tensors
-        dim = ctx.dim
-
-        out_unsqueezed = output.unsqueeze(dim)
-        mask = torch.isneginf(out_unsqueezed)
-
-        safe_output = torch.where(mask, torch.zeros_like(out_unsqueezed), out_unsqueezed)
-        safe_input = torch.where(mask, torch.zeros_like(input), input)
-
-        softmax = torch.exp(safe_input - safe_output)
-        softmax = torch.where(mask, torch.zeros_like(softmax), softmax)
-
-        grad_input = grad_output.unsqueeze(dim) * softmax
-        return grad_input, None
-
-
 class GaussianInputLayer(TensorizedLayer):
     def __init__(
         self,
