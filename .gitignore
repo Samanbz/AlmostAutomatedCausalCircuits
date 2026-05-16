@@ -41,9 +41,13 @@ papers/
 build/
 *.egg-info/
 
+.DS_Store
+
 
 wandb/
 .wandb/
+
+
 # AI Agents
 .aiexclude
 .geminiignore
