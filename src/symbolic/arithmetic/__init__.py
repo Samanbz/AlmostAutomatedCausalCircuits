@@ -11,9 +11,12 @@ from .distributions import (
 )
 from .nodes import (
     ArithmeticNode,
+    HadamardProductNode,
+    KroneckerProductNode,
     LeafNode,
-    ProductNode,
     SumNode,
+    UnaryProductNode,
+    UniversalSumNode,
 )
 from .properties import (
     Decomposability,
@@ -27,7 +30,10 @@ from .properties import (
 __all__ = [
     "ArithmeticNode",
     "SumNode",
-    "ProductNode",
+    "UniversalSumNode",
+    "KroneckerProductNode",
+    "HadamardProductNode",
+    "UnaryProductNode",
     "LeafNode",
     "SymbolicArithmeticCircuit",
     "Distribution",

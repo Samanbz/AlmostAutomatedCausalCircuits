@@ -31,9 +31,7 @@ class Distribution(LeafNode, ABC):
     def split_at(self, cut_point: Any) -> tuple["TruncatedDistribution", "TruncatedDistribution"]:
         """Split the distribution at a cut point into two distributions."""
         left_support, right_support = self.var_support.split_at(cut_point)
-        left_dist = self._truncated_class(
-            self.var, self, left_support, unit_count=self.unit_count
-        )
+        left_dist = self._truncated_class(self.var, self, left_support, unit_count=self.unit_count)
         right_dist = self._truncated_class(
             self.var, self, right_support, unit_count=self.unit_count
         )
@@ -123,9 +121,7 @@ class GaussianDistribution(Distribution):
         return f"GaussianDistribution(var={self.var}, mean={self.mean}, stddev={self.stddev})"
 
     def __eq__(self, other):
-        return (
-            super().__eq__(other) and self.mean == other.mean and self.stddev == other.stddev
-        )
+        return super().__eq__(other) and self.mean == other.mean and self.stddev == other.stddev
 
     def __hash__(self):
         return hash((super().__hash__(), self.mean, self.stddev))
@@ -302,11 +298,11 @@ class TruncatedGaussianDistribution(TruncatedDistribution):
 
         # Use quantiles within the truncated range
         self.var_support: ContinuousInterval
-        
+
         # Get CDF at bounds
         p_low = stats.norm.cdf(self.var_support.low, loc=self.mean, scale=self.stddev)
         p_high = stats.norm.cdf(self.var_support.high, loc=self.mean, scale=self.stddev)
-        
+
         probs = np.linspace(p_low, p_high, n + 1)
         cut_points = stats.norm.ppf(probs, loc=self.mean, scale=self.stddev)
 
