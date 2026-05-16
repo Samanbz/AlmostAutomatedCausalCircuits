@@ -1,4 +1,3 @@
-import itertools
 import math
 import signal
 import time
@@ -6,7 +5,6 @@ import time
 import networkx as nx
 import numpy as np
 import torch
-
 
 from src.construction.learned_vtree import construct_optimal_md_vtree, construct_optimal_vtree
 

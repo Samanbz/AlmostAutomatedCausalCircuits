@@ -1,6 +1,5 @@
 import torch
 import torch.utils.benchmark as benchmark
-
 from src.compilation.monarch import MonarchMatrix  # noqa: E402
 
 
