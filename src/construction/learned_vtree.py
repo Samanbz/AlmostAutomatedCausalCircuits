@@ -71,10 +71,11 @@ def evaluate_data_mi(skeleton: nx.Graph, data: torch.Tensor):
 
 
 class LearnedVTreeBuilder:
-    def __init__(self, prioritize: str = "hardware"):
+    def __init__(self, prioritize: str = "hardware", md_sets: list[set[int]] | None = None):
         self.vt = VTree()
         self.allocator = NodeAllocator(start=0)
         self.prioritize = prioritize
+        self.md_sets = md_sets or []
 
     def _apply_pymetis(self, G: nx.Graph) -> tuple[list[int], list[int]]:
         import pymetis
@@ -105,8 +106,19 @@ class LearnedVTreeBuilder:
         return left_vars, right_vars
 
     def _apply_kernighan_lin(self, G: nx.Graph) -> tuple[list[int], list[int]]:
-        set_left, set_right = nx.community.kernighan_lin_bisection(G, weight="weight", max_iter=10)
-        return list(set_left), list(set_right)
+        # KL bisection is sensitive to initial partition; retry with multiple
+        # seeds and pick the partition with the lowest cut weight.
+        best_cut = float("inf")
+        best_left, best_right = None, None
+        for seed in range(20):
+            left, right = nx.community.kernighan_lin_bisection(
+                G, weight="weight", max_iter=10, seed=seed
+            )
+            cut = sum(G[u][v]["weight"] for u in left for v in right if G.has_edge(u, v))
+            if cut < best_cut:
+                best_cut = cut
+                best_left, best_right = list(left), list(right)
+        return best_left, best_right
 
     def _bisect_graph(self, G: nx.Graph, scope_list: list[int]) -> tuple[list[int], list[int]]:
         components = list(nx.connected_components(G))
@@ -114,6 +126,22 @@ class LearnedVTreeBuilder:
             left_vars = list(components[0])
             right_vars = [node for c in components[1:] for node in c]
             return left_vars, right_vars
+
+        scope_set = set(scope_list)
+
+        # Expressivity: split on the largest md-set boundary first.
+        # Find the largest md-set that is a proper subset of the current scope.
+        if self.prioritize == "expressivity" and self.md_sets:
+            best_md = None
+            for md in sorted(self.md_sets, key=len, reverse=True):
+                md_in_scope = md & scope_set
+                if md_in_scope and md_in_scope != scope_set:
+                    best_md = md_in_scope
+                    break
+            if best_md is not None:
+                left_vars = sorted(best_md)
+                right_vars = sorted(scope_set - best_md)
+                return left_vars, right_vars
 
         try:
             if self.prioritize == "expressivity":
@@ -172,7 +200,7 @@ def construct_optimal_md_vtree(
     data: torch.Tensor,
     md_sets: list[set[int]],
     dag: nx.DiGraph | None = None,
-    prioritize: str = "hardware",
+    prioritize: str = "hardware",  # or "expressivity"
 ) -> MDVTree:
     """
     Builds a VTree that explicitly enforces MD-Set constraints.
@@ -184,7 +212,7 @@ def construct_optimal_md_vtree(
     apply_md_constraints(skeleton, md_sets, md_weight=1e9)
     evaluate_data_mi(skeleton, data)
 
-    builder = LearnedVTreeBuilder(prioritize=prioritize)
+    builder = LearnedVTreeBuilder(prioritize=prioritize, md_sets=md_sets)
     vt = builder.build(skeleton)
 
     return MDVTree.from_vtree(vt, md_sets)
