@@ -1,72 +1,115 @@
-from typing import Dict, Set, Type
-
 import pytest
+import torch
 
 from src.construction.random_scm import generate_random_scm
 from src.symbolic import (
-    Decomposability,
-    Distribution,
     GaussianDistribution,
-    Smoothness,
-    SymbolicArithmeticCircuit,
-    UniformDistribution,
+    KroneckerProductNode,
+    LeafNode,
+    MDVNode,
+    MDVTree,
+    PartitionNode,
+    RegionNode,
+    SumNode,
 )
-
-
-@pytest.fixture
-def input_dists_factory():
-    """Factory for creating a dictionary of input distributions for a given scope."""
-
-    def _create(scope: Set[int], dist_type: str = "gaussian") -> Dict[int, Distribution]:
-        dists = {}
-        for var in scope:
-            if dist_type == "gaussian":
-                dists[var] = GaussianDistribution(var, loc=0.0, scale=1.0)
-            elif dist_type == "uniform":
-                dists[var] = UniformDistribution(var, low=-1.0, high=1.0)
-            else:
-                raise ValueError(f"Unknown dist_type: {dist_type}")
-        return dists
-
-    return _create
+from src.utils import BitSet
 
 
 @pytest.fixture
 def synthetic_data():
-    """Generates synthetic data from a random SCM."""
-
-    def _generate(n_vars: int, n_samples: int, expected_degree: float = 2.0):
-        scm = generate_random_scm(n_vars, expected_degree)
-        df = scm.sample(n_samples)
-        # Convert to numpy array for builders that expect it
-        return df.to_numpy()
-
-    return _generate
+    """A fixture returning a basic 2D tensor of random variables generated from an SCM."""
+    scm = generate_random_scm(n_nodes=4, expected_degree=2.0)
+    df = scm.sample(100)
+    return torch.from_numpy(df.values.copy()).float()
 
 
-def assert_alternating_structure(graph, start_node_id: int, layer1_type: Type, layer2_type: Type):
+@pytest.fixture
+def basic_input_dists():
+    """A dictionary mapping variable IDs to standard instantiated GaussianDistributions."""
+    return {v: GaussianDistribution(var=v, mean=0.0, stddev=1.0) for v in range(4)}
+
+
+@pytest.fixture
+def trivial_vtree():
+    """A pre-constructed 2-variable MDVTree without MD-sets."""
+    vt = MDVTree()
+    vt.add_node(0, MDVNode(scope=BitSet({0, 1}), md_set=BitSet()))
+    vt.add_node(1, MDVNode(scope=BitSet({0}), md_set=BitSet()))
+    vt.add_node(2, MDVNode(scope=BitSet({1}), md_set=BitSet()))
+    vt.add_children(0, 1, 2)
+    return vt
+
+
+@pytest.fixture
+def complex_vtree():
+    """A 4-variable MDVTree with nested MD-sets."""
+    vt = MDVTree()
+    vt.add_node(0, MDVNode(scope=BitSet({0, 1, 2, 3}), md_set=BitSet({0, 1})))
+
+    vt.add_node(1, MDVNode(scope=BitSet({0, 1}), md_set=BitSet({0, 1})))
+    vt.add_node(2, MDVNode(scope=BitSet({0}), md_set=BitSet({0})))
+    vt.add_node(3, MDVNode(scope=BitSet({1}), md_set=BitSet({1})))
+    vt.add_children(1, 2, 3)
+
+    vt.add_node(4, MDVNode(scope=BitSet({2, 3}), md_set=BitSet()))
+    vt.add_node(5, MDVNode(scope=BitSet({2}), md_set=BitSet()))
+    vt.add_node(6, MDVNode(scope=BitSet({3}), md_set=BitSet()))
+    vt.add_children(4, 5, 6)
+
+    vt.add_children(0, 1, 4)
+    return vt
+
+
+def assert_isomorphic(rg, ac, rg_node_id, ac_node_id, visited=None):
     """
-    Verifies that the graph follows an alternating structure:
-    layer1_type -> layer2_type -> layer1_type ...
+    Recursively checks graph equivalence between a given RegionGraph and its compiled
+    ArithmeticCircuit counterpart, ensuring identical DAG skeletons.
     """
-    visited = set()
-    queue = [(start_node_id, layer1_type)]
+    if visited is None:
+        visited = set()
 
-    while queue:
-        node_id, expected_type = queue.pop(0)
-        if node_id in visited:
-            continue
-        visited.add(node_id)
+    if (rg_node_id, ac_node_id) in visited:
+        return
+    visited.add((rg_node_id, ac_node_id))
 
-        node_data = graph.get_node_data(node_id)
-        assert isinstance(node_data, expected_type), (
-            f"Node {node_id} is {type(node_data)}, expected {expected_type}"
+    rg_node = rg.get_node_data(rg_node_id)
+    ac_node = ac.get_node_data(ac_node_id)
+
+    # Check structural correspondence
+    if isinstance(rg_node, RegionNode):
+        if not rg.get_children(rg_node_id):
+            assert isinstance(ac_node, LeafNode), (
+                f"Expected LeafNode for leaf RegionNode {rg_node_id}"
+            )
+        else:
+            assert isinstance(ac_node, SumNode), f"Expected SumNode for RegionNode {rg_node_id}"
+    elif isinstance(rg_node, PartitionNode):
+        assert isinstance(ac_node, KroneckerProductNode), (
+            f"Expected KroneckerProductNode for PartitionNode {rg_node_id}"
         )
+    else:
+        pytest.fail(f"Unknown RegionGraph node type: {type(rg_node)}")
 
-        next_type = layer2_type if expected_type == layer1_type else layer1_type
+    # Check scope equivalence
+    assert rg_node.scope == ac_node.scope, f"Scope mismatch at RG {rg_node_id} / AC {ac_node_id}"
 
-        # We assume leaf nodes of the graph (not necessarily the circuit)
-        # are always of one of these types or mark the end of alternation.
-        children = graph.get_children(node_id)
-        for child_id in children:
-            queue.append((child_id, next_type))
+    # Check children correspondence
+    rg_children = sorted(rg.get_children(rg_node_id))
+    ac_children = sorted(ac.get_children(ac_node_id))
+
+    assert len(rg_children) == len(ac_children), (
+        f"Children count mismatch at RG {rg_node_id} / AC {ac_node_id}"
+    )
+
+    for rg_child, ac_child in zip(rg_children, ac_children):
+        assert_isomorphic(rg, ac, rg_child, ac_child, visited)
+
+
+@pytest.fixture(scope="module")
+def device():
+    """A fixture that returns the appropriate torch device (GPU if available, else CPU)."""
+    return torch.device(
+        "cuda"
+        if torch.cuda.is_available()
+        else ("mps" if torch.backends.mps.is_available() else "cpu")
+    )

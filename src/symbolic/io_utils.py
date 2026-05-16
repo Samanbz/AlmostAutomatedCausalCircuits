@@ -78,20 +78,28 @@ def plot_dag(
     for node_id, node_data in dag._nodes.items():
         # Resolve Config for this node type
         style = {}
+        best_cls = None
         for cls, config in node_config.items():
             if isinstance(node_data, cls):
-                style = config
-                break
+                if best_cls is None or issubclass(cls, best_cls):
+                    style = config
+                    best_cls = cls
 
         # Attributes
         color = style.get("color", "white")
         label = style.get("label", str(node_id))
         shape = style.get("shape", node_shape)
+        fontcolor = style.get("fontcolor", "black")
+        fontname = style.get("fontname", "Helvetica")
 
         if callable(label):
             label = label(node_data)
         if callable(color):
             color = color(node_data)
+        if callable(fontcolor):
+            fontcolor = fontcolor(node_data)
+        if callable(fontname):
+            fontname = fontname(node_data)
 
         # Map common shape names if necessary, or pass through
         # graphviz supports: box, ellipse, circle, diamond, etc.
@@ -101,6 +109,8 @@ def plot_dag(
             label=str(label),
             fillcolor=str(color),
             shape=str(shape),
+            fontcolor=str(fontcolor),
+            fontname=str(fontname),
             tooltip=repr(node_data),
         )
 
@@ -140,8 +150,8 @@ def plot_scm(
     orientation: str = "vertical",
 ) -> graphviz.Digraph:
     """
-    Plots a StructuralCausalModel using Graphviz, explicitly showing the target's
-    mechanisms as edge labels.
+    Plots a StructuralCausalModel using Graphviz.
+    Exogenous confounders are rendered as dashed bidirected arcs between their observable children.
     """
     fmt = "svg"
     is_html = False
@@ -217,42 +227,58 @@ def plot_scm(
             )
             fmt = "svg"
 
-    dot = graphviz.Digraph(
-        format=fmt,
-        node_attr={
-            "shape": "ellipse",
-            "style": "filled",
-            "fontname": "Helvetica",
-            "fillcolor": "lightblue",
-        },
-        engine="dot",
-    )
+    dot = graphviz.Digraph(format=fmt, engine="dot")
 
     dot.attr(rankdir="TB" if orientation == "vertical" else "LR")
+    dot.attr(ranksep="0.8")
+    dot.attr(nodesep="0.6")
+    dot.attr(splines="curved")
 
-    # Add Nodes
-    for node_id, mechanism in scm._nodes.items():
-        node_label = f"{node_id}\n{str(mechanism)}" if mechanism else str(node_id)
-        dot.node(str(node_id), label=node_label, tooltip=str(mechanism))
+    # Observable nodes
+    for node_id in sorted(scm.observable_variables):
+        dot.node(
+            str(node_id),
+            label=f'<<font face="Times-BoldItalic"><b><i>{node_id}</i></b></font>>',
+            shape="circle",
+            style="filled",
+            fillcolor="white",
+            color="black",
+            penwidth="1.5",
+            fontname="Times-BoldItalic",
+            fixedsize="true",
+            width="0.45",
+            height="0.45",
+        )
 
-    # Add Edges
+    # Directed causal edges (observable parents only)
     for source_id, targets in scm._adj.items():
-        for target_id, edge_data in targets.items():
-            label_parts = []
-            if isinstance(edge_data, (int, float)):
-                label_parts.append(f"w: {edge_data:.2f}")
-            elif edge_data is not None and str(edge_data) != "{}" and str(edge_data) != "None":
-                label_parts.append(str(edge_data))
+        if source_id in scm.exogenous_variables:
+            continue
+        for target_id in targets:
+            if target_id in scm.observable_variables:
+                dot.edge(
+                    str(source_id),
+                    str(target_id),
+                    color="black",
+                    penwidth="1.2",
+                    arrowsize="0.7",
+                )
 
-            edge_label = "\n".join(label_parts) if label_parts else ""
-
-            dot.edge(
-                str(source_id),
-                str(target_id),
-                label=edge_label,
-                fontsize="9",
-                fontcolor="darkgreen",
-            )
+    # Bidirected arcs for exogenous confounders
+    for exo_id in sorted(scm.exogenous_variables):
+        children = sorted(c for c in scm.get_children(exo_id) if c in scm.observable_variables)
+        for i in range(len(children)):
+            for j in range(i + 1, len(children)):
+                dot.edge(
+                    str(children[i]),
+                    str(children[j]),
+                    dir="both",
+                    style="dashed",
+                    color="black",
+                    penwidth="1.2",
+                    arrowsize="0.7",
+                    constraint="false",
+                )
 
     if output_path is not None:
         out_file = Path(output_path)
@@ -260,7 +286,11 @@ def plot_scm(
         try:
             if is_html:
                 svg_data = dot.pipe(format="svg").decode("utf-8")
-                html_content = f"<!DOCTYPE html>\n<html>\n<head>\n<title>SCM Plot</title>\n</head>\n<body style='text-align: center; margin-top: 50px;'>\n{svg_data}\n</body>\n</html>"
+                html_content = (
+                    "<!DOCTYPE html>\n<html>\n<head>\n<title>SCM Plot</title>\n</head>\n"
+                    "<body style='text-align: center; margin-top: 50px;'>\n"
+                    f"{svg_data}\n</body>\n</html>"
+                )
                 out_file.write_text(html_content, encoding="utf-8")
             else:
                 dot.render(str(out_file.with_suffix("")), cleanup=True)
@@ -328,7 +358,7 @@ def plot_matrix(
     Utility function to visualize a boolean matrix as a grid.
     Black for 1 (True), White for 0 (False).
     """
-    _plot_grid(matrix, cmap="binary", vmin=0, vmax=1, title=title, filename=filename)
+    _plot_grid(matrix, cmap="binary", vmin=0, vmax=1, title=title)
 
 
 def plot_diff_matrix(
@@ -347,4 +377,4 @@ def plot_diff_matrix(
     # Custom colormap: Red (-1) -> White (0) -> Green (1)
     cmap = LinearSegmentedColormap.from_list("RdWhGn", ["red", "white", "green"])
 
-    _plot_grid(matrix, cmap=cmap, vmin=-1, vmax=1, title=title, filename=filename)
+    _plot_grid(matrix, cmap=cmap, vmin=-1, vmax=1, title=title)

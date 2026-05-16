@@ -61,7 +61,15 @@ class MDVTree(BinaryTree[int, MDVNode, None]):
         :return: An MDVTree with the same structure as the input VTree, but with optimal labels assigned to each node.
         :rtype: MDVTree
         """
-        md_sets = [BitSet(s) for s in md_sets]
+        if md_sets:
+            sorted_sets = sorted([set(s) for s in md_sets], key=len)
+            for i in range(len(sorted_sets) - 1):
+                if not sorted_sets[i].issubset(sorted_sets[i + 1]):
+                    raise ValueError(
+                        f"MD-sets must be increasing subsets. {sorted_sets[i]} is not a subset of {sorted_sets[i + 1]}"
+                    )
+
+        md_sets: List[BitSet] = [BitSet(s) for s in md_sets]
 
         def get_label_for_scope(scope: BitSet) -> BitSet:
             label = BitSet.universal()

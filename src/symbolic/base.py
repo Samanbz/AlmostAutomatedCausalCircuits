@@ -31,16 +31,46 @@ class DirectedAcyclicGraph(Generic[K, N, E]):
         self._adj[node_id] = {}
         self._rev_adj[node_id] = {}
 
+    def _add_node(self, node_id: K, data: N) -> None:
+        """Adds a node without duplicate check — caller must guarantee uniqueness."""
+        self._nodes[node_id] = data
+        self._adj[node_id] = {}
+        self._rev_adj[node_id] = {}
+
     def add_edge(self, source: K, target: K, data: E = None) -> None:
         """Adds a directed edge from source to target."""
         if source not in self._nodes or target not in self._nodes:
             raise KeyError(f"Source '{source}' or Target '{target}' not found.")
-
-        # TODO: Check for cycles before adding (Simple DFS check could be added here for strictness,
-        # but topological sort will catch it later).
-
         self._adj[source][target] = data
         self._rev_adj[target][source] = data
+
+    def _add_edge(self, source: K, target: K, data: E = None) -> None:
+        """Adds an edge without existence checks — caller must guarantee both nodes exist."""
+        self._adj[source][target] = data
+        self._rev_adj[target][source] = data
+
+    def remove_edge(self, source: K, target: K) -> None:
+        """Removes a directed edge from source to target."""
+        if source in self._adj and target in self._adj[source]:
+            del self._adj[source][target]
+            del self._rev_adj[target][source]
+
+    def remove_node(self, node_id: K) -> None:
+        """Removes a node and all its incident edges."""
+        if node_id not in self._nodes:
+            raise KeyError(f"Node '{node_id}' not found.")
+        
+        # Remove outgoing edges
+        for target in list(self._adj[node_id].keys()):
+            self.remove_edge(node_id, target)
+            
+        # Remove incoming edges
+        for source in list(self._rev_adj[node_id].keys()):
+            self.remove_edge(source, node_id)
+            
+        del self._adj[node_id]
+        del self._rev_adj[node_id]
+        del self._nodes[node_id]
 
     def get_parents(self, node_id: K) -> List[K]:
         """Returns a list of parent node IDs."""
@@ -138,6 +168,8 @@ class DirectedAcyclicGraph(Generic[K, N, E]):
             queue = deque([u for u, deg in degree.items() if deg == 0])
             adjacency = self._adj
 
+        # print(f"DEBUG topo sort: degree={degree}")
+
         visited_count = 0
         while queue:
             u = queue.popleft()
@@ -192,6 +224,28 @@ class DirectedAcyclicGraph(Generic[K, N, E]):
                 f"Cycle detected in Graph! Visited {visited_count}/{len(self._nodes)} nodes."
             )
 
+    def print_in_order(self) -> None:
+        """Prints the node labels in alphabetical topological order."""
+        for layer in self.layered_topological_sort():
+            for node_id in layer:
+                node = self.get_node_data(node_id)
+                config = self.get_node_config()
+
+                # Fetch matching style configuration handling subclass inheritances properly
+                style = {}
+                for cls, c in config.items():
+                    if isinstance(node, cls):
+                        style = c
+                        break
+
+                label_val = style.get("label", str(node))
+                if callable(label_val):
+                    label_str = str(label_val(node))
+                else:
+                    label_str = str(label_val)
+
+                print(f"ID: {node_id} | {label_str.replace(chr(10), ' ')}")
+
 
 class Tree(DirectedAcyclicGraph[K, N, E]):
     """
@@ -224,6 +278,13 @@ class Tree(DirectedAcyclicGraph[K, N, E]):
             )
 
         return roots[0]
+
+    def get_parent(self, node_id: K) -> Optional[K]:
+        """Returns the parent node ID, or None if root."""
+        parents = self.get_parents(node_id)
+        if not parents:
+            return None
+        return parents[0]
 
 
 class BinaryTree(Tree[K, N, E]):

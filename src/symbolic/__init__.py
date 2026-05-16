@@ -5,9 +5,10 @@ from .arithmetic import (
     Determinism,
     Distribution,
     GaussianDistribution,
+    HadamardProductNode,
+    KroneckerProductNode,
     LeafNode,
     MarginalDeterminism,
-    ProductNode,
     Smoothness,
     StructuredDecomposability,
     SumNode,
@@ -16,9 +17,19 @@ from .arithmetic import (
     TruncatedDistribution,
     TruncatedGaussianDistribution,
     TruncatedUniformDistribution,
+    UnaryProductNode,
     UniformDistribution,
+    UniversalSumNode,
 )
-from .region_graph import MDRegionGraph, PartitionNode, RegionGraph, RegionGraphNode, RegionNode
+from .region_graph import (
+    MDLayerType,
+    MDRegionGraph,
+    MDRegionNode,
+    PartitionNode,
+    RegionGraph,
+    RegionGraphNode,
+    RegionNode,
+)
 from .scm import AdditiveNoiseMechanism, Mechanism, StructuralCausalModel
 from .vtree import MDVNode, MDVTree, VNode, VTree
 
@@ -47,11 +58,16 @@ __all__ = [
     "Mechanism",
     "StructuralCausalModel",
     "LeafNode",
-    "ProductNode",
+    "KroneckerProductNode",
+    "HadamardProductNode",
+    "UnaryProductNode",
     "SumNode",
+    "UniversalSumNode",
     "SymbolicArithmeticCircuit",
     "RegionGraph",
     "MDRegionGraph",
+    "MDRegionNode",
+    "MDLayerType",
     "RegionNode",
     "PartitionNode",
 ]
