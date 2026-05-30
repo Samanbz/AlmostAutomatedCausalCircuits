@@ -1,5 +1,7 @@
 from typing import TYPE_CHECKING, Any, Dict, List, Type
 
+import torch
+
 from src.utils import BitSet
 
 from ..base import DirectedAcyclicGraph
@@ -10,7 +12,6 @@ from .nodes import (
     LeafNode,
     ProductNode,
     SumNode,
-    UnaryProductNode,
     UniversalSumNode,
 )
 
@@ -43,10 +44,7 @@ class SymbolicArithmeticCircuit(DirectedAcyclicGraph[int, ArithmeticNode, Any]):
         """
         import copy
 
-        from src.utils.node_allocator import NodeAllocator
-
         new_ac = SymbolicArithmeticCircuit()
-        allocator = NodeAllocator()
 
         # Mapping from original node ID to a list of unfolded node IDs
         unfold_map: Dict[int, List[int]] = {}
@@ -58,13 +56,12 @@ class SymbolicArithmeticCircuit(DirectedAcyclicGraph[int, ArithmeticNode, Any]):
 
             if isinstance(node, LeafNode):
                 for i in range(h):
-                    new_id = allocator.next_id()
                     new_node = copy.copy(node)
                     new_node.unit_count = 1
                     if hasattr(node, "unit_supports") and node.unit_supports:
                         new_node.unit_supports = [node.unit_supports[i]]
                     # Do not copy weights as leaf nodes don't have them in the same way sum nodes do
-                    new_ac.add_node(new_id, new_node)
+                    new_id = new_ac.add_node(new_node)
                     unfolded_ids.append(new_id)
 
             elif isinstance(node, KroneckerProductNode):
@@ -76,9 +73,8 @@ class SymbolicArithmeticCircuit(DirectedAcyclicGraph[int, ArithmeticNode, Any]):
 
                 for i in range(len(left_unfolded)):
                     for j in range(len(right_unfolded)):
-                        new_id = allocator.next_id()
                         new_node = KroneckerProductNode(support=node.support, unit_count=1)
-                        new_ac.add_node(new_id, new_node)
+                        new_id = new_ac.add_node(new_node)
                         new_ac.add_edge(new_id, left_unfolded[i])
                         new_ac.add_edge(new_id, right_unfolded[j])
                         unfolded_ids.append(new_id)
@@ -95,24 +91,10 @@ class SymbolicArithmeticCircuit(DirectedAcyclicGraph[int, ArithmeticNode, Any]):
                 )
 
                 for i in range(h):
-                    new_id = allocator.next_id()
                     new_node = HadamardProductNode(support=node.support, unit_count=1)
-                    new_ac.add_node(new_id, new_node)
+                    new_id = new_ac.add_node(new_node)
                     new_ac.add_edge(new_id, left_unfolded[i])
                     new_ac.add_edge(new_id, right_unfolded[i])
-                    unfolded_ids.append(new_id)
-
-            elif isinstance(node, UnaryProductNode):
-                children = self.get_children(node_id)
-                assert len(children) == 1, "Unary product must have exactly one child"
-                child_unfolded = unfold_map[children[0]]
-                assert len(child_unfolded) == h, "Unary child unit counts must match"
-
-                for i in range(h):
-                    new_id = allocator.next_id()
-                    new_node = UnaryProductNode(support=node.support, unit_count=1)
-                    new_ac.add_node(new_id, new_node)
-                    new_ac.add_edge(new_id, child_unfolded[i])
                     unfolded_ids.append(new_id)
 
             elif isinstance(node, UniversalSumNode):
@@ -125,11 +107,10 @@ class SymbolicArithmeticCircuit(DirectedAcyclicGraph[int, ArithmeticNode, Any]):
                 h_in = len(child_unfolded)
 
                 for i in range(h):
-                    new_id = allocator.next_id()
                     new_node = UniversalSumNode(
                         support=node.support, unit_count=1, md_set=node.md_set
                     )
-                    new_ac.add_node(new_id, new_node)
+                    new_id = new_ac.add_node(new_node)
                     unfolded_ids.append(new_id)
 
                     for j in range(h_in):
@@ -148,9 +129,8 @@ class SymbolicArithmeticCircuit(DirectedAcyclicGraph[int, ArithmeticNode, Any]):
                 prods_per_sum = h_in // h
 
                 for i in range(h):
-                    new_id = allocator.next_id()
                     new_node = SumNode(support=node.support, unit_count=1, md_set=node.md_set)
-                    new_ac.add_node(new_id, new_node)
+                    new_id = new_ac.add_node(new_node)
                     unfolded_ids.append(new_id)
 
                     start_idx = i * prods_per_sum
@@ -227,8 +207,6 @@ class SymbolicArithmeticCircuit(DirectedAcyclicGraph[int, ArithmeticNode, Any]):
                 label = "x_K"
             elif isinstance(node, HadamardProductNode):
                 label = "x_H"
-            elif isinstance(node, UnaryProductNode):
-                label = "x_U"
             elif isinstance(node, LeafNode):
                 label = leaf_label(node)
 
@@ -246,8 +224,22 @@ class SymbolicArithmeticCircuit(DirectedAcyclicGraph[int, ArithmeticNode, Any]):
                 SumNode: {"color": "#ff9999", "label": node_label, "shape": "diamond"},
                 KroneckerProductNode: {"color": "#9999ff", "label": node_label, "shape": "box"},
                 HadamardProductNode: {"color": "#ffcc99", "label": node_label, "shape": "box"},
-                UnaryProductNode: {"color": "#cc99ff", "label": node_label, "shape": "box"},
                 LeafNode: {"color": "#99ff99", "label": node_label, "shape": "ellipse"},
             }
         )
         return config
+
+def eval_circuit(ac: SymbolicArithmeticCircuit, data: torch.Tensor) -> torch.Tensor:
+    """Evaluates the circuit on the given data."""
+    outputs = {}
+    for node_id in ac.topological_sort(reverse=True):
+        node = ac.get_node_data(node_id)
+        child_ids = ac.get_children(node_id)
+        child_outs = [outputs[cid] for cid in child_ids]
+        outputs[node_id] = node.forward(data, child_outs)
+
+    roots = ac.get_roots()
+    if not roots:
+        return torch.empty(data.shape[0], 0)
+    # Return the first root's output
+    return outputs[roots[0]]

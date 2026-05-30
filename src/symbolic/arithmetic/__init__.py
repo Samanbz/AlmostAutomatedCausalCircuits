@@ -1,21 +1,17 @@
 from .circuit import SymbolicArithmeticCircuit
-from .distributions import (
+from .nodes import (
     CategoricalDistribution,
     Distribution,
     GaussianDistribution,
+    HadamardProductNode,
+    KroneckerProductNode,
+    LeafNode,
+    SumNode,
     TruncatedCategoricalDistribution,
     TruncatedDistribution,
     TruncatedGaussianDistribution,
     TruncatedUniformDistribution,
     UniformDistribution,
-)
-from .nodes import (
-    ArithmeticNode,
-    HadamardProductNode,
-    KroneckerProductNode,
-    LeafNode,
-    SumNode,
-    UnaryProductNode,
     UniversalSumNode,
 )
 from .properties import (
@@ -28,12 +24,10 @@ from .properties import (
 
 
 __all__ = [
-    "ArithmeticNode",
     "SumNode",
     "UniversalSumNode",
     "KroneckerProductNode",
     "HadamardProductNode",
-    "UnaryProductNode",
     "LeafNode",
     "SymbolicArithmeticCircuit",
     "Distribution",

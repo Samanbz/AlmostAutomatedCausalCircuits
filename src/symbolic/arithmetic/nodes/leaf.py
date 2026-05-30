@@ -1,12 +1,146 @@
+import copy
 from abc import ABC, abstractmethod
 from typing import Any, List, Optional
 
 import numpy as np
+import torch
 from scipy import stats
 
-from src.utils import ContinuousInterval, DiscreteInterval, Interval, Support
+from src.utils import BitSet, ContinuousInterval, DiscreteInterval, Interval, Support
 
-from .nodes import LeafNode
+from .base import ArithmeticNode
+
+
+class LeafNode(ArithmeticNode):
+    """Represents a leaf distribution (e.g., Gaussian) in the SPN."""
+
+    pass
+
+
+class ConstantLeafNode(LeafNode):
+    """Leaf that always returns log(1) = 0 for all inputs.
+
+    Used to represent a marginalized variable in a compiled estimand circuit.
+    The variable is still in scope (so the circuit remains smooth/decomposable)
+    but contributes nothing to the density.
+    """
+
+    def __init__(self, var: int, unit_count: int = 1, md_set: Optional[BitSet] = None):
+        from src.utils import ContinuousInterval
+
+        var_support = ContinuousInterval(float("-inf"), float("inf"), False, False)
+        super().__init__(
+            support=Support({var: var_support}),
+            unit_count=unit_count,
+            md_set=md_set,
+        )
+        self.var = var
+
+    def forward(
+        self, data: torch.Tensor, children_outputs: list[torch.Tensor] = None
+    ) -> torch.Tensor:
+        B = data.shape[0]
+        return torch.zeros(B, self.unit_count, device=data.device)
+
+    def __repr__(self):
+        return f"ConstantLeafNode(var={self.var}, units={self.unit_count})"
+
+
+class InverseLeafNode(LeafNode):
+    """Leaf that wraps another leaf and negates its log-density.
+
+    Used for POW(-1) operations: if the base leaf returns log p(x),
+    this returns -log p(x) = log p(x)^{-1}.
+    """
+
+    def __init__(self, base_leaf: LeafNode, power: int = -1):
+        super().__init__(
+            support=base_leaf.support,
+            unit_count=base_leaf.unit_count,
+            unit_supports=base_leaf.unit_supports,
+            md_set=base_leaf.md_set,
+        )
+        self.base_leaf = base_leaf
+        self.power = power
+        if hasattr(base_leaf, "var"):
+            self.var = base_leaf.var
+
+    def forward(
+        self, data: torch.Tensor, children_outputs: list[torch.Tensor] = None
+    ) -> torch.Tensor:
+        base_out = self.base_leaf.forward(data, children_outputs)
+        inv = base_out * self.power
+        # Preserve -inf (-1e30) for out-of-bounds or zero probability
+        return torch.where(base_out < -1e10, base_out, inv)
+
+    def __repr__(self):
+        return f"InverseLeafNode(base={self.base_leaf}, power={self.power})"
+
+
+class CartesianLeafNode(LeafNode):
+    """Leaf that computes the Cartesian outer sum of two leaves in log-space.
+    Output size is h_A * h_B.
+    """
+
+    def __init__(self, leaf_a: LeafNode, leaf_b: LeafNode):
+        # Merge supports: since they are over different variables or overlapping,
+        # we can just use the union of intervals for representation.
+        support_union = copy.copy(leaf_a.support)
+        for var, interval in leaf_b.support.intervals.items():
+            support_union.intervals[var] = interval
+
+        super().__init__(
+            support=support_union,
+            unit_count=leaf_a.unit_count * leaf_b.unit_count,
+            md_set=leaf_a.md_set,
+        )
+        self.leaf_a = leaf_a
+        self.leaf_b = leaf_b
+
+    def forward(
+        self, data: torch.Tensor, children_outputs: list[torch.Tensor] = None
+    ) -> torch.Tensor:
+        out_a = self.leaf_a.forward(data, children_outputs)  # [B, h_A]
+        out_b = self.leaf_b.forward(data, children_outputs)  # [B, h_B]
+        B = out_a.shape[0]
+        h_A = out_a.shape[1]
+        h_B = out_b.shape[1]
+
+        outer = out_a.unsqueeze(2) + out_b.unsqueeze(1)  # [B, h_A, h_B]
+        return outer.reshape(B, h_A * h_B)
+
+    def __repr__(self):
+        return f"CartesianLeafNode(a={self.leaf_a}, b={self.leaf_b})"
+
+
+class ProductLeafNode(LeafNode):
+    """Leaf that combines two leaves by adding their log-densities.
+
+    Used for DetProd (support-compatible product) at the leaf level:
+    log(p_A(x) * p_B(x)) = log p_A(x) + log p_B(x).
+    """
+
+    def __init__(self, leaf_a: LeafNode, leaf_b: LeafNode):
+        super().__init__(
+            support=leaf_a.support,
+            unit_count=leaf_a.unit_count,
+            unit_supports=leaf_a.unit_supports,
+            md_set=leaf_a.md_set,
+        )
+        self.leaf_a = leaf_a
+        self.leaf_b = leaf_b
+        if hasattr(leaf_a, "var"):
+            self.var = leaf_a.var
+
+    def forward(
+        self, data: torch.Tensor, children_outputs: list[torch.Tensor] = None
+    ) -> torch.Tensor:
+        out_a = self.leaf_a.forward(data, children_outputs)
+        out_b = self.leaf_b.forward(data, children_outputs)
+        return out_a + out_b
+
+    def __repr__(self):
+        return f"ProductLeafNode(a={self.leaf_a}, b={self.leaf_b})"
 
 
 class Distribution(LeafNode, ABC):
@@ -92,6 +226,20 @@ class GaussianDistribution(Distribution):
         """Sample from the Gaussian distribution."""
         return np.random.normal(self.mean, self.stddev)
 
+    def forward(
+        self, data: torch.Tensor, children_outputs: list[torch.Tensor] = None
+    ) -> torch.Tensor:
+        x = data[:, self.var].unsqueeze(1)  # [B, 1]
+
+        # Ensure mean and stddev are tensors of shape [1, unit_count]
+        mean = torch.as_tensor(self.mean, device=data.device, dtype=data.dtype).view(1, -1)
+        std = torch.as_tensor(self.stddev, device=data.device, dtype=data.dtype).view(1, -1)
+
+        var = std**2
+        log_scale = torch.log(std * np.sqrt(2 * np.pi))
+        log_prob = -((x - mean) ** 2) / (2 * var) - log_scale
+        return log_prob  # [B, unit_count]
+
     @property
     def _truncated_class(self) -> type["TruncatedGaussianDistribution"]:
         return TruncatedGaussianDistribution
@@ -105,7 +253,12 @@ class GaussianDistribution(Distribution):
 
         # Use quantiles for better Gaussian partitioning
         probs = np.linspace(0, 1, n + 1)
-        cut_points = stats.norm.ppf(probs, loc=self.mean, scale=self.stddev)
+
+        # Handle mean/stddev being tensors or scalars for ppf
+        m = self.mean.mean().item() if isinstance(self.mean, torch.Tensor) else self.mean
+        s = self.stddev.mean().item() if isinstance(self.stddev, torch.Tensor) else self.stddev
+
+        cut_points = stats.norm.ppf(probs, loc=m, scale=s)
 
         intervals = []
         for i in range(n):

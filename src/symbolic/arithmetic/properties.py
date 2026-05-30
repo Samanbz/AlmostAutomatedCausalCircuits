@@ -10,7 +10,6 @@ from .nodes import (
     LeafNode,
     ProductNode,
     SumNode,
-    UnaryProductNode,
     UniversalSumNode,
 )
 
@@ -174,8 +173,6 @@ class MarginalDeterminism(Property):
         child_ids = circuit.get_children(node_id)
 
         if isinstance(node, LeafNode):
-            res = node.unit_supports
-        elif isinstance(node, UnaryProductNode):
             res = node.unit_supports
         elif isinstance(node, HadamardProductNode):
             assert len(child_ids) == 2
