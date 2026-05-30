@@ -1,6 +1,8 @@
 from collections import deque
 from typing import Any, Dict, Generator, Generic, List, Optional, Tuple, TypeVar
 
+from src.utils import IncrementalNodeAllocator, NodeAllocator
+
 
 # Generic types for Node ID (K), Node Payload (N) and Edge Payload (E)
 K = TypeVar("K")
@@ -16,23 +18,42 @@ class DirectedAcyclicGraph(Generic[K, N, E]):
     E: Type of data stored in edges.
     """
 
-    def __init__(self):
+    def __init__(self, node_allocator: Optional[NodeAllocator[K]] = None):
         self._nodes: Dict[K, N] = {}
         # Adjacency: parent_id -> {child_id: edge_data}
         self._adj: Dict[K, Dict[K, E]] = {}
         # Reverse Adjacency: child_id -> {parent_id: edge_data}
         self._rev_adj: Dict[K, Dict[K, E]] = {}
 
-    def add_node(self, node_id: K, data: N) -> None:
+        if node_allocator is None:
+            # Default to IncrementalNodeAllocator if K is int
+            self.node_allocator = IncrementalNodeAllocator()  # type: ignore
+        else:
+            self.node_allocator = node_allocator
+        # For generating unique node IDs
+
+    def add_node(self, data: N) -> K:
         """Adds a node to the graph."""
+        node_id = self.node_allocator.next_id()
         if node_id in self._nodes:
             raise ValueError(f"Node '{node_id}' already exists.")
         self._nodes[node_id] = data
         self._adj[node_id] = {}
         self._rev_adj[node_id] = {}
+        return node_id
 
-    def _add_node(self, node_id: K, data: N) -> None:
+    def _add_node(self, data: N) -> K:
         """Adds a node without duplicate check — caller must guarantee uniqueness."""
+        node_id = self.node_allocator.next_id()
+        self._nodes[node_id] = data
+        self._adj[node_id] = {}
+        self._rev_adj[node_id] = {}
+        return node_id
+
+    def _add_node_explicit(self, node_id: K, data: N) -> None:
+        """Adds a node with a specific ID."""
+        if node_id in self._nodes:
+            raise ValueError(f"Node '{node_id}' already exists.")
         self._nodes[node_id] = data
         self._adj[node_id] = {}
         self._rev_adj[node_id] = {}
@@ -59,15 +80,15 @@ class DirectedAcyclicGraph(Generic[K, N, E]):
         """Removes a node and all its incident edges."""
         if node_id not in self._nodes:
             raise KeyError(f"Node '{node_id}' not found.")
-        
+
         # Remove outgoing edges
         for target in list(self._adj[node_id].keys()):
             self.remove_edge(node_id, target)
-            
+
         # Remove incoming edges
         for source in list(self._rev_adj[node_id].keys()):
             self.remove_edge(source, node_id)
-            
+
         del self._adj[node_id]
         del self._rev_adj[node_id]
         del self._nodes[node_id]
@@ -293,8 +314,8 @@ class BinaryTree(Tree[K, N, E]):
     Enforces that each node is either a leaf (no children) or has exactly two children.
     """
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, node_allocator: Optional[NodeAllocator[K]] = None):
+        super().__init__(node_allocator)
         # Maps parent_id -> (left_child_id, right_child_id)
         self._children_pair: Dict[K, Tuple[K, K]] = {}
 

@@ -67,6 +67,9 @@ class BitSet:
             yield idx
             v ^= lsb
 
+    def __bool__(self) -> bool:
+        return self._val != 0
+
     def __len__(self) -> int:
         if self._val < 0:
             raise OverflowError("Infinite set has no length")

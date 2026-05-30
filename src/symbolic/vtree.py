@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Optional, Set
 
 from src.utils import BitSet
 
@@ -8,66 +8,26 @@ from .base import BinaryTree, Node
 class VNode(Node):
     """A node in a variable tree (vtree) representing a subset of variables."""
 
-    def __init__(self, scope: BitSet):
+    def __init__(self, scope: BitSet, md_set: Optional[BitSet] = None):
         super().__init__()
         self.scope = scope
+        self.md_set = md_set if md_set is not None else BitSet.universal()
 
     def __repr__(self):
-        return f"VNode(scope={self.scope})"
+        return f"VNode(scope={self.scope}, md_set={self.md_set})"
 
 
 class VTree(BinaryTree[int, VNode, None]):
     """A variable tree (vtree) represented as a directed acyclic graph."""
 
-    def _get_base_node_config(self) -> Dict[type, Dict[str, Any]]:
-        config = super()._get_base_node_config()
-
-        config.update(
-            {
-                VNode: {
-                    "shape": "box",
-                    "label": lambda n: f"Scope: {list(n.scope)}",
-                    "color": "lightblue",
-                }
-            }
-        )
-        return config
-
-
-class MDVNode(VNode):
-    """A node in an md-vtree (marginal deterministic vtree) representing a subset of variables and their marginal determinism specification (md-set)."""
-
-    def __init__(self, scope: BitSet, md_set: BitSet):
-        super().__init__(scope)
-        self.md_set = md_set
-
-    def __repr__(self):
-        return f"MDVNode(scope={self.scope}, md_set={self.md_set})"
-
-
-class MDVTree(BinaryTree[int, MDVNode, None]):
-    """An md-vtree (marginal deterministic vtree) represented as a directed acyclic graph."""
-
-    @classmethod
-    def from_vtree(cls, vtree: VTree, md_sets: List[Set[int]]) -> "MDVTree":
+    def compute_md_labeling(self, md_sets: List[Set[int]]) -> None:
         """
         Compute optimal labeling of a VTree given a list of marginal determinism sets following the
         algorithm described in Wang & Kwiatkowska (202?).
 
-        :param vtree: The input VTree to label
-        :type vtree: VTree
         :param md_sets: List of required marginal determinism sets to use for labeling
         :type md_sets: List[Set[int]]
-        :return: An MDVTree with the same structure as the input VTree, but with optimal labels assigned to each node.
-        :rtype: MDVTree
         """
-        if md_sets:
-            sorted_sets = sorted([set(s) for s in md_sets], key=len)
-            for i in range(len(sorted_sets) - 1):
-                if not sorted_sets[i].issubset(sorted_sets[i + 1]):
-                    raise ValueError(
-                        f"MD-sets must be increasing subsets. {sorted_sets[i]} is not a subset of {sorted_sets[i + 1]}"
-                    )
 
         md_sets: List[BitSet] = [BitSet(s) for s in md_sets]
 
@@ -80,16 +40,12 @@ class MDVTree(BinaryTree[int, MDVNode, None]):
                 label = label.intersection(scope)
             return label
 
-        md_vtree = MDVTree()
-
         def label_recursive(vid: int):
-            vtree_node = vtree.get_node_data(vid)
+            vtree_node = self.get_node_data(vid)
             label = get_label_for_scope(vtree_node.scope)
+            vtree_node.md_set = label
 
-            md_vnode = MDVNode(scope=vtree_node.scope, md_set=label)
-            md_vtree.add_node(vid, md_vnode)
-
-            children = vtree.get_children_pair(vid)
+            children = self.get_children_pair(vid)
             if children is None:
                 return
 
@@ -97,21 +53,18 @@ class MDVTree(BinaryTree[int, MDVNode, None]):
             label_recursive(l_vid)
             label_recursive(r_vid)
 
-            md_vtree.add_children(vid, l_vid, r_vid)
-
-        root_id = vtree.get_root()
+        root_id = self.get_root()
         label_recursive(root_id)
-        return md_vtree
 
     def _get_base_node_config(self) -> Dict[type, Dict[str, Any]]:
         config = super()._get_base_node_config()
 
         config.update(
             {
-                MDVNode: {
+                VNode: {
                     "shape": "box",
-                    "label": lambda n: f"Scope: {list(n.scope)}\nMD-Set: {list(n.md_set) if not n.md_set.is_universal else 'Universal'}",
-                    "color": "lightgreen",
+                    "label": lambda n: f"Scope: {list(n.scope)}\nMD-Set: {list(n.md_set) if not n.md_set.is_universal else 'Univ.'}",
+                    "color": "lightblue",
                 }
             }
         )

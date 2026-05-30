@@ -1,5 +1,4 @@
-import uuid
-from typing import Any
+from typing import Any, Optional
 
 from .base import Tree
 
@@ -96,25 +95,18 @@ class InstNode(ASTNode):
         return f"INST({','.join(f'{v}={val}' for v, val in sorted(self.variables.items()))})"
 
 
-class EstimandAST(Tree[str, ASTNode, Any]):
+class EstimandAST(Tree[int, ASTNode, Any]):
     """
     Abstract Syntax Tree for representing causal estimands.
-    Nodes are uniquely identified by UUID strings.
+    Nodes are uniquely identified by integer IDs.
     """
 
-    def merge(self, other: "EstimandAST") -> None:
-        """Merges another EstimandAST into this one."""
-        for node_id in other._nodes:
-            if node_id not in self._nodes:
-                self._add_node(node_id, other.get_node_data(node_id))
-
-        for node_id in other._nodes:
-            for target_id, edge_data in other.get_outgoing_edges(node_id):
-                self._add_edge(node_id, target_id, edge_data)
+    def merge(self, other: "EstimandAST") -> int:
+        """Merges another EstimandAST into this one, returning the new root ID."""
+        return _copy_subtree(other, other.get_root(), self)
 
     def _get_base_node_config(self):
         def _math_vars(vars_set):
-            return "..."
             # Triple-emphasis for a heavy LaTeX math look (Bold + Italic)
             return ", ".join(f"<b><i>{v}</i></b>" for v in sorted(vars_set))
 
@@ -123,7 +115,7 @@ class EstimandAST(Tree[str, ASTNode, Any]):
 
         return {
             PNode: {
-                "label": lambda n: f"<<b>P</b>(V)>",
+                "label": lambda n: "<<b>P</b>(V)>",
                 "shape": "box",
                 "style": "filled,rounded",
                 "color": "#E1F5FE",  # Light Blue
@@ -188,149 +180,139 @@ class EstimandAST(Tree[str, ASTNode, Any]):
 # ---------------------------------------------------------------------------
 
 
-def make_p(variables: set) -> tuple[EstimandAST, str]:
+def _copy_subtree(
+    source_ast: EstimandAST, source_node_id: int, target_ast: EstimandAST
+) -> int:
+    """Deep copy of a subtree from source_ast into target_ast (avoids shared-ID conflicts)."""
+    new_id = target_ast.add_node(source_ast.get_node_data(source_node_id))
+    for child_id, edge_data in source_ast.get_outgoing_edges(source_node_id):
+        new_child_id = _copy_subtree(source_ast, child_id, target_ast)
+        target_ast.add_edge(new_id, new_child_id, edge_data)
+    return new_id
+
+
+def make_p(variables: set) -> EstimandAST:
     ast = EstimandAST()
-    root_id = str(uuid.uuid4())
-    ast.add_node(root_id, PNode(variables))
-    return ast, root_id
+    ast.add_node(PNode(variables))
+    return ast
 
 
-def make_marg(
-    marginalize_vars: set, child_ast: EstimandAST, child_root_id: str
-) -> tuple[EstimandAST, str]:
+def make_marg(marginalize_vars: set, child_ast: EstimandAST) -> EstimandAST:
     if not marginalize_vars:
-        return child_ast, child_root_id
+        return child_ast
 
-    child_node = child_ast.get_node_data(child_root_id)
+    child_root = child_ast.get_root()
+    child_node = child_ast.get_node_data(child_root)
 
     # Merge nested MARGs
     if isinstance(child_node, MargNode):
         merged_vars = marginalize_vars.union(child_node.marginalize_vars)
-        grandchildren = list(child_ast.get_outgoing_edges(child_root_id))
-        clean_ast = EstimandAST()
-        clean_ast.merge(child_ast)
-        clean_ast.remove_node(child_root_id)
+        grandchildren = list(child_ast.get_outgoing_edges(child_root))
 
         if len(grandchildren) == 1:
             grandchild_id, _ = grandchildren[0]
-            return make_marg(merged_vars, clean_ast, grandchild_id)
+            temp_ast = EstimandAST()
+            _copy_subtree(child_ast, grandchild_id, temp_ast)
+            return make_marg(merged_vars, temp_ast)
 
-        root_id = str(uuid.uuid4())
-        clean_ast.add_node(root_id, MargNode(merged_vars))
+        clean_ast = EstimandAST()
+        root_id = clean_ast.add_node(MargNode(merged_vars))
         for grandchild_id, edge_data in grandchildren:
-            clean_ast.add_edge(root_id, grandchild_id, edge_data)
-        return clean_ast, root_id
+            new_grandchild_id = _copy_subtree(child_ast, grandchild_id, clean_ast)
+            clean_ast.add_edge(root_id, new_grandchild_id, edge_data)
+        return clean_ast
 
     # Full marginalization of a PNode gives 1
     if isinstance(child_node, PNode):
         if marginalize_vars.issuperset(child_node.variables):
             ast = EstimandAST()
-            root_id = str(uuid.uuid4())
-            ast.add_node(root_id, ConstantNode(1))
-            return ast, root_id
+            ast.add_node(ConstantNode(1))
+            return ast
 
     ast = EstimandAST()
-    root_id = str(uuid.uuid4())
-    ast.add_node(root_id, MargNode(marginalize_vars))
-    ast.merge(child_ast)
-    ast.add_edge(root_id, child_root_id)
-    return ast, root_id
-
-
-def _copy_subtree_local(ast: EstimandAST, node_id: str) -> tuple[EstimandAST, str]:
-    """Deep copy of a subtree with freshly generated node IDs (avoids shared-ID conflicts)."""
-    new_id = str(uuid.uuid4())
-    result = EstimandAST()
-    result.add_node(new_id, ast.get_node_data(node_id))
-    for child_id, _ in ast.get_outgoing_edges(node_id):
-        c_ast, c_root = _copy_subtree_local(ast, child_id)
-        result.merge(c_ast)
-        result.add_edge(new_id, c_root)
-    return result, new_id
+    root_id = ast.add_node(MargNode(marginalize_vars))
+    child_root_in_ast = _copy_subtree(child_ast, child_root, ast)
+    ast.add_edge(root_id, child_root_in_ast)
+    return ast
 
 
 def _make_binary_prod(
     node_cls: type,
-    children: list[tuple[EstimandAST, str]],
-) -> tuple[EstimandAST, str]:
-    """Left-associative binary fold of children into a tree of node_cls nodes.
-
-    Each child subtree is deep-copied with fresh IDs to prevent node-ID conflicts
-    when multiple derived ASTs share nodes from a common ancestor.
-    """
+    children: list[EstimandAST],
+) -> EstimandAST:
+    """Left-associative binary fold of children into a tree of node_cls nodes."""
     filtered = []
-    for child_ast, child_root_id in children:
-        node = child_ast.get_node_data(child_root_id)
+    for child_ast in children:
+        node = child_ast.get_node_data(child_ast.get_root())
         if isinstance(node, ConstantNode) and node.value == 1:
             continue
-        filtered.append((child_ast, child_root_id))
+        filtered.append(child_ast)
 
     if not filtered:
         ast = EstimandAST()
-        root_id = str(uuid.uuid4())
-        ast.add_node(root_id, ConstantNode(1))
-        return ast, root_id
+        ast.add_node(ConstantNode(1))
+        return ast
 
     if len(filtered) == 1:
         return filtered[0]
 
     # Left-associative fold: PROD[PROD[A, B], C]
-    # Copy children so that shared ancestor node IDs don't cause conflicts.
-    acc_ast, acc_root = _copy_subtree_local(*filtered[0])
-    for child_ast, child_root in filtered[1:]:
-        c_ast, c_root = _copy_subtree_local(child_ast, child_root)
+    acc_ast = EstimandAST()
+    _copy_subtree(filtered[0], filtered[0].get_root(), acc_ast)
+
+    for child_ast in filtered[1:]:
         new_ast = EstimandAST()
-        new_root = str(uuid.uuid4())
-        new_ast.add_node(new_root, node_cls())
-        new_ast.merge(acc_ast)
-        new_ast.merge(c_ast)
-        new_ast.add_edge(new_root, acc_root)
-        new_ast.add_edge(new_root, c_root)
-        acc_ast, acc_root = new_ast, new_root
+        new_root = new_ast.add_node(node_cls())
 
-    return acc_ast, acc_root
+        acc_root_in_new = _copy_subtree(acc_ast, acc_ast.get_root(), new_ast)
+        child_root_in_new = _copy_subtree(child_ast, child_ast.get_root(), new_ast)
+
+        new_ast.add_edge(new_root, acc_root_in_new)
+        new_ast.add_edge(new_root, child_root_in_new)
+        acc_ast = new_ast
+
+    return acc_ast
 
 
-def make_prod(children: list[tuple[EstimandAST, str]]) -> tuple[EstimandAST, str]:
+def make_prod(children: list[EstimandAST]) -> EstimandAST:
     """Create a left-associative binary tree of ProdNodes."""
     return _make_binary_prod(ProdNode, children)
 
 
-def make_det_prod(children: list[tuple[EstimandAST, str]]) -> tuple[EstimandAST, str]:
+def make_det_prod(children: list[EstimandAST]) -> EstimandAST:
     """Create a left-associative binary tree of DetProdNodes."""
     return _make_binary_prod(DetProdNode, children)
 
 
-def make_pow(power: int, child_ast: EstimandAST, child_root_id: str) -> tuple[EstimandAST, str]:
-    child_node = child_ast.get_node_data(child_root_id)
+def make_pow(power: int, child_ast: EstimandAST) -> EstimandAST:
+    child_root = child_ast.get_root()
+    child_node = child_ast.get_node_data(child_root)
     if isinstance(child_node, ConstantNode) and child_node.value == 1:
-        return child_ast, child_root_id
+        return child_ast
 
     ast = EstimandAST()
-    root_id = str(uuid.uuid4())
-    ast.add_node(root_id, PowNode(power))
-    ast.merge(child_ast)
-    ast.add_edge(root_id, child_root_id)
-    return ast, root_id
+    root_id = ast.add_node(PowNode(power))
+    child_root_in_ast = _copy_subtree(child_ast, child_root, ast)
+    ast.add_edge(root_id, child_root_in_ast)
+    return ast
 
 
-def make_inst(
-    variables: set, child_ast: EstimandAST, child_root_id: str
-) -> tuple[EstimandAST, str]:
+def make_inst(variables: set, child_ast: EstimandAST) -> EstimandAST:
     """Wrap a child expression with an InstNode for the given variables."""
     if not variables:
-        return child_ast, child_root_id
+        return child_ast
 
     ast = EstimandAST()
-    root_id = str(uuid.uuid4())
-    ast.add_node(root_id, InstNode(variables))
-    ast.merge(child_ast)
-    ast.add_edge(root_id, child_root_id)
-    return ast, root_id
+    root_id = ast.add_node(InstNode(variables))
+    child_root_in_ast = _copy_subtree(child_ast, child_ast.get_root(), ast)
+    ast.add_edge(root_id, child_root_in_ast)
+    return ast
 
 
-def get_vars(ast: EstimandAST, root_id: str) -> set:
-    node = ast.get_node_data(root_id)
+def get_vars(ast: EstimandAST, node_id: Optional[int] = None) -> set:
+    if node_id is None:
+        node_id = ast.get_root()
+    node = ast.get_node_data(node_id)
     if isinstance(node, PNode):
         return set(node.variables)
     elif isinstance(node, CondNode):
@@ -338,25 +320,27 @@ def get_vars(ast: EstimandAST, root_id: str) -> set:
     elif isinstance(node, ConstantNode):
         return set()
     elif isinstance(node, MargNode):
-        child_id, _ = ast.get_outgoing_edges(root_id)[0]
+        child_id, _ = ast.get_outgoing_edges(node_id)[0]
         return get_vars(ast, child_id) - node.marginalize_vars
     elif isinstance(node, PowNode):
-        child_id, _ = ast.get_outgoing_edges(root_id)[0]
+        child_id, _ = ast.get_outgoing_edges(node_id)[0]
         return get_vars(ast, child_id)
     elif isinstance(node, (ProdNode, DetProdNode)):
         vars_set = set()
-        for child_id, _ in ast.get_outgoing_edges(root_id):
+        for child_id, _ in ast.get_outgoing_edges(node_id):
             vars_set.update(get_vars(ast, child_id))
         return vars_set
     elif isinstance(node, InstNode):
-        child_id, _ = ast.get_outgoing_edges(root_id)[0]
+        child_id, _ = ast.get_outgoing_edges(node_id)[0]
         return get_vars(ast, child_id)
     return set()
 
 
-def ast_to_str(ast: EstimandAST, root_id: str) -> str:
-    node = ast.get_node_data(root_id)
-    children = ast.get_outgoing_edges(root_id)
+def ast_to_str(ast: EstimandAST, node_id: Optional[int] = None) -> str:
+    if node_id is None:
+        node_id = ast.get_root()
+    node = ast.get_node_data(node_id)
+    children = ast.get_outgoing_edges(node_id)
     if not children:
         return str(node)
 
@@ -367,7 +351,7 @@ def ast_to_str(ast: EstimandAST, root_id: str) -> str:
     return f"{node}[{', '.join(sorted(child_strs))}]"
 
 
-def is_pnode_or_marg_pnode(ast: EstimandAST, node_id: str) -> bool:
+def is_pnode_or_marg_pnode(ast: EstimandAST, node_id: int) -> bool:
     node = ast.get_node_data(node_id)
     if isinstance(node, PNode):
         return True
@@ -377,7 +361,7 @@ def is_pnode_or_marg_pnode(ast: EstimandAST, node_id: str) -> bool:
     return False
 
 
-def is_conditional(ast: EstimandAST, num_id: str, den_id: str):
+def is_conditional(ast: EstimandAST, num_id: int, den_id: int):
     den_node = ast.get_node_data(den_id)
     if not (isinstance(den_node, PowNode) and den_node.power == -1):
         return False, None, None
@@ -423,9 +407,11 @@ def is_conditional(ast: EstimandAST, num_id: str, den_id: str):
     return False, None, None
 
 
-def ast_to_latex(ast: EstimandAST, root_id: str) -> str:
-    node = ast.get_node_data(root_id)
-    children = ast.get_outgoing_edges(root_id)
+def ast_to_latex(ast: EstimandAST, node_id: Optional[int] = None) -> str:
+    if node_id is None:
+        node_id = ast.get_root()
+    node = ast.get_node_data(node_id)
+    children = ast.get_outgoing_edges(node_id)
 
     if isinstance(node, PNode):
         return f"P({','.join(map(str, sorted(node.variables)))})"
@@ -625,28 +611,30 @@ class SymSum(SymExpr):
         return SymSum(new_vars, self.term.rename_var(old_var, new_var))
 
 
-def ast_to_sym(ast, root_id: str) -> SymExpr:
-    node = ast.get_node_data(root_id)
-    children = ast.get_outgoing_edges(root_id)
+def ast_to_sym(ast: EstimandAST, node_id: Optional[int] = None) -> SymExpr:
+    if node_id is None:
+        node_id = ast.get_root()
+    node = ast.get_node_data(node_id)
+    children = ast.get_outgoing_edges(node_id)
 
-    if type(node).__name__ == "PNode":
+    if isinstance(node, PNode):
         return SymP(node.variables)
-    elif type(node).__name__ == "CondNode":
+    elif isinstance(node, CondNode):
         return SymP(node.num_vars, node.den_vars)
-    elif type(node).__name__ == "ConstantNode":
+    elif isinstance(node, ConstantNode):
         if node.value == 1:
             return SymOne()
-    elif type(node).__name__ == "MargNode":
+    elif isinstance(node, MargNode):
         child_sym = ast_to_sym(ast, children[0][0])
         return SymSum(node.marginalize_vars, child_sym)
-    elif type(node).__name__ == "PowNode":
+    elif isinstance(node, PowNode):
         child_sym = ast_to_sym(ast, children[0][0])
         if node.power == -1:
             return SymFrac(SymOne(), child_sym)
-    elif type(node).__name__ in ("ProdNode", "DetProdNode"):
+    elif isinstance(node, (ProdNode, DetProdNode)):
         terms = [ast_to_sym(ast, c) for c, _ in children]
         return SymProd(terms)
-    elif type(node).__name__ == "InstNode":
+    elif isinstance(node, InstNode):
         return ast_to_sym(ast, children[0][0])
     return SymOne()
 
@@ -824,8 +812,8 @@ def simplify_sym(expr: SymExpr) -> SymExpr:
         return SymProd(terms)
 
 
-def get_simplified_latex(ast, root_id: str) -> str:
-    sym_expr = ast_to_sym(ast, root_id)
+def get_simplified_latex(ast: EstimandAST) -> str:
+    sym_expr = ast_to_sym(ast)
     simplified_expr = simplify_sym(sym_expr)
     clean_expr = resolve_name_clashes(simplified_expr)
     return clean_expr.to_latex()
@@ -836,19 +824,7 @@ def get_simplified_latex(ast, root_id: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _copy_subtree(ast: "EstimandAST", node_id: str) -> "tuple[EstimandAST, str]":
-    """Return a deep copy of the subtree with freshly generated node IDs."""
-    new_id = str(uuid.uuid4())
-    result = EstimandAST()
-    result.add_node(new_id, ast.get_node_data(node_id))
-    for child_id, _ in ast.get_outgoing_edges(node_id):
-        c_ast, c_root = _copy_subtree(ast, child_id)
-        result.merge(c_ast)
-        result.add_edge(new_id, c_root)
-    return result, new_id
-
-
-def _get_ast_free_vars(ast: "EstimandAST", node_id: str) -> set:
+def _get_ast_free_vars(ast: "EstimandAST", node_id: int) -> set:
     """Return free (non-integrated) variables in an AST subtree."""
     node = ast.get_node_data(node_id)
     if isinstance(node, PNode):
@@ -875,44 +851,54 @@ def _get_ast_free_vars(ast: "EstimandAST", node_id: str) -> set:
 
 
 def _rename_var_in_subtree(
-    ast: "EstimandAST", node_id: str, old: str, new: str
-) -> "tuple[EstimandAST, str]":
+    ast: "EstimandAST", node_id: int, old: str, new: str
+) -> "EstimandAST":
     """Deep copy of a subtree with every occurrence of ``old`` renamed to ``new``."""
-    node = ast.get_node_data(node_id)
-    new_id = str(uuid.uuid4())
     result = EstimandAST()
+    _rename_var_in_subtree_recursive(ast, node_id, old, new, result)
+    return result
+
+
+def _rename_var_in_subtree_recursive(
+    ast: "EstimandAST", node_id: int, old: str, new: str, target_ast: "EstimandAST"
+) -> int:
+    node = ast.get_node_data(node_id)
 
     if isinstance(node, PNode):
-        result.add_node(new_id, PNode({new if v == old else v for v in node.variables}))
+        new_id = target_ast.add_node(PNode({new if v == old else v for v in node.variables}))
     elif isinstance(node, CondNode):
-        result.add_node(
-            new_id,
+        new_id = target_ast.add_node(
             CondNode(
                 {new if v == old else v for v in node.num_vars},
                 {new if v == old else v for v in node.den_vars},
-            ),
+            )
         )
     elif isinstance(node, MargNode):
-        result.add_node(new_id, MargNode({new if v == old else v for v in node.marginalize_vars}))
+        new_id = target_ast.add_node(
+            MargNode({new if v == old else v for v in node.marginalize_vars})
+        )
     elif isinstance(node, InstNode):
-        result.add_node(new_id, InstNode({new if v == old else v for v in node.variables}))
+        new_id = target_ast.add_node(
+            InstNode({new if v == old else v for v in node.variables})
+        )
     else:
-        result.add_node(new_id, node)
+        new_id = target_ast.add_node(node)
 
     for child_id, _ in ast.get_outgoing_edges(node_id):
-        c_ast, c_root = _rename_var_in_subtree(ast, child_id, old, new)
-        result.merge(c_ast)
-        result.add_edge(new_id, c_root)
+        new_child_id = _rename_var_in_subtree_recursive(
+            ast, child_id, old, new, target_ast
+        )
+        target_ast.add_edge(new_id, new_child_id)
 
-    return result, new_id
+    return new_id
 
 
 def _simplify_collect(
-    ast: "EstimandAST", node_id: str, in_pow: bool
-) -> "tuple[EstimandAST, str, set]":
+    ast: "EstimandAST", node_id: int, in_pow: bool
+) -> "tuple[EstimandAST, set]":
     """Recursive worker for ``simplify_ast``.
 
-    Returns ``(new_ast, new_root, sum_vars)`` where ``sum_vars`` is the set of
+    Returns ``(new_ast, sum_vars)`` where ``sum_vars`` is the set of
     variables this subtree wants to bubble up as an outer MARG (always empty
     when ``in_pow`` is True).
     """
@@ -921,46 +907,45 @@ def _simplify_collect(
     # ── Leaves ────────────────────────────────────────────────────────────
     if isinstance(node, (PNode, ConstantNode)):
         leaf = EstimandAST()
-        leaf.add_node(node_id, node)
-        return leaf, node_id, set()
+        leaf.add_node(node)
+        return leaf, set()
 
     # ── MARG ──────────────────────────────────────────────────────────────
     if isinstance(node, MargNode):
         child_id = ast.get_outgoing_edges(node_id)[0][0]
-        c_ast, c_root, c_sum = _simplify_collect(ast, child_id, in_pow)
-        c_node = c_ast.get_node_data(c_root)
+        c_ast, c_sum = _simplify_collect(ast, child_id, in_pow)
+        c_node = c_ast.get_node_data(c_ast.get_root())
 
         if isinstance(c_node, PNode):
             if node.marginalize_vars.issuperset(c_node.variables):
                 # Full marginalization → 1
-                new_id = str(uuid.uuid4())
                 result = EstimandAST()
-                result.add_node(new_id, ConstantNode(1))
-                return result, new_id, set()
+                result.add_node(ConstantNode(1))
+                return result, set()
             # Partial marginalization: keep MARG(S)[P(V)] intact — do NOT strip to P(V-S)
-            new_ast, new_root = make_marg(node.marginalize_vars, c_ast, c_root)
-            return new_ast, new_root, set()
+            new_ast = make_marg(node.marginalize_vars, c_ast)
+            return new_ast, set()
 
         all_sum = node.marginalize_vars | c_sum
         if in_pow:
-            new_ast, new_root = make_marg(all_sum, c_ast, c_root)
-            return new_ast, new_root, set()
-        return c_ast, c_root, all_sum
+            new_ast = make_marg(all_sum, c_ast)
+            return new_ast, set()
+        return c_ast, all_sum
 
     # ── PROD / DETPROD ────────────────────────────────────────────────────
     if isinstance(node, (ProdNode, DetProdNode)):
         node_cls = type(node)
         results: list = []
         for cid, _ in ast.get_outgoing_edges(node_id):
-            c_ast, c_root, c_sum = _simplify_collect(ast, cid, in_pow)
-            results.append([c_ast, c_root, c_sum])
+            c_ast, c_sum = _simplify_collect(ast, cid, in_pow)
+            results.append([c_ast, c_sum])
 
-        child_free = [_get_ast_free_vars(r[0], r[1]) for r in results]
+        child_free = [_get_ast_free_vars(r[0], r[0].get_root()) for r in results]
         all_names_in_use: set = set()
         for i in range(len(results)):
-            all_names_in_use |= child_free[i] | results[i][2]
+            all_names_in_use |= child_free[i] | results[i][1]
 
-        for i, (c_ast, c_root, c_sum) in enumerate(results):
+        for i, (c_ast, c_sum) in enumerate(results):
             if not c_sum:
                 continue
             sibling_free: set = set()
@@ -975,54 +960,52 @@ def _simplify_collect(
                 new_v = v + "'"
                 while new_v in all_names_in_use:
                     new_v += "'"
-                new_c_ast, new_c_root = _rename_var_in_subtree(c_ast, c_root, v, new_v)
-                c_ast, c_root = new_c_ast, new_c_root
-                results[i][0] = new_c_ast
-                results[i][1] = new_c_root
+                c_ast = _rename_var_in_subtree(c_ast, c_ast.get_root(), v, new_v)
+                results[i][0] = c_ast
                 new_c_sum.discard(v)
                 new_c_sum.add(new_v)
                 all_names_in_use.add(new_v)
-                child_free[i] = _get_ast_free_vars(results[i][0], results[i][1])
+                child_free[i] = _get_ast_free_vars(results[i][0], results[i][0].get_root())
 
-            results[i][2] = new_c_sum
+            results[i][1] = new_c_sum
 
         all_sum: set = set()
         simplified_children: list = []
 
-        for c_ast, c_root, c_sum in results:
+        for c_ast, c_sum in results:
             all_sum |= c_sum
             # Do NOT flatten nested ProdNode/DetProdNode — preserve binary structure
-            simplified_children.append((c_ast, c_root))
+            simplified_children.append(c_ast)
 
-        new_ast, new_root = _make_binary_prod(node_cls, simplified_children)
+        new_ast = _make_binary_prod(node_cls, simplified_children)
 
         if in_pow and all_sum:
-            new_ast, new_root = make_marg(all_sum, new_ast, new_root)
-            return new_ast, new_root, set()
+            new_ast = make_marg(all_sum, new_ast)
+            return new_ast, set()
 
-        return new_ast, new_root, all_sum
+        return new_ast, all_sum
 
     # ── POW ───────────────────────────────────────────────────────────────
     if isinstance(node, PowNode):
         child_id = ast.get_outgoing_edges(node_id)[0][0]
-        c_ast, c_root, _ = _simplify_collect(ast, child_id, in_pow=True)
-        new_ast, new_root = make_pow(node.power, c_ast, c_root)
-        return new_ast, new_root, set()
+        c_ast, _ = _simplify_collect(ast, child_id, in_pow=True)
+        new_ast = make_pow(node.power, c_ast)
+        return new_ast, set()
 
     # ── INST ──────────────────────────────────────────────────────────────
     if isinstance(node, InstNode):
         child_id = ast.get_outgoing_edges(node_id)[0][0]
-        c_ast, c_root, c_sum = _simplify_collect(ast, child_id, in_pow)
-        new_ast, new_root = make_inst(node.variables, c_ast, c_root)
-        return new_ast, new_root, c_sum
+        c_ast, c_sum = _simplify_collect(ast, child_id, in_pow)
+        new_ast = make_inst(node.variables, c_ast)
+        return new_ast, c_sum
 
     # Fallback
     fallback = EstimandAST()
-    fallback.add_node(node_id, node)
-    return fallback, node_id, set()
+    fallback.add_node(node)
+    return fallback, set()
 
 
-def simplify_ast(ast: "EstimandAST", root_id: str) -> "tuple[EstimandAST, str]":
+def simplify_ast(ast: "EstimandAST") -> "EstimandAST":
     """Canonicalize an estimand AST.
 
     Transformations applied:
@@ -1033,19 +1016,19 @@ def simplify_ast(ast: "EstimandAST", root_id: str) -> "tuple[EstimandAST, str]":
     - Integral MARGs inside ``POW`` stay in place.
     - Binary structure of ``PROD``/``DETPROD`` nodes is preserved (no flattening).
     """
-    new_ast, new_root, sum_vars = _simplify_collect(ast, root_id, in_pow=False)
+    new_ast, sum_vars = _simplify_collect(ast, ast.get_root(), in_pow=False)
     if sum_vars:
-        new_ast, new_root = make_marg(sum_vars, new_ast, new_root)
-    return new_ast, new_root
+        new_ast = make_marg(sum_vars, new_ast)
+    return new_ast
 
 
-def present_ast(ast: "EstimandAST", root_id: str) -> "tuple[EstimandAST, str]":
+def present_ast(ast: "EstimandAST") -> "EstimandAST":
     """
     Format AST for visual presentation.
     - Rewrites PROD/DETPROD(A, POW(-1, B)) into COND(A, B) for visualization.
     """
 
-    def _build_cond_ast(src_ast: EstimandAST, src_root: str) -> tuple[EstimandAST, str]:
+    def _build_cond_ast(src_ast: EstimandAST, src_root: int) -> EstimandAST:
         node = src_ast.get_node_data(src_root)
 
         if isinstance(node, (ProdNode, DetProdNode)):
@@ -1065,30 +1048,27 @@ def present_ast(ast: "EstimandAST", root_id: str) -> "tuple[EstimandAST, str]":
                     den_id = src_ast.get_outgoing_edges(c1_id)[0][0]
 
                 if num_id and den_id:
-                    num_ast, num_r = _build_cond_ast(src_ast, num_id)
-                    den_ast, den_r = _build_cond_ast(src_ast, den_id)
+                    num_ast = _build_cond_ast(src_ast, num_id)
+                    den_ast = _build_cond_ast(src_ast, den_id)
 
-                    num_vars = get_vars(num_ast, num_r)
-                    den_vars = get_vars(den_ast, den_r)
+                    num_vars = get_vars(num_ast)
+                    den_vars = get_vars(den_ast)
 
                     res_ast = EstimandAST()
-                    res_root = str(uuid.uuid4())
-                    # CondNode takes numerator and given vars
-                    res_ast.add_node(res_root, CondNode(num_vars - den_vars, den_vars))
-                    res_ast.merge(num_ast)
+                    res_root = res_ast.add_node(CondNode(num_vars - den_vars, den_vars))
+                    num_root_in_res = _copy_subtree(num_ast, num_ast.get_root(), res_ast)
                     # We keep numerator to show what it is derived from visually
-                    res_ast.add_edge(res_root, num_r)
-                    return res_ast, res_root
+                    res_ast.add_edge(res_root, num_root_in_res)
+                    return res_ast
 
         # Otherwise deep copy and recurse
         res_ast = EstimandAST()
-        res_root = str(uuid.uuid4())
-        res_ast.add_node(res_root, node)
+        res_root = res_ast.add_node(node)
         for child_id, edge_data in src_ast.get_outgoing_edges(src_root):
-            c_ast, c_r = _build_cond_ast(src_ast, child_id)
-            res_ast.merge(c_ast)
-            res_ast.add_edge(res_root, c_r, edge_data)
+            c_ast = _build_cond_ast(src_ast, child_id)
+            c_root_in_res = _copy_subtree(c_ast, c_ast.get_root(), res_ast)
+            res_ast.add_edge(res_root, c_root_in_res, edge_data)
 
-        return res_ast, res_root
+        return res_ast
 
-    return _build_cond_ast(ast, root_id)
+    return _build_cond_ast(ast, ast.get_root())

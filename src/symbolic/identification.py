@@ -5,7 +5,7 @@ from .id_ast import (
     EstimandAST,
     PowNode,
     ProdNode,
-    _copy_subtree_local,
+    _copy_subtree,
     ast_to_str,
     get_vars,
     make_det_prod,
@@ -87,7 +87,8 @@ def minimize_determinisms(D: set[frozenset]) -> set[frozenset]:
 # ---------------------------------------------------------------------------
 
 
-def _get_fraction_parts(ast: EstimandAST, root_id: str):
+def _get_fraction_parts(ast: EstimandAST):
+    root_id = ast.get_root()
     node = ast.get_node_data(root_id)
     if isinstance(node, (ProdNode, DetProdNode)):
         edges = ast.get_outgoing_edges(root_id)
@@ -121,8 +122,8 @@ def _cancel_fractions(
                 if i == j or children[j] is None:
                     continue
 
-                parts_i = _get_fraction_parts(children[i][0], children[i][1])
-                parts_j = _get_fraction_parts(children[j][0], children[j][1])
+                parts_i = _get_fraction_parts(children[i])
+                parts_j = _get_fraction_parts(children[j])
 
                 if not parts_i or not parts_j:
                     continue
@@ -130,26 +131,24 @@ def _cancel_fractions(
                 num_i, den_i = parts_i
                 num_j, den_j = parts_j
 
-                str_den_i = ast_to_str(children[i][0], den_i)
-                str_num_j = ast_to_str(children[j][0], num_j)
+                str_den_i = ast_to_str(children[i], den_i)
+                str_num_j = ast_to_str(children[j], num_j)
 
                 if str_den_i == str_num_j:
-                    num_ast, num_root = _copy_subtree_local(children[i][0], num_i)
-                    den_ast, den_root = _copy_subtree_local(children[j][0], den_j)
-                    pow_ast, pow_root = make_pow(-1, den_ast, den_root)
+                    num_ast = EstimandAST()
+                    _copy_subtree(children[i], num_i, num_ast)
+                    den_ast = EstimandAST()
+                    _copy_subtree(children[j], den_j, den_ast)
+                    pow_ast = make_pow(-1, den_ast)
 
                     if tracking:
-                        merged_ast, merged_root = make_det_prod(
-                            [(num_ast, num_root), (pow_ast, pow_root)]
-                        )
+                        merged_ast = make_det_prod([num_ast, pow_ast])
                         D_children[i] = minimize_determinisms(D_children[i] | D_children[j])
                         K_children[i] = max(K_children[i], K_children[j])
                     else:
-                        merged_ast, merged_root = make_prod(
-                            [(num_ast, num_root), (pow_ast, pow_root)]
-                        )
+                        merged_ast = make_prod([num_ast, pow_ast])
 
-                    children[i] = (merged_ast, merged_root)
+                    children[i] = merged_ast
                     children[j] = None
                     c_components[i] = c_components[i] | c_components[j]
                     c_components[j] = None
@@ -174,8 +173,8 @@ def _check_support_compatibility(children: list, D_children: list) -> bool:
     must be covered by determinisms of both factors.
     """
     child_scopes = []
-    for child_ast, child_root_id in children:
-        child_scopes.append(get_vars(child_ast, child_root_id))
+    for child_ast in children:
+        child_scopes.append(get_vars(child_ast))
 
     for i in range(len(children)):
         for j in range(i + 1, len(children)):
@@ -191,7 +190,7 @@ def _check_support_compatibility(children: list, D_children: list) -> bool:
 def _merge_non_query_components(
     y: set,
     V: set,
-    P: tuple[EstimandAST, str],
+    P: EstimandAST,
     D: set,
     children: list,
     D_children: list,
@@ -211,7 +210,7 @@ def _merge_non_query_components(
         for idx in non_query_indices:
             non_query_vars |= c_components[idx]
         marg_joint_vars = V - non_query_vars
-        merged_factor = make_marg(marg_joint_vars, *P)
+        merged_factor = make_marg(marg_joint_vars, P)
         D_merged = _update_D_marg(D, marg_joint_vars)
 
         new_children = [children[i] for i in query_indices] + [merged_factor]
@@ -232,22 +231,22 @@ def _merge_non_query_components(
 def identify(
     y: set,
     x: set,
-    P: tuple[EstimandAST, str],
+    P: EstimandAST,
     G: StructuralCausalModel,
     D: set[frozenset] | None = None,
-) -> tuple[EstimandAST, str, set[frozenset] | None, int | None]:
+) -> tuple[EstimandAST, set[frozenset] | None, int | None]:
     """
     Shpitser's ID Algorithm, augmented with tractability tracking (T-ID).
 
     y: query variables
     x: intervention variables
-    P: current probability distribution as an AST tuple (EstimandAST, root_id)
+    P: current probability distribution as an EstimandAST
     G: current causal graph
     D: set of frozensets representing the marginal determinisms of P.
        Pass None (default) to disable tractability checking entirely.
        The check respects Proposition 2: if Q ∈ D and Q ⊆ scope, scope is covered.
 
-    Returns: (ast, root_id, D_out, K) where:
+    Returns: (ast, D_out, K) where:
         D_out: determinisms of the returned expression (None when D is None)
         K: complexity exponent, the estimand is computable in O(|C|^K).
            K=1 (linear) or K=2 (quadratic). None when D is None.
@@ -266,15 +265,15 @@ def identify(
     # Line 1: Base Case
     if not x:
         marg_vars = V - y
-        result = make_marg(marg_vars, *P)
+        result = make_marg(marg_vars, P)
         D_out = _update_D_marg(D, marg_vars) if tracking else None
-        return *result, D_out, (1 if tracking else None)
+        return result, D_out, (1 if tracking else None)
 
     # Line 2: Ancestral Isolation
     ancestors_Y = G.get_ancestors(y).intersection(V)
     if V != ancestors_Y:
         marg_vars = V - ancestors_Y
-        P_new = make_marg(marg_vars, *P)
+        P_new = make_marg(marg_vars, P)
         D_new = _update_D_marg(D, marg_vars) if tracking else None
         G_new = G.subgraph(ancestors_Y)
         return identify(y, x.intersection(ancestors_Y), P_new, G_new, D_new)
@@ -293,10 +292,10 @@ def identify(
         D_children = []
         K_children = []
         for S_i in c_components_G_minus_X:
-            child_ast, child_root_id, D_child, K_child = identify(
+            child_ast, D_child, K_child = identify(
                 S_i, V - S_i, P, G, D if tracking else None
             )
-            children.append((child_ast, child_root_id))
+            children.append(child_ast)
             D_children.append(D_child)
             K_children.append(K_child)
 
@@ -317,14 +316,14 @@ def identify(
             prod_result = prod_fn(children)
 
             marg_vars = V - (y | x)
-            result = make_marg(marg_vars, *prod_result)
+            result = make_marg(marg_vars, prod_result)
             D_out = _update_D_marg(D_prod, marg_vars)
-            return *result, D_out, K
+            return result, D_out, K
         else:
             prod_result = make_prod(children)
             marg_vars = V - (y | x)
-            result = make_marg(marg_vars, *prod_result)
-            return *result, None, None
+            result = make_marg(marg_vars, prod_result)
+            return result, None, None
 
     # Line 5: The Hedge (Fail Condition)
     if len(c_components_G_minus_X) == 1:
@@ -344,7 +343,7 @@ def identify(
                 predecessors = set(topological_order[:vi_idx])
 
                 joint_vars_to_marg = V - predecessors.union({vi})
-                marg_joint = make_marg(joint_vars_to_marg, *P)
+                marg_joint = make_marg(joint_vars_to_marg, P)
 
                 if not predecessors:
                     # P(vi) = MARG(V\{vi})[P] — no denominator needed.
@@ -357,8 +356,8 @@ def identify(
                         f"deterministic. Current determinisms: {D}"
                     )
 
-                marg_denom = make_marg({vi}, *marg_joint)
-                pow_denom = make_pow(-1, *marg_denom)
+                marg_denom = make_marg({vi}, marg_joint)
+                pow_denom = make_pow(-1, marg_denom)
                 if tracking and _is_det(D, frozenset(predecessors)):
                     prod_children.append(make_det_prod([marg_joint, pow_denom]))
                 else:
@@ -375,13 +374,13 @@ def identify(
             if tracking:
                 D_s = _D_for_conditionals(D, S, topological_order)
                 marg_vars = S - y
-                result = make_marg(marg_vars, *s_prod)
+                result = make_marg(marg_vars, s_prod)
                 D_out = _update_D_marg(D_s, marg_vars)
-                return *result, D_out, 1
+                return result, D_out, 1
             else:
                 marg_vars = S - y
-                result = make_marg(marg_vars, *s_prod)
-                return *result, None, None
+                result = make_marg(marg_vars, s_prod)
+                return result, None, None
 
         # Line 7: Sub-Component Isolation
         S_prime = None
@@ -396,9 +395,9 @@ def identify(
 
             D_new = _D_for_conditionals(D, S_prime, topological_order) if tracking else None
             G_new = G.subgraph(S_prime)
-            ast, root_id, D_out, K = identify(y, x.intersection(S_prime), P_new, G_new, D_new)
+            ast, D_out, K = identify(y, x.intersection(S_prime), P_new, G_new, D_new)
             K_out = max(1, K) if K is not None else None
-            return ast, root_id, D_out, K_out
+            return ast, D_out, K_out
 
     raise IdentificationError(
         "Algorithm failed to identify the causal query for an unknown reason."
@@ -533,7 +532,7 @@ def _compute_tractability(
         from .id_ast import make_p
 
         V = G.observable_variables
-        ast, root_id, D_out, K = identify(y, x, make_p(V), G, D)
+        ast, D_out, K = identify(y, x, make_p(V), G, D)
         return D_out, K
     except TractabilityError:
         return None

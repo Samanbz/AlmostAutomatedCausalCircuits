@@ -120,7 +120,7 @@ class StructuralCausalModel(DirectedAcyclicGraph[Union[str, int], Mechanism, Any
         """
         High-level wrapper to add a node and its incoming edges.
         """
-        self.add_node(name, mechanism)
+        self._add_node_explicit(name, mechanism)
         if is_exogenous:
             self.exogenous_variables.add(name)
         else:
@@ -388,6 +388,8 @@ class LinearLogic:
         self.coefficients = coefficients
 
     def __call__(self, **kwargs) -> np.ndarray:
+        if not kwargs:
+            return 0.0
         first_val = next(iter(kwargs.values()))
         res = np.zeros_like(first_val, dtype=np.float64)
         for k, v in kwargs.items():
