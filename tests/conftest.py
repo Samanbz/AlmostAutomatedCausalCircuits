@@ -1,16 +1,16 @@
 import pytest
 import torch
-
 from src.construction.random_scm import generate_random_scm
+
 from src.symbolic import (
     GaussianDistribution,
     KroneckerProductNode,
     LeafNode,
-    MDVNode,
-    MDVTree,
     PartitionNode,
     RegionNode,
     SumNode,
+    VNode,
+    VTree,
 )
 from src.utils import BitSet
 
@@ -31,32 +31,32 @@ def basic_input_dists():
 
 @pytest.fixture
 def trivial_vtree():
-    """A pre-constructed 2-variable MDVTree without MD-sets."""
-    vt = MDVTree()
-    vt.add_node(0, MDVNode(scope=BitSet({0, 1}), md_set=BitSet()))
-    vt.add_node(1, MDVNode(scope=BitSet({0}), md_set=BitSet()))
-    vt.add_node(2, MDVNode(scope=BitSet({1}), md_set=BitSet()))
-    vt.add_children(0, 1, 2)
+    """A pre-constructed 2-variable VTree without MD-sets."""
+    vt = VTree()
+    n0_id = vt.add_node(VNode(scope=BitSet({0, 1}), md_set=BitSet()))
+    n1_id = vt.add_node(VNode(scope=BitSet({0}), md_set=BitSet()))
+    n2_id = vt.add_node(VNode(scope=BitSet({1}), md_set=BitSet()))
+    vt.add_children(n0_id, n1_id, n2_id)
     return vt
 
 
 @pytest.fixture
 def complex_vtree():
-    """A 4-variable MDVTree with nested MD-sets."""
-    vt = MDVTree()
-    vt.add_node(0, MDVNode(scope=BitSet({0, 1, 2, 3}), md_set=BitSet({0, 1})))
+    """A 4-variable VTree with nested MD-sets."""
+    vt = VTree()
+    n0_id = vt.add_node(VNode(scope=BitSet({0, 1, 2, 3}), md_set=BitSet({0, 1})))
 
-    vt.add_node(1, MDVNode(scope=BitSet({0, 1}), md_set=BitSet({0, 1})))
-    vt.add_node(2, MDVNode(scope=BitSet({0}), md_set=BitSet({0})))
-    vt.add_node(3, MDVNode(scope=BitSet({1}), md_set=BitSet({1})))
-    vt.add_children(1, 2, 3)
+    n1_id = vt.add_node(VNode(scope=BitSet({0, 1}), md_set=BitSet({0, 1})))
+    n2_id = vt.add_node(VNode(scope=BitSet({0}), md_set=BitSet({0})))
+    n3_id = vt.add_node(VNode(scope=BitSet({1}), md_set=BitSet({1})))
+    vt.add_children(n1_id, n2_id, n3_id)
 
-    vt.add_node(4, MDVNode(scope=BitSet({2, 3}), md_set=BitSet()))
-    vt.add_node(5, MDVNode(scope=BitSet({2}), md_set=BitSet()))
-    vt.add_node(6, MDVNode(scope=BitSet({3}), md_set=BitSet()))
-    vt.add_children(4, 5, 6)
+    n4_id = vt.add_node(VNode(scope=BitSet({2, 3}), md_set=BitSet()))
+    n5_id = vt.add_node(VNode(scope=BitSet({2}), md_set=BitSet()))
+    n6_id = vt.add_node(VNode(scope=BitSet({3}), md_set=BitSet()))
+    vt.add_children(n4_id, n5_id, n6_id)
 
-    vt.add_children(0, 1, 4)
+    vt.add_children(n0_id, n1_id, n4_id)
     return vt
 
 

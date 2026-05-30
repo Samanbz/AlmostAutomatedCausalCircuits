@@ -1,5 +1,5 @@
-from src.construction.circuit_builder import MDCircuitBuilder, create_md_circuit
-from src.construction.region_graph_builder import MDRegionGraphBuilder
+from src.construction.circuit_builder import CircuitBuilder, create_md_circuit
+from src.construction.region_graph_builder import RegionGraphBuilder
 from src.symbolic import (
     Decomposability,
     KroneckerProductNode,
@@ -10,7 +10,7 @@ from src.symbolic import (
     StructuredDecomposability,
     SumNode,
 )
-from src.symbolic.region_graph import MDRegionNode
+from src.symbolic.region_graph import RegionNode
 
 
 def test_isomorphism_and_leaf_instantiation(basic_input_dists, trivial_vtree):
@@ -18,19 +18,19 @@ def test_isomorphism_and_leaf_instantiation(basic_input_dists, trivial_vtree):
     Assert that the number of SumNodes in the AC equals the number of non-leaf RegionNodes in the RG.
     Assert that KroneckerProductNodes correspond 1:1 with PartitionNodes."""
 
-    rg_builder = MDRegionGraphBuilder(basic_input_dists, trivial_vtree)
+    rg_builder = RegionGraphBuilder(basic_input_dists, trivial_vtree)
     rg = rg_builder.build()
 
-    ac_builder = MDCircuitBuilder(rg=rg, h=4, input_dists=basic_input_dists)
+    ac_builder = CircuitBuilder(rg=rg, h=4, input_dists=basic_input_dists)
     ac = ac_builder.build()
 
     # Note: RG nodes and AC nodes might have different IDs since NodeAllocator is shared or unique per builder.
     # We can count them or map them by type.
     rg_non_leaf_regions = [
-        n for n in rg._nodes if isinstance(rg.get_node_data(n), MDRegionNode) and not rg.is_leaf(n)
+        n for n in rg._nodes if isinstance(rg.get_node_data(n), RegionNode) and not rg.is_leaf(n)
     ]
     rg_leaf_regions = [
-        n for n in rg._nodes if isinstance(rg.get_node_data(n), MDRegionNode) and rg.is_leaf(n)
+        n for n in rg._nodes if isinstance(rg.get_node_data(n), RegionNode) and rg.is_leaf(n)
     ]
     rg_partitions = [n for n in rg._nodes if isinstance(rg.get_node_data(n), PartitionNode)]
 
@@ -56,8 +56,8 @@ def test_block_scaling(basic_input_dists, trivial_vtree):
     """3.2.1 Sum Node Capacities, 3.2.2 Root Capacity, 3.2.3 Product Node Capacities."""
     h = 4
 
-    rg = MDRegionGraphBuilder(basic_input_dists, trivial_vtree).build()
-    ac = MDCircuitBuilder(rg=rg, h=h, input_dists=basic_input_dists).build()
+    rg = RegionGraphBuilder(basic_input_dists, trivial_vtree).build()
+    ac = CircuitBuilder(rg=rg, h=h, input_dists=basic_input_dists).build()
 
     root_id = [n for n in ac._nodes if not ac.get_parents(n)][0]
     assert root_id is not None

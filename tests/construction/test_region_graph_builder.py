@@ -1,22 +1,22 @@
-from src.construction.region_graph_builder import MDRegionGraphBuilder
-from src.symbolic import GaussianDistribution, MDVNode, MDVTree, RegionNode
+from src.construction.region_graph_builder import RegionGraphBuilder
+from src.symbolic import GaussianDistribution, RegionNode, VNode, VTree
 from src.utils import BitSet
 
 
 def test_mixing_layer_topology():
     """Test the topology of a Mixing Layer."""
-    mdvt = MDVTree()
-    mdvt.add_node(0, MDVNode(scope=BitSet({0, 1}), md_set=BitSet({0})))
-    mdvt.add_node(1, MDVNode(scope=BitSet({0}), md_set=BitSet({0})))
-    mdvt.add_node(2, MDVNode(scope=BitSet({1}), md_set=BitSet({1})))
-    mdvt.add_children(0, 1, 2)
+    mdvt = VTree()
+    node_id0 = mdvt.add_node(VNode(scope=BitSet({0, 1}), md_set=BitSet({0})))
+    node_id1 = mdvt.add_node(VNode(scope=BitSet({0}), md_set=BitSet({0})))
+    node_id2 = mdvt.add_node(VNode(scope=BitSet({1}), md_set=BitSet({1})))
+    mdvt.add_children(node_id0, node_id1, node_id2)
 
     input_dists = {
         0: GaussianDistribution(var=0, mean=0.0, stddev=1.0),
         1: GaussianDistribution(var=1, mean=0.0, stddev=1.0),
     }
 
-    rg = MDRegionGraphBuilder(input_dists, mdvt).build()
+    rg = RegionGraphBuilder(input_dists, mdvt).build()
 
     # The root node unifies all sub-regions
     root_node_id = rg.get_roots()[0]
@@ -30,18 +30,18 @@ def test_mixing_layer_topology():
 
 def test_synthesizing_layer_topology():
     """Test the topology of a Synthesizing Layer."""
-    mdvt = MDVTree()
-    mdvt.add_node(0, MDVNode(scope=BitSet({0, 1}), md_set=BitSet({0, 1})))
-    mdvt.add_node(1, MDVNode(scope=BitSet({0}), md_set=BitSet({0})))
-    mdvt.add_node(2, MDVNode(scope=BitSet({1}), md_set=BitSet({1})))
-    mdvt.add_children(0, 1, 2)
+    mdvt = VTree()
+    node_id0 = mdvt.add_node(VNode(scope=BitSet({0, 1}), md_set=BitSet({0, 1})))
+    node_id1 = mdvt.add_node(VNode(scope=BitSet({0}), md_set=BitSet({0})))
+    node_id2 = mdvt.add_node(VNode(scope=BitSet({1}), md_set=BitSet({1})))
+    mdvt.add_children(node_id0, node_id1, node_id2)
 
     input_dists = {
         0: GaussianDistribution(var=0, mean=0.0, stddev=1.0),
         1: GaussianDistribution(var=1, mean=0.0, stddev=1.0),
     }
 
-    rg = MDRegionGraphBuilder(input_dists, mdvt).build()
+    rg = RegionGraphBuilder(input_dists, mdvt).build()
 
     root_node_id = rg.get_roots()[0]
     part_ids = rg.get_children(root_node_id)
@@ -50,16 +50,16 @@ def test_synthesizing_layer_topology():
 
 def test_non_overlapping_md_sets_validation():
     """Test an empty md-set."""
-    mdvt = MDVTree()
-    mdvt.add_node(0, MDVNode(scope=BitSet({0, 1}), md_set=BitSet()))
-    mdvt.add_node(1, MDVNode(scope=BitSet({0}), md_set=BitSet()))
-    mdvt.add_node(2, MDVNode(scope=BitSet({1}), md_set=BitSet()))
-    mdvt.add_children(0, 1, 2)
+    mdvt = VTree()
+    node_id0 = mdvt.add_node(VNode(scope=BitSet({0, 1}), md_set=BitSet()))
+    node_id1 = mdvt.add_node(VNode(scope=BitSet({0}), md_set=BitSet()))
+    node_id2 = mdvt.add_node(VNode(scope=BitSet({1}), md_set=BitSet()))
+    mdvt.add_children(node_id0, node_id1, node_id2)
 
     input_dists = {
         0: GaussianDistribution(var=0, mean=0.0, stddev=1.0),
         1: GaussianDistribution(var=1, mean=0.0, stddev=1.0),
     }
 
-    rg = MDRegionGraphBuilder(input_dists, mdvt).build()
+    rg = RegionGraphBuilder(input_dists, mdvt).build()
     assert rg.get_roots()[0] is not None

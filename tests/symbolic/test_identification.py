@@ -75,14 +75,14 @@ def test_frontdoor_criterion(frontdoor_scm):
     P_ast = make_p(V)
 
     # No D: tractability checking disabled
-    ast, root_id, D_out, K = identify({"Y"}, {"X"}, P_ast, scm)
+    ast, D_out, K = identify({"Y"}, {"X"}, P_ast, scm)
 
     assert ast is not None
     assert D_out is None
     assert K is None
 
     expected = "MARG(Z)[PROD[MARG(X)[PROD[MARG(Y,Z)[P(X,Y,Z)], PROD[P(X,Y,Z), POW(-1)[MARG(Y)[P(X,Y,Z)]]]]], PROD[MARG(Y)[P(X,Y,Z)], POW(-1)[MARG(Y,Z)[P(X,Y,Z)]]]]]"
-    assert ast_to_str(ast, root_id) == expected
+    assert ast_to_str(ast) == expected
 
 
 def test_bow_arc_unidentifiable(bow_arc_scm):
@@ -100,14 +100,14 @@ def test_backdoor_criterion(backdoor_scm):
     P_ast = make_p(V)
 
     # No D provided: tractability checking disabled, K and D_out are None
-    ast, root_id, D_out, K = identify({"Y"}, {"X"}, P_ast, scm)
+    ast, D_out, K = identify({"Y"}, {"X"}, P_ast, scm)
 
     assert ast is not None
     assert D_out is None
     assert K is None
 
     expected = "MARG(Z)[PROD[MARG(X,Y)[P(X,Y,Z)], PROD[P(X,Y,Z), POW(-1)[MARG(Y)[P(X,Y,Z)]]]]]"
-    assert ast_to_str(ast, root_id) == expected
+    assert ast_to_str(ast) == expected
 
 
 def test_backdoor_with_minimal_D_is_linear(backdoor_scm):
@@ -117,7 +117,7 @@ def test_backdoor_with_minimal_D_is_linear(backdoor_scm):
     P_ast = make_p(V)
 
     D = {frozenset({"Z"})}
-    _, _, _, K = identify({"Y"}, {"X"}, P_ast, scm, D)
+    _, _, K = identify({"Y"}, {"X"}, P_ast, scm, D)
     assert K == 1
 
 
@@ -138,7 +138,7 @@ def test_no_determinism_no_error_single_variable():
     V = scm.observable_variables
     P_ast = make_p(V)
 
-    ast, _, D_out, K = identify({"Y"}, set(), P_ast, scm, D=set())
+    ast, D_out, K = identify({"Y"}, set(), P_ast, scm, D=set())
     assert ast is not None
     assert K == 1
 
@@ -259,13 +259,13 @@ def test_required_and_identify_consistent(backdoor_scm):
     required = required_determinisms({"Y"}, {"X"}, scm)
 
     # required D makes the query tractable (no TractabilityError), K is defined
-    ast, _, _, K = identify({"Y"}, {"X"}, P_ast, scm, required)
+    ast, _, K = identify({"Y"}, {"X"}, P_ast, scm, required)
     assert ast is not None
     assert K is not None
 
     # A stronger D (smaller frozenset, survives marginalization) achieves K=1
     stronger_D = {frozenset({"Z"})}
-    ast2, _, _, K2 = identify({"Y"}, {"X"}, P_ast, scm, stronger_D)
+    ast2, _, K2 = identify({"Y"}, {"X"}, P_ast, scm, stronger_D)
     assert ast2 is not None
     assert K2 == 1
 
