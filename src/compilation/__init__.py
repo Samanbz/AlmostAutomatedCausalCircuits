@@ -4,7 +4,6 @@ from .base_circuit import (
     TensorizedLayer,
     UniformInputLayer,
 )
-from .estimand_eval import eval_estimand
 
 
 __all__ = [
@@ -12,5 +11,4 @@ __all__ = [
     "GaussianInputLayer",
     "UniformInputLayer",
     "CategoricalInputLayer",
-    "eval_estimand",
 ]

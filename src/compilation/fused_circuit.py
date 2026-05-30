@@ -22,7 +22,6 @@ from src.compilation.folded_circuit import (
 )
 from src.logger import logger as g_logger
 from src.symbolic.base import DirectedAcyclicGraph, Node
-from src.utils.node_allocator import NodeAllocator
 
 from .folded_circuit import FoldedLayer
 
@@ -231,7 +230,6 @@ class CircuitFuser:
     def __init__(self, folded: FoldedSymbolicCircuit):
         self.folded = folded
         self.fused = FusedCircuit()
-        self.alloc = NodeAllocator()
 
     def build(self) -> FusedCircuit:
         # Map folded-layer id → fused-layer id
@@ -265,10 +263,9 @@ class CircuitFuser:
         """Wrap a folded input layer into a FusedInputLayer."""
         scopes = getattr(fnode, "scopes", [])
 
-        fused_id = self.alloc.next_id()
         fused_layer = FusedInputLayer(fnode, scopes)
         fused_layer.md_sets = getattr(fnode, "md_sets", None)
-        self.fused._add_node(fused_id, fused_layer)
+        fused_id = self.fused._add_node(fused_layer)
         folded_to_fused[fid] = fused_id
 
     def _fuse_sum(self, fid: int, fnode, folded_to_fused: Dict[int, int]) -> None:
@@ -325,8 +322,6 @@ class CircuitFuser:
         left_per_sum = left_global[child_idx]  # [N, num_children]
         right_per_sum = right_global[child_idx]  # [N, num_children]
 
-        fused_id = self.alloc.next_id()
-
         if sum_layer.h_child != prod_layer.h_left * prod_layer.h_right:
             logger.error(
                 f"Dimension mismatch for SparseKronecker fusion at sum {sum_fid} and product {prod_fid}: "
@@ -344,7 +339,7 @@ class CircuitFuser:
             h_right=prod_layer.h_right,
         )
         layer.md_sets = getattr(sum_layer, "md_sets", None)
-        self.fused._add_node(fused_id, layer)
+        fused_id = self.fused._add_node(layer)
 
         # Connect to input fused layers
         self._connect_to_sources(prod_fid, fused_id, folded_to_fused)
@@ -367,7 +362,6 @@ class CircuitFuser:
         left_per_sum = left_global[child_idx]
         right_per_sum = right_global[child_idx]
 
-        fused_id = self.alloc.next_id()
         layer = SparseHadamardLayer(
             left_indices=left_per_sum,
             right_indices=right_per_sum,
@@ -376,8 +370,10 @@ class CircuitFuser:
             h_in=sum_layer.h_in,
             h_child=prod_layer.h_child,
         )
+        if hasattr(sum_layer, "log_weights"):
+            layer.log_weights = sum_layer.log_weights
         layer.md_sets = getattr(sum_layer, "md_sets", None)
-        self.fused._add_node(fused_id, layer)
+        fused_id = self.fused._add_node(layer)
 
         self._connect_to_sources(prod_fid, fused_id, folded_to_fused)
         folded_to_fused[sum_fid] = fused_id
@@ -399,8 +395,6 @@ class CircuitFuser:
         left_per_sum = left_global[child_idx]
         right_per_sum = right_global[child_idx]
 
-        fused_id = self.alloc.next_id()
-
         if sum_layer.h_child != prod_layer.h_left * prod_layer.h_right:
             logger.error(
                 f"Dimension mismatch for Tucker fusion at sum {sum_fid} and product {prod_fid}: "
@@ -417,7 +411,7 @@ class CircuitFuser:
             h_right=prod_layer.h_right,
         )
         layer.md_sets = getattr(sum_layer, "md_sets", None)
-        self.fused._add_node(fused_id, layer)
+        fused_id = self.fused._add_node(layer)
 
         self._connect_to_sources(prod_fid, fused_id, folded_to_fused)
         folded_to_fused[sum_fid] = fused_id
@@ -439,7 +433,6 @@ class CircuitFuser:
         left_per_sum = left_global[child_idx]
         right_per_sum = right_global[child_idx]
 
-        fused_id = self.alloc.next_id()
         layer = CPTLayer(
             left_indices=left_per_sum,
             right_indices=right_per_sum,
@@ -447,10 +440,10 @@ class CircuitFuser:
             h_out=sum_layer.h_out,
             h_child=prod_layer.h_child,
         )
-        if hasattr(sum_layer, "weights"):
-            layer.weights = sum_layer.weights
+        if hasattr(sum_layer, "log_weights"):
+            layer.log_weights = sum_layer.log_weights
         layer.md_sets = getattr(sum_layer, "md_sets", None)
-        self.fused._add_node(fused_id, layer)
+        fused_id = self.fused._add_node(layer)
 
         self._connect_to_sources(prod_fid, fused_id, folded_to_fused)
         folded_to_fused[sum_fid] = fused_id

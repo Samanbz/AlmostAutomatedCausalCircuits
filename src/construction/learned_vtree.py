@@ -2,10 +2,11 @@ import itertools
 
 import networkx as nx
 import numpy as np
+import pymetis
 import torch
 
-from src.symbolic.vtree import MDVTree, VNode, VTree
-from src.utils import BitSet, NodeAllocator, estimate_pairwise_mi
+from src.symbolic.vtree import VNode, VTree
+from src.utils import BitSet, estimate_pairwise_mi
 
 
 def build_skeleton(dag: nx.DiGraph | None, num_variables: int) -> nx.Graph:
@@ -73,13 +74,10 @@ def evaluate_data_mi(skeleton: nx.Graph, data: torch.Tensor):
 class LearnedVTreeBuilder:
     def __init__(self, prioritize: str = "hardware", md_sets: list[set[int]] | None = None):
         self.vt = VTree()
-        self.allocator = NodeAllocator(start=0)
         self.prioritize = prioritize
         self.md_sets = md_sets or []
 
     def _apply_pymetis(self, G: nx.Graph) -> tuple[list[int], list[int]]:
-        import pymetis
-
         nodes = list(G.nodes())
         node_to_idx = {n: i for i, n in enumerate(nodes)}
 
@@ -161,10 +159,9 @@ class LearnedVTreeBuilder:
 
     def _partition_recursively(self, G: nx.Graph) -> int:
         scope_list = list(G.nodes)
-        curr_id = self.allocator.next_id()
         curr_scope = BitSet(scope_list)
         curr_vnode = VNode(scope=curr_scope)
-        self.vt.add_node(curr_id, curr_vnode)
+        curr_id = self.vt.add_node(curr_vnode)
 
         if len(scope_list) == 1:
             return curr_id
@@ -201,7 +198,7 @@ def construct_optimal_md_vtree(
     md_sets: list[set[int]],
     dag: nx.DiGraph | None = None,
     prioritize: str = "hardware",  # or "expressivity"
-) -> MDVTree:
+) -> VTree:
     """
     Builds a VTree that explicitly enforces MD-Set constraints.
     These sets will not be sliced apart during recursive min-cut partitioning,
@@ -215,4 +212,5 @@ def construct_optimal_md_vtree(
     builder = LearnedVTreeBuilder(prioritize=prioritize, md_sets=md_sets)
     vt = builder.build(skeleton)
 
-    return MDVTree.from_vtree(vt, md_sets)
+    vt.compute_md_labeling(md_sets)
+    return vt

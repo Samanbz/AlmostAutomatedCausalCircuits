@@ -21,11 +21,9 @@ from src.symbolic.arithmetic.nodes import (
     LeafNode,
     ProductLeafNode,
     SumNode,
-    UnaryProductNode,
     UniversalSumNode,
 )
 from src.symbolic.base import DirectedAcyclicGraph, Node
-from src.utils.node_allocator import NodeAllocator
 
 
 logger = g_logger.getChild(__name__)
@@ -273,7 +271,6 @@ class CircuitFolder:
     def __init__(self, ac: SymbolicArithmeticCircuit):
         self.ac = ac
         self.folded_circuit = FoldedSymbolicCircuit()
-        self.allocator = NodeAllocator()
 
     def _extract_gaussian_params(
         self, node_ids: List[int]
@@ -412,9 +409,7 @@ class CircuitFolder:
             # All nodes within a layer are the same type — check only the first.
             first = self.ac._nodes[node_layer[0]]
             is_leaf_layer = isinstance(first, LeafNode)
-            is_product_layer = isinstance(
-                first, (HadamardProductNode, KroneckerProductNode, UnaryProductNode)
-            )
+            is_product_layer = isinstance(first, (HadamardProductNode, KroneckerProductNode))
             is_sum_layer = isinstance(first, SumNode)
 
             if is_leaf_layer:
@@ -588,22 +583,21 @@ class CircuitFolder:
             layer.leaf_modes = leaf_modes
             layer.scopes = [self.ac._nodes[nid].var for nid in gaussian_ids]
             layer.md_sets = [getattr(self.ac._nodes[nid], "md_set", None) for nid in gaussian_ids]
-            layer_id = self.allocator.next_id()
-            self.folded_circuit._add_node(layer_id, layer)
+            layer_id = self.folded_circuit._add_node(layer)
             node_to_folded.update({nid: (layer_id, i) for i, nid in enumerate(gaussian_ids)})
 
         if categorical_ids:
             logits = self._extract_categorical_params(categorical_ids)
             layer = FoldedCategoricalInputLayer(categorical_ids, logits)
             layer_id = self.allocator.next_id()
-            self.folded_circuit._add_node(layer_id, layer)
+            layer_id = self.folded_circuit._add_node(layer)
             node_to_folded.update({nid: (layer_id, i) for i, nid in enumerate(categorical_ids)})
 
         if uniform_ids:
             lows, highs = self._extract_uniform_params(uniform_ids)
             layer = FoldedUniformInputLayer(uniform_ids, lows, highs)
             layer_id = self.allocator.next_id()
-            self.folded_circuit._add_node(layer_id, layer)
+            layer_id = self.folded_circuit._add_node(layer)
             node_to_folded.update({nid: (layer_id, i) for i, nid in enumerate(uniform_ids)})
 
     def _fold_product_layer(
@@ -614,13 +608,10 @@ class CircuitFolder:
     ) -> None:
         hadamard_ids = []
         kronecker_ids = []
-        unary_ids = []
 
         for nid in node_layer:
             node = self.ac.get_node_data(nid)
-            if isinstance(node, UnaryProductNode):
-                unary_ids.append(nid)
-            elif isinstance(node, HadamardProductNode):
+            if isinstance(node, HadamardProductNode):
                 hadamard_ids.append(nid)
             elif isinstance(node, KroneckerProductNode):
                 kronecker_ids.append(nid)
@@ -634,9 +625,6 @@ class CircuitFolder:
             self._fold_binary_product(
                 kronecker_ids, node_to_folded, layer_global_offset, is_hadamard=False
             )
-
-        if unary_ids:
-            self._fold_unary_product(unary_ids, node_to_folded, layer_global_offset)
 
     def _fold_binary_product(
         self,
@@ -693,7 +681,7 @@ class CircuitFolder:
                 h_right=h_right,
             )
 
-        self.folded_circuit._add_node(layer_id, layer)
+        layer_id = self.folded_circuit._add_node(layer)
 
         for child_fold_id, idx_list in edge_left.items():
             self.folded_circuit._add_edge(child_fold_id, layer_id, data=("left", idx_list))
@@ -801,12 +789,15 @@ class CircuitFolder:
         layer.md_sets = [getattr(self.ac._nodes[nid], "md_set", None) for nid in sum_node_ids]
 
         first_node = self.ac.get_node_data(sum_node_ids[0])
-        if hasattr(first_node, "weights"):
+        if hasattr(first_node, "log_weights"):
             import torch
-            layer.weights = torch.stack([self.ac.get_node_data(nid).weights for nid in sum_node_ids])
+
+            layer.log_weights = torch.stack(
+                [self.ac.get_node_data(nid).log_weights for nid in sum_node_ids]
+            )
 
         layer_id = self.allocator.next_id()
-        self.folded_circuit._add_node(layer_id, layer)
+        layer_id = self.folded_circuit._add_node(layer)
         for cfid in child_fold_ids:
             self.folded_circuit._add_edge(cfid, layer_id)
         node_to_folded.update({nid: (layer_id, i) for i, nid in enumerate(sum_node_ids)})

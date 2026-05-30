@@ -373,13 +373,13 @@ class TensorizedTucker(TensorizedFusedLayer):
         h_out: int,
         h_left: int,
         h_right: int,
-        weights: torch.Tensor = None,
+        log_weights: torch.Tensor = None,
     ):
         super().__init__(
             num_nodes=num_nodes,
             h_out=h_out,
             h_in=h_left * h_right,
-            weights=weights,
+            log_weights=log_weights,
         )
 
         self.h_left = h_left
@@ -654,7 +654,7 @@ class TensorizedCircuit(CompiledCircuit):
                     fnode.num_nodes,
                     fnode.h_out,
                     fnode.h_child,
-                    weights=getattr(fnode, "weights", None),
+                    log_weights=getattr(fnode, "log_weights", None),
                 )
                 self.layers.append(layer)
 

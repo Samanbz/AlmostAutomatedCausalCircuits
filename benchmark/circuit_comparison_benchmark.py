@@ -8,8 +8,8 @@ from src.compilation.fused_circuit import CircuitFuser
 from src.compilation.monarch_circuit import MonarchCircuit
 from src.compilation.tensorized_circuit import TensorizedCircuit
 from src.construction import (
-    MDCircuitBuilder,
-    MDRegionGraphBuilder,
+    CircuitBuilder,
+    RegionGraphBuilder,
     construct_optimal_md_vtree,
     generate_random_scm,
 )
@@ -50,8 +50,8 @@ def generate_circuit(num_features, h):
     input_dists = {
         v: GaussianDistribution(var=v, mean=0.0, stddev=1.0) for v in range(num_features)
     }
-    region_graph = MDRegionGraphBuilder(md_vtree=md_vtree, input_dists=input_dists).build()
-    spn = MDCircuitBuilder(rg=region_graph, h=h, input_dists=input_dists).build()
+    region_graph = RegionGraphBuilder(md_vtree=md_vtree, input_dists=input_dists).build()
+    spn = CircuitBuilder(rg=region_graph, h=h, input_dists=input_dists).build()
 
     folded = CircuitFolder(spn).build()
     fused = CircuitFuser(folded).build()

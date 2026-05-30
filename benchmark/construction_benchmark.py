@@ -6,8 +6,8 @@ import torch
 from src.compilation.folded_circuit import CircuitFolder
 from src.compilation.fused_circuit import CircuitFuser
 from src.construction import (
-    MDCircuitBuilder,
-    MDRegionGraphBuilder,
+    CircuitBuilder,
+    RegionGraphBuilder,
     construct_optimal_md_vtree,
     generate_random_scm,
 )
@@ -50,14 +50,16 @@ def run_construction_benchmark():
                 v: GaussianDistribution(var=v, mean=0.0, stddev=1.0) for v in range(num_vars)
             }
             t0 = time.time()
-            region_graph = MDRegionGraphBuilder(md_vtree=md_vtree, input_dists=input_dists).build()
+            region_graph = RegionGraphBuilder(md_vtree=md_vtree, input_dists=input_dists).build()
             t1 = time.time()
             rg_time = t1 - t0
 
             for init_w in [False, True]:
                 # 3. Circuit
                 t0 = time.time()
-                spn = MDCircuitBuilder(rg=region_graph, h=h, input_dists=input_dists, initialize_weights=init_w).build()
+                spn = CircuitBuilder(
+                    rg=region_graph, h=h, input_dists=input_dists, initialize_weights=init_w
+                ).build()
                 t1 = time.time()
                 circuit_time = t1 - t0
 

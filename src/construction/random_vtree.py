@@ -1,8 +1,8 @@
 import random
 from typing import Optional, Set
 
-from src.symbolic.vtree import MDVTree, VNode, VTree
-from src.utils import BitSet, NodeAllocator
+from src.symbolic.vtree import VNode, VTree
+from src.utils import BitSet
 
 
 def _get_conj_len(conj_len: Optional[int], max_len: int) -> int:
@@ -34,10 +34,9 @@ def construct_random_vtree(vars: Set[int], conj_len: Optional[int] = None) -> VT
     root_scope = BitSet(ordering)
     root_node = VNode(scope=root_scope)
 
-    vt.add_node(0, root_node)
+    root_id = vt.add_node(root_node)
 
-    allocator = NodeAllocator(start=1)
-    remaining = [(0, root_node, ordering)]
+    remaining = [(root_id, root_node, ordering)]
 
     while remaining:
         curr_id, curr_vnode, curr_scope_ordered = remaining.pop(0)
@@ -51,14 +50,12 @@ def construct_random_vtree(vars: Set[int], conj_len: Optional[int] = None) -> VT
 
         left_scope = BitSet(conj_vars)
         left_vnode = VNode(scope=left_scope)
-        left_id = allocator.next_id()
+        left_id = vt.add_node(left_vnode)
 
         right_scope = BitSet(rest_vars)
         right_vnode = VNode(scope=right_scope)
-        right_id = allocator.next_id()
+        right_id = vt.add_node(right_vnode)
 
-        vt.add_node(left_id, left_vnode)
-        vt.add_node(right_id, right_vnode)
         vt.add_children(curr_id, left_id, right_id)
 
         remaining.append((left_id, left_vnode, conj_vars))
@@ -69,7 +66,7 @@ def construct_random_vtree(vars: Set[int], conj_len: Optional[int] = None) -> VT
 
 def construct_random_md_vtree(
     vars: Set[int], max_subset_size: int, conj_len: Optional[int] = None
-) -> MDVTree:
+) -> VTree:
     """Constructs a random binary variable tree and labels it with Marginally Deterministic sets."""
     base_vtree = construct_random_vtree(vars, conj_len)
 
@@ -90,4 +87,4 @@ def construct_random_md_vtree(
         # Randomly choose one branch to go down
         curr_vid = random.choice(children)
 
-    return MDVTree.from_vtree(base_vtree, md_sets)
+    return VTree.from_vtree(base_vtree, md_sets)
