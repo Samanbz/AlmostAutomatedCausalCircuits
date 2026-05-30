@@ -2,26 +2,27 @@ from typing import Dict, Optional
 
 import torch
 
-from src.construction.region_graph_builder import MDRegionGraphBuilder
+from src.construction.region_graph_builder import RegionGraphBuilder
 from src.logger import logger as g_logger
-from src.symbolic import (
+from src.symbolic.arithmetic import (
     Distribution,
     HadamardProductNode,
     KroneckerProductNode,
-    MDRegionGraph,
-    MDRegionNode,
     SumNode,
     SymbolicArithmeticCircuit,
-    UnaryProductNode,
     UniversalSumNode,
 )
-from src.symbolic.region_graph import MDLayerType
-from src.symbolic.vtree import MDVTree
+from src.symbolic.region_graph import (
+    LayerType,
+    RegionGraph,
+    RegionNode,
+)
+from src.symbolic.vtree import VTree
 from src.utils import BitSet, Support
-from src.utils.node_allocator import NodeAllocator
+from src.utils.node_allocator import IncrementalNodeAllocator
 
 
-logger = g_logger.getChild("MDCircuitBuilder")
+logger = g_logger.getChild("CircuitBuilder")
 
 
 def get_support(scope: BitSet, input_dists: Dict[int, Distribution]) -> Support:
@@ -30,7 +31,7 @@ def get_support(scope: BitSet, input_dists: Dict[int, Distribution]) -> Support:
     return Support(intervals)
 
 
-class MDCircuitBuilder:
+class CircuitBuilder:
     """Build a Marginally-Deterministic arithmetic circuit from a region graph.
 
     Layer types by md-vtree node kind
@@ -57,7 +58,7 @@ class MDCircuitBuilder:
 
     def __init__(
         self,
-        rg: MDRegionGraph,
+        rg: RegionGraph,
         h: int,
         input_dists: Dict[int, Distribution] = None,
         h_max: Optional[int] = None,
@@ -69,35 +70,21 @@ class MDCircuitBuilder:
         self.h_max = h_max if h_max is not None else h
         self.h = h  # backward-compat alias
         self.decay_factor = decay_factor
-        self.node_allocator = NodeAllocator()
+        self.node_allocator = IncrementalNodeAllocator()
         self.input_dists = input_dists
         self.initialize_weights = initialize_weights
 
     def _child_h(self, h_here: int, is_mixing: bool) -> int:
         """Return the h that children of a Hadamard mixing node must produce."""
         if is_mixing:
-            return min(h_here * self.decay_factor, self.h_max)
+            target = h_here * self.decay_factor
+            if target <= self.h_max:
+                return target
+            # If target > h_max, find the largest multiple of h_here <= h_max
+            # to maintain clean block-diagonal structure.
+            best_h = (self.h_max // h_here) * h_here
+            return max(h_here, best_h)
         return self.h_min
-
-    def _handle_unary_partition(
-        self,
-        ac: SymbolicArithmeticCircuit,
-        child_region_id: int,
-        parent_rg_node: MDRegionNode,
-        h_child: int,
-    ) -> int:
-        child_id = self._build_recursive(ac, child_region_id, h_out=h_child)
-        child_node = ac._nodes[child_id]
-        child_supports = child_node.unit_supports
-
-        prod_node = UnaryProductNode(
-            support=parent_rg_node.support, unit_count=h_child, unit_supports=child_supports
-        )
-        prod_id = self.node_allocator.next_id()
-        ac.add_node(prod_id, prod_node)
-        ac.add_edge(prod_id, child_id)
-
-        return prod_id
 
     def _build_recursive(
         self,
@@ -106,7 +93,7 @@ class MDCircuitBuilder:
         h_out: Optional[int] = None,
         parent_rg_id: int = None,
     ) -> int:
-        rg_node: MDRegionNode = self.rg._nodes[rg_id]
+        rg_node: RegionNode = self.rg._nodes[rg_id]
         h_here = h_out if h_out is not None else self.h_min
 
         if not self.rg._adj[rg_id]:  # Leaf region
@@ -119,82 +106,65 @@ class MDCircuitBuilder:
             else:
                 leaf_supports = [rg_node.support] * h_here
 
-            leaf_id = self.node_allocator.next_id()
             cls = type(dist)
             leaf_node = cls.__new__(cls)
             leaf_node.__dict__ = dist.__dict__.copy()
             leaf_node.unit_count = h_here
             leaf_node.unit_supports = leaf_supports
             leaf_node.md_set = rg_node.md_set
-            ac._add_node(leaf_id, leaf_node)
+            leaf_id = ac._add_node(leaf_node)
 
             return leaf_id
 
-        is_mixing = rg_node.layer_type in {MDLayerType.LEFT_MIXING, MDLayerType.RIGHT_MIXING}
-        is_universal = rg_node.layer_type == MDLayerType.UNIVERSAL
+        is_mixing = rg_node.layer_type in {LayerType.LEFT_MIXING, LayerType.RIGHT_MIXING}
+        is_universal = rg_node.layer_type == LayerType.UNIVERSAL
 
         part_id = next(iter(self.rg._adj[rg_id]))
         p_children_dict = self.rg._adj[part_id]
         n_children = len(p_children_dict)
 
-        if n_children == 1:
-            (child_id,) = p_children_dict
-            h_child = self._child_h(h_here, is_mixing)
-            prod_id = self._handle_unary_partition(ac, child_id, rg_node, h_child=h_child)
-            force_dense_sum = False
+        assert n_children == 2, (
+            f"Expected exactly 2 children for partition node {part_id}, got {n_children}"
+        )
+
+        it = iter(p_children_dict)
+        l_region_id = next(it)
+        r_region_id = next(it)
+
+        if is_mixing:
+            h_child = self._child_h(h_here, is_mixing=True)
+            node_type = HadamardProductNode
+            num_units = h_child
         else:
-            it = iter(p_children_dict)
-            l_region_id = next(it)
-            r_region_id = next(it)
+            # Non-mixing (Synthesizing): full Kronecker outer product at h_min.
+            h_child = self.h_min
+            node_type = KroneckerProductNode
+            num_units = h_child * h_child
 
-            if is_mixing:
-                # Hadamard with h-decay: h_child = h_here × decay_factor.
-                # decay_factor product nodes feed each sum node, allowing the
-                # sum to aggregate decay_factor diagonal pairs into one output.
-                # Works regardless of child density: sparse children propagate
-                # their active index through the diagonal product unchanged.
-                h_child = self._child_h(h_here, is_mixing=True)
-                node_type = HadamardProductNode
-                num_units = h_child
-                force_dense_sum = False
-            else:
-                # Non-mixing (Synthesizing): full Kronecker outer product at h_min.
-                h_child = self.h_min
-                node_type = KroneckerProductNode
-                num_units = h_child * h_child
-                force_dense_sum = False
+        l_child_id = self._build_recursive(ac, l_region_id, h_out=h_child, parent_rg_id=rg_id)
+        r_child_id = self._build_recursive(ac, r_region_id, h_out=h_child, parent_rg_id=rg_id)
 
-            l_child_id = self._build_recursive(ac, l_region_id, h_out=h_child, parent_rg_id=rg_id)
-            r_child_id = self._build_recursive(ac, r_region_id, h_out=h_child, parent_rg_id=rg_id)
+        prod_node = node_type(support=rg_node.support, unit_count=num_units)
+        prod_id = ac._add_node(prod_node)
+        ac._add_edge(prod_id, l_child_id)
+        ac._add_edge(prod_id, r_child_id)
 
-            prod_node = node_type(support=rg_node.support, unit_count=num_units)
-            prod_id = self.node_allocator.next_id()
-            ac._add_node(prod_id, prod_node)
-            ac._add_edge(prod_id, l_child_id)
-            ac._add_edge(prod_id, r_child_id)
-
-        sum_id = self.node_allocator.next_id()
-        if is_universal or not rg_node.is_constrained or force_dense_sum:
+        # Ensure h_in is a multiple of h_out for regular SumNode
+        if is_universal or not rg_node.is_constrained:
             sum_node = UniversalSumNode(
                 support=rg_node.support, unit_count=h_here, md_set=rg_node.md_set
             )
             if self.initialize_weights:
-                h_child_actual = (
-                    self._child_h(h_here, is_mixing) if is_mixing else self.h_min * self.h_min
-                )
-                sum_node.weights = torch.rand(h_here, h_child_actual)
+                sum_node.weights = torch.rand(h_here, num_units)
                 sum_node.weights = sum_node.weights / sum_node.weights.sum(dim=-1, keepdim=True)
         else:
             sum_node = SumNode(support=rg_node.support, unit_count=h_here, md_set=rg_node.md_set)
             if self.initialize_weights:
-                h_child_actual = (
-                    self._child_h(h_here, is_mixing) if is_mixing else self.h_min * self.h_min
-                )
-                h_in = h_child_actual // h_here
+                h_in = num_units // h_here
                 sum_node.weights = torch.rand(h_here, h_in)
                 sum_node.weights = sum_node.weights / sum_node.weights.sum(dim=-1, keepdim=True)
 
-        ac._add_node(sum_id, sum_node)
+        sum_id = ac._add_node(sum_node)
         ac._add_edge(sum_id, prod_id)
 
         return sum_id
@@ -206,26 +176,23 @@ class MDCircuitBuilder:
         rg_root = self.rg.get_roots()
         assert len(rg_root) == 1, f"Expected exactly one root region, got {len(rg_root)}"
 
-        root_id = self._build_recursive(circuit, rg_root[0], h_out=None)
-        root_node = circuit.get_node_data(root_id)
-        root_node.unit_count = 1  # Root always outputs a single scalar
-
+        root_id = self._build_recursive(circuit, rg_root[0], h_out=1)
         return circuit
 
 
 def create_md_circuit(
     input_dists: Dict[int, Distribution],
-    md_var_decomp: MDVTree,
+    md_var_decomp: VTree,
     h: int,
     h_max: Optional[int] = None,
     decay_factor: int = 2,
     initialize_weights: bool = False,
 ) -> SymbolicArithmeticCircuit:
     """Creates an MD-Circuit end-to-end."""
-    rg_builder = MDRegionGraphBuilder(input_dists, md_var_decomp)
+    rg_builder = RegionGraphBuilder(input_dists, md_var_decomp)
     rg = rg_builder.build()
 
-    c_builder = MDCircuitBuilder(
+    c_builder = CircuitBuilder(
         rg=rg,
         h=h,
         input_dists=input_dists,
