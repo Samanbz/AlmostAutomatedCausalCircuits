@@ -5,17 +5,14 @@ from .leaf import (
     ConstantLeafNode,
     Distribution,
     GaussianDistribution,
+    GaussianMixture,
     InverseLeafNode,
     LeafNode,
     ProductLeafNode,
-    TruncatedCategoricalDistribution,
-    TruncatedDistribution,
-    TruncatedGaussianDistribution,
-    TruncatedUniformDistribution,
     UniformDistribution,
 )
-from .product import HadamardProductNode, KroneckerProductNode, ProductNode
-from .sum import SumNode, UniversalSumNode
+from .product import KroneckerProductNode, ProductNode
+from .sum import SumNode
 
 
 __all__ = [
@@ -23,21 +20,16 @@ __all__ = [
     "ProductNode",
     "CartesianLeafNode",
     "ConstantLeafNode",
-    "HadamardProductNode",
     "InverseLeafNode",
+    "GaussianMixture",
     "Distribution",
     "GaussianDistribution",
     "CategoricalDistribution",
     "LeafNode",
     "ProductLeafNode",
-    "TruncatedCategoricalDistribution",
-    "TruncatedDistribution",
-    "TruncatedGaussianDistribution",
-    "TruncatedUniformDistribution",
     "UniformDistribution",
     "KroneckerProductNode",
     "LeafNode",
     "ProductLeafNode",
     "SumNode",
-    "UniversalSumNode",
 ]

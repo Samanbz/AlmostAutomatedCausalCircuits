@@ -5,12 +5,10 @@ from src.logger import logger as g_logger
 from src.utils import BitSet, Support
 
 from .nodes import (
-    HadamardProductNode,
     KroneckerProductNode,
     LeafNode,
     ProductNode,
     SumNode,
-    UniversalSumNode,
 )
 
 
@@ -174,18 +172,13 @@ class MarginalDeterminism(Property):
 
         if isinstance(node, LeafNode):
             res = node.unit_supports
-        elif isinstance(node, HadamardProductNode):
-            assert len(child_ids) == 2
-            l_sups = self._get_unit_supports(child_ids[0], circuit)
-            r_sups = self._get_unit_supports(child_ids[1], circuit)
-            res = [l_sups[i].union(r_sups[i]) for i in range(node.unit_count)]
         elif isinstance(node, KroneckerProductNode):
             assert len(child_ids) == 2
             l_sups = self._get_unit_supports(child_ids[0], circuit)
             r_sups = self._get_unit_supports(child_ids[1], circuit)
             res = [ls.union(rs) for ls in l_sups for rs in r_sups]
             assert len(res) == node.unit_count
-        elif isinstance(node, UniversalSumNode):
+        elif isinstance(node, SumNode):
             overall_support = Support()
             for ch_id in child_ids:
                 for sup in self._get_unit_supports(ch_id, circuit):
@@ -217,7 +210,7 @@ class MarginalDeterminism(Property):
 
     def check(self, node_id: int, circuit: "SymbolicArithmeticCircuit") -> bool:
         node = circuit.get_node_data(node_id)
-        if not isinstance(node, SumNode) or isinstance(node, UniversalSumNode):
+        if not isinstance(node, SumNode) or isinstance(node, SumNode):
             return True
 
         # If target scope doesn't intersect node scope, it's trivially deterministic

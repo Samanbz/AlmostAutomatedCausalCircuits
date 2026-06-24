@@ -1,21 +1,11 @@
-"""
-Tensorized Circuit: GPU-optimized nn.Module compiled from a FusedCircuit.
-
-All operations in log-semiring. Forward pass uses a flat unit buffer of shape
-[total_units, B] (units-first, batch-last) for maximally coalesced memory
-access. Each layer has precomputed gather/scatter index tensors registered as
-non-trainable buffers so the forward pass contains only indexed reads/writes
-and no shape arithmetic.
-"""
-
 import math
 from abc import ABC
-from typing import List
+from dataclasses import dataclass
+from typing import List, Tuple
 
 import torch
 import torch.nn as nn
 
-from src.compilation.folded_circuit import FoldedGaussianInputLayer
 from src.compilation.fused_circuit import (
     CPTLayer,
     FusedCircuit,
@@ -27,676 +17,396 @@ from src.compilation.fused_circuit import (
 
 
 class TensorizedGaussianInput(nn.Module):
-    """Truncated Gaussian input layer in log-space.
+    """Stateless truncated Gaussian input layer in log-space."""
 
-    Returns output in [N, h, B] layout (units-first, batch-last) to match
-    the flat buffer's coalesced memory layout.
-    """
+    def __init__(self, scopes: List[int], num_nodes: int, h_out: int):
+        super().__init__()
+        self.scopes = scopes
+        self.num_nodes = num_nodes
+        self.h_out = h_out
 
-    def __init__(
+    def forward(
         self,
+        data: torch.Tensor,
         means: torch.Tensor,
         stds: torch.Tensor,
         lows: torch.Tensor,
         highs: torch.Tensor,
-        scopes: List[int],
-        leaf_modes: torch.Tensor | None = None,
-    ):
-        super().__init__()
-
-        # Add a small amount of random jitter to break symmetry for un-split Gaussians.
-        jitter = torch.randn_like(means) * 0.1
-        means = means + jitter
-
-        self.means = nn.Parameter(means)
-        self.stds = nn.Parameter(stds)
-        self.register_buffer("lows", lows)
-        self.register_buffer("highs", highs)
-
-        signs = torch.ones_like(means)
-        self.register_buffer("signs", signs)
-        self.scopes = scopes
-        self.num_nodes = means.shape[0]
-        self.h_out = means.shape[1]
-
-        # Per-node leaf mode: 0=normal, 1=constant(log1=0), 2=inverse(-log_pdf)
-        if leaf_modes is None:
-            leaf_modes = torch.zeros(self.num_nodes, dtype=torch.long)
-        self.register_buffer("leaf_modes", leaf_modes)
-
-    def forward(self, data: torch.Tensor) -> torch.Tensor:
-        # data: [B, num_features]
-        x_raw = data[:, self.scopes]  # [B, N]
-        x = x_raw.T.unsqueeze(1)  # [N, 1, B]
+        leaf_modes: torch.Tensor,
+    ) -> torch.Tensor:
+        # data: [B, D]
+        x_raw = data[:, self.scopes]
+        x = x_raw.T.unsqueeze(1)  # [num_nodes, 1, B]
         is_nan = torch.isnan(x)
         x_safe = torch.where(is_nan, torch.zeros_like(x), x)
 
-        self._saved_x = x_safe.detach()  # [N, 1, B]
-        self._nan_mask = is_nan.detach()  # [N, 1, B]
+        self._saved_x = x_safe.detach()
+        self._nan_mask = is_nan.detach()
 
-        means = self.means.unsqueeze(-1)  # [N, h, 1]
-        stds = self.stds.unsqueeze(-1)  # [N, h, 1]
+        m_exp = means.unsqueeze(-1)  # [num_nodes, h, 1]
+        s_exp = stds.unsqueeze(-1)
 
-        z = (x_safe - means) / stds  # [N, h, B]
-        log_pdf = -0.5 * math.log(2 * math.pi) - 0.5 * z**2 - torch.log(stds)
+        z = (x_safe - m_exp) / s_exp
+        log_pdf = -0.5 * math.log(2 * math.pi) - 0.5 * z**2 - torch.log(s_exp)
 
         sqrt2 = math.sqrt(2)
-        z_hi = (self.highs.unsqueeze(-1) - means) / (stds * sqrt2)  # [N, h, 1]
-        z_lo = (self.lows.unsqueeze(-1) - means) / (stds * sqrt2)  # [N, h, 1]
+        z_hi = (highs.unsqueeze(-1) - m_exp) / (s_exp * sqrt2)
+        z_lo = (lows.unsqueeze(-1) - m_exp) / (s_exp * sqrt2)
 
         cdf_hi = 0.5 * (1 + torch.erf(z_hi))
         cdf_lo = 0.5 * (1 + torch.erf(z_lo))
-        log_Z = torch.log((cdf_hi - cdf_lo).clamp(min=1e-10))
+        log_Z = torch.log((cdf_hi - cdf_lo).clamp(min=1e-12))
         log_pdf = log_pdf - log_Z
 
-        oob = (x_safe < self.lows.unsqueeze(-1)) | (x_safe > self.highs.unsqueeze(-1))
-        # Use -1e30 rather than finfo.min: two finfo.min values added together in a
-        # Hadamard product overflow float32 to -inf, which then causes NaN via -inf - (-inf).
-        log_zero = -1e30
-        log_pdf = torch.where(oob, torch.full_like(log_pdf, log_zero), log_pdf)
+        # Apply multiplier to density part.
+        # multiplier: 1.0 = Normal, -1.0 = Inverse, 0.0 = Indicator/Marginalized
+        modes = leaf_modes.view(-1, 1, 1)
+        log_pdf = modes * log_pdf
+
+        # Apply OOB mask LAST. This turns mode 0.0 into a Selector/Indicator:
+        # returns 0.0 if in-bounds (selector), -inf if out-of-bounds.
+        oob = (x_safe < lows.unsqueeze(-1)) | (x_safe > highs.unsqueeze(-1))
+        log_pdf = torch.where(oob, torch.full_like(log_pdf, float("-inf")), log_pdf)
+
+        # Handle NaNs from input data (marginalization via data-masking)
         log_pdf = torch.where(is_nan, torch.zeros_like(log_pdf), log_pdf)
 
-        # Apply leaf modes: 0=normal, 1=constant(0), 2=inverse(-log_pdf), 3=indicator
-        if self.leaf_modes.any():
-            modes = self.leaf_modes.view(-1, 1, 1)  # [N, 1, 1]
-            is_constant = modes == 1
-            is_inverse = modes == 2
-            is_indicator = modes == 3
-
-            log_pdf = torch.where(is_constant, torch.zeros_like(log_pdf), log_pdf)
-
-            # Inverse: negate but preserve OOB entries
-            inv_result = -log_pdf
-            inv_result = torch.where(
-                log_pdf < -1e10, torch.full_like(log_pdf, log_zero), inv_result
-            )
-            log_pdf = torch.where(is_inverse, inv_result, log_pdf)
-
-            # Indicator: 0 if in-support, -inf if OOB.
-            # This is the result of Gaussian × InverseGaussian: the density
-            # cancels but the support structure (which bin contains x) is preserved.
-            indicator_result = torch.where(
-                oob, torch.full_like(log_pdf, log_zero), torch.zeros_like(log_pdf)
-            )
-            indicator_result = torch.where(is_nan, torch.zeros_like(log_pdf), indicator_result)
-            log_pdf = torch.where(is_indicator, indicator_result, log_pdf)
-
-        self._saved_log_pdf = log_pdf
-        log_pdf.requires_grad_(True)
-        log_pdf.retain_grad()
+        if log_pdf.requires_grad:
+            log_pdf.retain_grad()
         self._leaf_output = log_pdf
-
-        return log_pdf  # [N, h, B]
-
-    def update_params(self, responsibilities: torch.Tensor) -> None:
-        """Update means, stds and truncation bounds via EM sufficient statistics.
-
-        Args:
-            responsibilities: [N, h, B] — gradient of log-likelihood w.r.t. log_pdf.
-        """
+        return log_pdf
+    def update_params(
+        self,
+        responsibilities: torch.Tensor,
+        means: torch.Tensor,
+        stds: torch.Tensor,
+        lows: torch.Tensor,
+        highs: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         with torch.no_grad():
-            x = self._saved_x  # [N, 1, B]
-            nan_mask = self._nan_mask  # [N, 1, B]
-            N, h = self.means.shape
-
-            resp = responsibilities.clamp(min=0)
-            resp = resp.masked_fill(nan_mask.expand_as(resp), 0)  # [N, h, B]
-
-            is_split = ~((self.lows[:, 0] == float("-inf")) & (self.highs[:, 0] == float("inf")))
+            x = self._saved_x
+            nan_mask = self._nan_mask
+            N, h = means.shape
+            resp = responsibilities.clamp(min=0).masked_fill(
+                nan_mask.expand_as(responsibilities), 0
+            )
+            is_split = ~((lows[:, 0] == float("-inf")) & (highs[:, 0] == float("inf")))
+            new_m, new_s, new_l, new_h = means.clone(), stds.clone(), lows.clone(), highs.clone()
 
             if is_split.any():
-                node_resp = resp.sum(dim=1)  # [N, B] — aggregate over h
-                node_resp = node_resp.masked_fill(nan_mask.squeeze(1), 0)
-                total_md = node_resp.sum(dim=-1)  # [N]
+                node_resp = resp.sum(dim=1).masked_fill(nan_mask.squeeze(1), 0)
+                total_md = node_resp.sum(dim=-1)
                 valid_md = total_md > 1e-5
+                x_flat = x.squeeze(1)
+                wx_md = (node_resp * x_flat).sum(dim=-1)
+                wx2_md = (node_resp * x_flat**2).sum(dim=-1)
+                m_md = wx_md / total_md.clamp(min=1e-15)
+                v_md = wx2_md / total_md.clamp(min=1e-15) - m_md**2
+                s_md = torch.sqrt(v_md.clamp(min=1e-5))
 
-                x_flat = x.squeeze(1)  # [N, B]
-                weighted_x = (node_resp * x_flat).sum(dim=-1)  # [N]
-                weighted_x2 = (node_resp * x_flat**2).sum(dim=-1)  # [N]
+                # Apply MD updates only to split nodes
+                md_mask = is_split & valid_md
+                new_m[md_mask] = m_md[md_mask].unsqueeze(-1)
+                new_s[md_mask] = s_md[md_mask].unsqueeze(-1)
 
-                new_mean_md = weighted_x / total_md.clamp(min=1e-15)
-                new_var_md = weighted_x2 / total_md.clamp(min=1e-15) - new_mean_md**2
-                new_std_md = torch.sqrt(new_var_md.clamp(min=1e-5))
+                probs = torch.linspace(0, 1, h + 1, device=means.device)
+                zq = torch.erfinv(2 * probs - 1) * math.sqrt(2)
 
-                probs = torch.linspace(0, 1, h + 1, device=self.means.device)
-                z_quantiles = torch.erfinv(2 * probs - 1) * math.sqrt(2)
-
-                new_lows = self.lows.clone()
-                new_highs = self.highs.clone()
-
-                m_expanded = new_mean_md.unsqueeze(-1).expand(N, h)
-                s_expanded = new_std_md.unsqueeze(-1).expand(N, h)
-                v_expanded_md = valid_md.unsqueeze(-1).expand(N, h)
-
-                for i in range(N):
-                    if is_split[i] and valid_md[i]:
-                        for j in range(h):
-                            new_lows[i, j] = new_mean_md[i] + new_std_md[i] * z_quantiles[j]
-                            new_highs[i, j] = new_mean_md[i] + new_std_md[i] * z_quantiles[j + 1]
-
-                mask_md = is_split.unsqueeze(-1).expand(N, h) & v_expanded_md
-                self.means.data.copy_(torch.where(mask_md, m_expanded, self.means))
-                self.stds.data.copy_(torch.where(mask_md, s_expanded, self.stds))
-                self.lows.data.copy_(torch.where(mask_md, new_lows, self.lows))
-                self.highs.data.copy_(torch.where(mask_md, new_highs, self.highs))
+                # Update boundaries for split nodes
+                md_indices = torch.where(md_mask)[0]
+                for i in md_indices:
+                    for j in range(h):
+                        new_l[i, j] = m_md[i] + s_md[i] * zq[j]
+                        new_h[i, j] = m_md[i] + s_md[i] * zq[j + 1]
 
             if (~is_split).any():
-                total_std = resp.sum(dim=-1)  # [N, h] — sum over B
-                valid_std = total_std > 1e-5
+                total_s = resp.sum(dim=-1)
+                valid_s = total_s > 1e-5
+                wx_s = (resp * x).sum(dim=-1)
+                wx2_s = (resp * x**2).sum(dim=-1)
+                m_s = wx_s / total_s.clamp(min=1e-15)
+                v_s = wx2_s / total_s.clamp(min=1e-15) - m_s**2
+                s_s = torch.sqrt(v_s.clamp(min=1e-5))
 
-                weighted_x_std = (resp * x).sum(dim=-1)  # [N, h]
-                weighted_x2_std = (resp * x**2).sum(dim=-1)  # [N, h]
-
-                new_mean_std = weighted_x_std / total_std.clamp(min=1e-15)
-                new_var_std = weighted_x2_std / total_std.clamp(min=1e-15) - new_mean_std**2
-                new_std_std = torch.sqrt(new_var_std.clamp(min=1e-5))
-
-                mask_std = (~is_split).unsqueeze(-1).expand(N, h) & valid_std
-                self.means.data.copy_(torch.where(mask_std, new_mean_std, self.means))
-                self.stds.data.copy_(torch.where(mask_std, new_std_std, self.stds))
+                # Update means/stds for non-split nodes
+                s_mask = (~is_split).unsqueeze(-1).expand(N, h) & valid_s
+                new_m = torch.where(s_mask, m_s, new_m)
+                new_s = torch.where(s_mask, s_s, new_s)
+            return new_m, new_s, new_l, new_h
 
 
 class TensorizedFusedLayer(ABC, nn.Module):
-    weights: torch.Tensor
-    log_coeff: torch.Tensor
-    left_idx: torch.Tensor
-    right_idx: torch.Tensor
-    num_nodes: int
-    h_out: int
-    h_in: int
-
-    gather_L: torch.Tensor
-    gather_R: torch.Tensor
-    scatter_idx: torch.Tensor
-
-    def __init__(
-        self,
-        num_nodes: int,
-        h_out: int,
-        h_in: int,
-    ):
+    def __init__(self, num_nodes: int, h_out: int, h_in: int):
         super().__init__()
-
         self.num_nodes = num_nodes
         self.h_out = h_out
         self.h_in = h_in
 
-        weights = torch.rand(num_nodes, h_out, h_in)
-        weights = weights / weights.sum(dim=-1, keepdim=True)
-        self.log_w = nn.Parameter(torch.log(weights.clamp(min=1e-12)))
-        self.register_buffer("log_coeff", torch.zeros(num_nodes, h_out))
-
 
 class TensorizedSparseKronecker(TensorizedFusedLayer):
-    """Block-diagonal Kronecker contraction in log-semiring.
-
-    Reads children via precomputed flat gather indices. All computation in
-    [N, h, B] layout (units-first) for coalesced memory access.
-    """
-
-    def __init__(
-        self,
-        num_nodes: int,
-        h_out: int,
-        h_in: int,
-        h_left: int,
-        h_right: int,
-    ):
-        super().__init__(
-            num_nodes=num_nodes,
-            h_out=h_out,
-            h_in=h_in,
-        )
-
-        self.h_left = h_left
-        self.h_right = h_right
-
-    def forward(self, buf: torch.Tensor) -> torch.Tensor:
-        # buf: [total_units, B]
+    def forward(self, buf, log_w, gather_L, gather_R):
         B = buf.shape[1]
         N = self.num_nodes
-
-        L = buf[self.gather_L].reshape(N, self.h_left, B)  # [N, h_left, B]
-        R = buf[self.gather_R].reshape(N, self.h_right, B)  # [N, h_right, B]
-
-        # Log-domain outer product → [N, h_out, h_in, B]
-        S = (L.unsqueeze(2) + R.unsqueeze(1)).reshape(N, self.h_out, self.h_in, B)
-
-        m = S.max(dim=2, keepdim=True)[0]  # [N, h_out, 1, B]
-        exp_S = torch.exp(S - m)  # [N, h_out, h_in, B]
-
-        # Block-diagonal weight dot products via bmm: [N*h_out, 1, h_in] @ [N*h_out, h_in, B]
-        exp_W = torch.exp(self.log_w).reshape(N * self.h_out, 1, self.h_in)
-        exp_S_flat = exp_S.reshape(N * self.h_out, self.h_in, B)
-        out = torch.bmm(exp_W, exp_S_flat).reshape(N, self.h_out, B)
-
-        result = torch.log(out.clamp(min=1e-20)) + m.squeeze(2)  # [N, h_out, B]
-        return result + self.log_coeff.unsqueeze(-1)  # apply per-unit coefficient
+        h_o = log_w.shape[1]
+        h_i = log_w.shape[2]
+        h_l = gather_L.numel() // N
+        h_r = gather_R.numel() // N
+        L = buf[gather_L].reshape(N, h_l, B)
+        R = buf[gather_R].reshape(N, h_r, B)
+        S = (L.unsqueeze(2) + R.unsqueeze(1)).reshape(N, h_o, h_i, B)
+        m = S.max(dim=2, keepdim=True)[0]
+        m_safe = m.masked_fill(m == float("-inf"), 0.0)
+        exp_S = torch.exp(S - m_safe)
+        exp_W = torch.exp(log_w).reshape(N * h_o, 1, h_i)
+        out = torch.bmm(exp_W, exp_S.reshape(N * h_o, h_i, B)).reshape(N, h_o, B)
+        return torch.log(out.clamp(min=1e-20)) + m.squeeze(2)
 
 
 class TensorizedSparseHadamard(TensorizedFusedLayer):
-    """Diagonal mixing contraction in log-semiring.
-
-    Reads children via precomputed flat gather indices. All computation in
-    [N, h, B] layout (units-first) for coalesced memory access.
-    """
-
-    def __init__(
-        self,
-        num_nodes: int,
-        h_out: int,
-        h_in: int,
-        h_child: int,
-    ):
-        super().__init__(
-            num_nodes=num_nodes,
-            h_out=h_out,
-            h_in=h_in,
-        )
-
-        self.h_child = h_child
-
-    def forward(self, buf: torch.Tensor) -> torch.Tensor:
-        # buf: [total_units, B]
+    def forward(self, buf, log_w, gather_L, gather_R):
         B = buf.shape[1]
         N = self.num_nodes
-
-        # Diagonal pairing: same index k from each child, reshaped into [h_out, h_in] blocks
-        L = buf[self.gather_L].reshape(N, self.h_out, self.h_in, B)
-        R = buf[self.gather_R].reshape(N, self.h_out, self.h_in, B)
-
-        S = L + R  # [N, h_out, h_in, B]
-
-        m = S.max(dim=2, keepdim=True)[0]  # [N, h_out, 1, B]
-        exp_S = torch.exp(S - m)  # [N, h_out, h_in, B]
-
-        exp_W = torch.exp(self.log_w).reshape(N * self.h_out, 1, self.h_in)
-        exp_S_flat = exp_S.reshape(N * self.h_out, self.h_in, B)
-        out = torch.bmm(exp_W, exp_S_flat).reshape(N, self.h_out, B)
-
-        result = torch.log(out.clamp(min=1e-20)) + m.squeeze(2)  # [N, h_out, B]
-        return result + self.log_coeff.unsqueeze(-1)  # apply per-unit coefficient
+        h_o = log_w.shape[1]
+        h_i = log_w.shape[2]
+        L = buf[gather_L].reshape(N, h_o, h_i, B)
+        R = buf[gather_R].reshape(N, h_o, h_i, B)
+        S = L + R
+        m = S.max(dim=2, keepdim=True)[0]
+        m_safe = m.masked_fill(m == float("-inf"), 0.0)
+        exp_S = torch.exp(S - m_safe)
+        exp_W = torch.exp(log_w).reshape(N * h_o, 1, h_i)
+        out = torch.bmm(exp_W, exp_S.reshape(N * h_o, h_i, B)).reshape(N, h_o, B)
+        return torch.log(out.clamp(min=1e-20)) + m.squeeze(2)
 
 
 class TensorizedCPT(TensorizedFusedLayer):
-    """Dense Hadamard-product contraction in log-semiring (Candecomp-Transposed).
-
-    Like SparseHadamard but with dense (non-partitioned) weights: each output
-    unit sums over ALL h_child Hadamard product units.  Structurally identical
-    to Tucker but the product is Hadamard (L[k]+R[k]) rather than Kronecker
-    (L[i]+R[j] for all i,j).
-    """
-
-    def __init__(
-        self,
-        num_nodes: int,
-        h_out: int,
-        h_child: int,
-    ):
-        super().__init__(
-            num_nodes=num_nodes,
-            h_out=h_out,
-            h_in=h_child,  # dense: all h_child product units
-        )
-        self.h_child = h_child
-
-    def forward(self, buf: torch.Tensor) -> torch.Tensor:
+    def forward(self, buf, log_w, gather_L, gather_R):
         B = buf.shape[1]
         N = self.num_nodes
-
-        # Hadamard product: diagonal pairing L[k] + R[k]
-        L = buf[self.gather_L].reshape(N, self.h_child, B)  # [N, h_child, B]
-        R = buf[self.gather_R].reshape(N, self.h_child, B)  # [N, h_child, B]
-        S = L + R  # [N, h_child, B]
-
-        m = S.max(dim=1, keepdim=True)[0]  # [N, 1, B]
-        exp_S = torch.exp(S - m)  # [N, h_child, B]
-
-        # Dense weight contraction: [N, h_out, h_child] @ [N, h_child, B]
-        exp_W = torch.exp(self.log_w)
-        out = torch.bmm(exp_W, exp_S)  # [N, h_out, B]
-
-        result = torch.log(out.clamp(min=1e-20)) + m  # [N, h_out, B]
-        return result + self.log_coeff.unsqueeze(-1)
+        h_c = gather_L.numel() // N
+        L = buf[gather_L].reshape(N, h_c, B)
+        R = buf[gather_R].reshape(N, h_c, B)
+        S = L + R
+        m = S.max(dim=1, keepdim=True)[0]
+        m_safe = m.masked_fill(m == float("-inf"), 0.0)
+        exp_S = torch.exp(S - m_safe)
+        out = torch.bmm(torch.exp(log_w), exp_S)
+        return torch.log(out.clamp(min=1e-20)) + m
 
 
 class TensorizedTucker(TensorizedFusedLayer):
-    """Dense Kronecker-product contraction in log-semiring (Universal Layer).
-
-    Reads children via precomputed flat gather indices. All computation in
-    [N, h, B] layout (units-first) for coalesced memory access.
-    """
-
-    def __init__(
-        self,
-        num_nodes: int,
-        h_out: int,
-        h_left: int,
-        h_right: int,
-        log_weights: torch.Tensor = None,
-    ):
-        super().__init__(
-            num_nodes=num_nodes,
-            h_out=h_out,
-            h_in=h_left * h_right,
-            log_weights=log_weights,
-        )
-
-        self.h_left = h_left
-        self.h_right = h_right
-        self.h_child = h_left * h_right
-
-    def forward(self, buf: torch.Tensor) -> torch.Tensor:
-        # buf: [total_units, B]
+    def forward(self, buf, log_w, gather_L, gather_R):
         B = buf.shape[1]
         N = self.num_nodes
+        h_l = gather_L.numel() // N
+        h_r = gather_R.numel() // N
+        L = buf[gather_L].reshape(N, h_l, B)
+        R = buf[gather_R].reshape(N, h_r, B)
+        S = (L.unsqueeze(2) + R.unsqueeze(1)).reshape(N, h_l * h_r, B)
+        m = S.max(dim=1, keepdim=True)[0]
+        m_safe = m.masked_fill(m == float("-inf"), 0.0)
+        exp_S = torch.exp(S - m_safe)
+        out = torch.bmm(torch.exp(log_w), exp_S)
+        return torch.log(out.clamp(min=1e-20)) + m
 
-        L = buf[self.gather_L].reshape(N, self.h_left, B)  # [N, h_left, B]
-        R = buf[self.gather_R].reshape(N, self.h_right, B)  # [N, h_right, B]
 
-        # Log-domain outer product → [N, h_child, B]
-        S = (L.unsqueeze(2) + R.unsqueeze(1)).reshape(N, self.h_child, B)
+@dataclass
+class InputLayerState:
+    modes: torch.Tensor  # [num_nodes] multiplier tensor
+    scopes: torch.Tensor  # [num_nodes]
+    means: torch.Tensor  # [num_nodes, h]
+    stds: torch.Tensor  # [num_nodes, h]
+    lows: torch.Tensor  # [num_nodes, h]
+    highs: torch.Tensor  # [num_nodes, h]
+    scatter: torch.Tensor  # [num_nodes * h_out]
 
-        m = S.max(dim=1, keepdim=True)[0]  # [N, 1, B]
-        exp_S = torch.exp(S - m)  # [N, h_child, B]
 
-        # Dense weight contraction: [N, h_out, h_child] @ [N, h_child, B] → [N, h_out, B]
-        exp_W = torch.exp(self.log_w)
-        out = torch.bmm(exp_W, exp_S)  # [N, h_out, B]
+@dataclass
+class SumLayerState:
+    weights: torch.Tensor  # [N, h_out, h_in]
+    gather_L: torch.Tensor  # [N * h_in]
+    gather_R: torch.Tensor  # [N * h_in]
+    scatter: torch.Tensor  # [N * h_out]
 
-        result = torch.log(out.clamp(min=1e-20)) + m  # [N, h_out, B]
-        return result + self.log_coeff.unsqueeze(-1)  # apply per-unit coefficient
+
+@dataclass
+class CircuitState:
+    input_states: List[InputLayerState]
+    sum_states: List[SumLayerState]
 
 
 class CompiledCircuit(nn.Module):
-    """Base class for compiled circuits. Subclasses only override layer creation."""
-
     def __init__(self):
         super().__init__()
         self.input_layers = nn.ModuleList()
         self.layers = nn.ModuleList()
+        self.params = nn.ParameterDict()
         self.max_var_index = 0
-        # Per-node variable-scope sets, populated by subclass __init__.
-        self.node_scopes: List[set] = []
-        # Per-node marginal determinism sets (BitSet or None), populated by subclass __init__.
-        self.node_md_sets: list = []
+        self._node_flat_offsets = []
+        self._layer_start_offsets = []
+        self._layer_h_out = []
+        self._total_units = 0
 
-        # Flat buffer tracking — populated by _register_input_flat / _register_layer_flat.
-        self._node_flat_offsets: List[int] = []  # flat unit start for each logical node
-        self._total_units: int = 0
-
-    # ------------------------------------------------------------------
-    # Flat buffer helpers — called once per layer during __init__
-    # ------------------------------------------------------------------
-
-    def _register_input_flat(self, layer: nn.Module, num_nodes: int, h_out: int) -> None:
-        """Register scatter index on an input layer and update flat buffer tracking."""
-        write_start = self._total_units
-        scatter = (
-            torch.arange(num_nodes * h_out, dtype=torch.long) + write_start
-        )  # [N*h_out] — contiguous block
-        layer.register_buffer("scatter_idx", scatter)
+    def _register_input_flat(self, layer_idx, num_nodes, h_out):
+        self._layer_start_offsets.append(self._total_units)
+        self._layer_h_out.append(h_out)
+        scatter = torch.arange(num_nodes * h_out, dtype=torch.long) + self._total_units
+        self.register_buffer(f"input_{layer_idx}_scatter", scatter)
         for i in range(num_nodes):
-            self._node_flat_offsets.append(write_start + i * h_out)
+            self._node_flat_offsets.append(self._total_units + i * h_out)
         self._total_units += num_nodes * h_out
 
-    def _register_layer_flat(
-        self,
-        layer: nn.Module,
-        left_idx: torch.Tensor,
-        right_idx: torch.Tensor,
-        num_nodes: int,
-        h_left: int,
-        h_right: int,
-        h_out: int,
-    ) -> None:
-        """Register gather/scatter indices on an internal layer and update flat buffer tracking."""
-        write_start = self._total_units
+    def _register_layer_flat(self, layer_idx, left_idx, right_idx, num_nodes, h_l, h_r, h_out):
+        self._layer_start_offsets.append(self._total_units)
+        self._layer_h_out.append(h_out)
         offsets = torch.tensor(self._node_flat_offsets, dtype=torch.long)
-
-        # Gather indices: for each child node, read h contiguous units starting at its offset.
-        lo = offsets[left_idx]  # [N] — flat start of each left child
-        ro = offsets[right_idx]  # [N] — flat start of each right child
-
-        gather_L = (lo.unsqueeze(1) + torch.arange(h_left)).reshape(-1)  # [N*h_left]
-        gather_R = (ro.unsqueeze(1) + torch.arange(h_right)).reshape(-1)  # [N*h_right]
-
-        scatter = torch.arange(num_nodes * h_out, dtype=torch.long) + write_start  # [N*h_out]
-
-        layer.register_buffer("gather_L", gather_L)
-        layer.register_buffer("gather_R", gather_R)
-        layer.register_buffer("scatter_idx", scatter)
-
+        lo = offsets[left_idx]
+        ro = offsets[right_idx]
+        gather_L = (lo.unsqueeze(1) + torch.arange(h_l)).reshape(-1)
+        gather_R = (ro.unsqueeze(1) + torch.arange(h_r)).reshape(-1)
+        scatter = torch.arange(num_nodes * h_out, dtype=torch.long) + self._total_units
+        self.register_buffer(f"layer_{layer_idx}_gather_L", gather_L)
+        self.register_buffer(f"layer_{layer_idx}_gather_R", gather_R)
+        self.register_buffer(f"layer_{layer_idx}_scatter", scatter)
         for i in range(num_nodes):
-            self._node_flat_offsets.append(write_start + i * h_out)
+            self._node_flat_offsets.append(self._total_units + i * h_out)
         self._total_units += num_nodes * h_out
 
-    # ------------------------------------------------------------------
-    # Forward pass
-    # ------------------------------------------------------------------
-
-    def _compile_input(self, fnode: FusedInputLayer) -> nn.Module:
-        fl = fnode.folded_layer
-        if isinstance(fl, FoldedGaussianInputLayer):
-            scopes = fnode.scopes if fnode.scopes else list(range(fl.num_nodes))
-            self.max_var_index = max(self.max_var_index, max(scopes) if scopes else 0)
-            leaf_modes = getattr(fl, "leaf_modes", None)
-            return TensorizedGaussianInput(
-                fl.means.clone(),
-                fl.stddevs.clone(),
-                fl.lows.clone(),
-                fl.highs.clone(),
-                scopes,
-                leaf_modes=leaf_modes.clone() if leaf_modes is not None else None,
-            )
-        raise NotImplementedError(f"Input layer type {type(fl).__name__} not yet compiled")
-
-    def forward(self, data: torch.Tensor) -> torch.Tensor:
-        data = self._pad(data)
+    def forward(self, data, state: CircuitState = None):
         B = data.shape[0]
+        device = next(self.parameters()).device
+        data = data.to(device)
+        buf = torch.full((self._total_units, B), -1e20, device=device, dtype=data.dtype)
 
-        buf = torch.full((self._total_units, B), -1e20, device=data.device, dtype=data.dtype)
+        if state is None:
+            for i, il in enumerate(self.input_layers):
+                m = self.params[f"input_{i}_means"]
+                s = self.params[f"input_{i}_stds"]
+                l = getattr(self, f"input_{i}_lows")
+                h = getattr(self, f"input_{i}_highs")
+                sc = getattr(self, f"input_{i}_scatter")
+                modes = getattr(self, f"input_{i}_modes")
+                buf[sc] = il(data, m, s, l, h, modes).reshape(-1, B)
 
-        for il in self.input_layers:
-            out = il(data)  # [N, h, B]
-            buf[il.scatter_idx] = out.reshape(-1, B)
+            for i, layer in enumerate(self.layers):
+                w = self.params[f"layer_{i}_weights"]
+                gL = getattr(self, f"layer_{i}_gather_L")
+                gR = getattr(self, f"layer_{i}_gather_R")
+                sc = getattr(self, f"layer_{i}_scatter")
+                buf[sc] = layer(buf, w, gL, gR).reshape(-1, B)
+        else:
+            for i, il in enumerate(self.input_layers):
+                s = state.input_states[i]
+                buf[s.scatter] = il(data, s.means, s.stds, s.lows, s.highs, s.modes).reshape(-1, B)
 
-        for layer in self.layers:
-            out = layer(buf)  # [N, h_out, B]
-            buf[layer.scatter_idx] = out.reshape(-1, B)
+            for i, layer in enumerate(self.layers):
+                s = state.sum_states[i]
+                buf[s.scatter] = layer(buf, s.weights, s.gather_L, s.gather_R).reshape(-1, B)
 
-        return buf[self._node_flat_offsets[-1]]  # [B]
+        return buf[self._node_flat_offsets[-1]]
 
-    def forward_buffer(self, data: torch.Tensor) -> torch.Tensor:
-        """Forward pass that returns the full flat buffer (per-unit values at every node).
-
-        Used by circuit-algebraic operations (e.g., conditional) that need
-        intermediate per-unit values for normalization corrections.
-        """
-        data = self._pad(data)
-        B = data.shape[0]
-
-        buf = torch.full((self._total_units, B), -1e20, device=data.device, dtype=data.dtype)
-
-        for il in self.input_layers:
-            out = il(data)  # [N, h, B]
-            buf[il.scatter_idx] = out.reshape(-1, B)
-
-        for layer in self.layers:
-            out = layer(buf)  # [N, h_out, B]
-            buf[layer.scatter_idx] = out.reshape(-1, B)
-
-        return buf
-
-    def _pad(self, data: torch.Tensor) -> torch.Tensor:
-        if data.shape[1] <= self.max_var_index:
-            pad = torch.full(
-                (data.shape[0], self.max_var_index + 1 - data.shape[1]),
-                float("nan"),
-                device=data.device,
-                dtype=data.dtype,
-            )
-            return torch.cat([data, pad], dim=1)
-        return data
-
-    def em_step(self, data: torch.Tensor, step_size: float = 1.0, smoothing: float = 1e-6) -> float:
-        """Executes one online/mini-batch EM step.
-
-        Args:
-            data: batch of observations.
-            step_size: blend factor (1.0 = full replacement, <1.0 = online EM).
-            smoothing: Laplace smoothing to prevent dead paths.
-        """
+    def em_step(self, data, step_size=1.0, smoothing=1e-6):
         self.train()
+        device = next(self.parameters()).device
+        data = data.to(device)
         log_probs = self.forward(data)
-        mean_ll = log_probs.mean().item()
-
         loss = log_probs.sum()
         loss.backward()
 
-        for il in self.input_layers:
+        for i, il in enumerate(self.input_layers):
             if hasattr(il, "_leaf_output") and il._leaf_output.grad is not None:
-                il.update_params(il._leaf_output.grad)
+                m, s = self.params[f"input_{i}_means"], self.params[f"input_{i}_stds"]
+                l, h = getattr(self, f"input_{i}_lows"), getattr(self, f"input_{i}_highs")
+                nm, ns, nl, nh = il.update_params(il._leaf_output.grad, m, s, l, h)
 
-        for layer in self.layers:
-            if not hasattr(layer, "log_w") or layer.log_w.grad is None:
-                continue
-
-            grad_clean = layer.log_w.grad.nan_to_num(0.0).clamp(min=0.0)
-            batch_counts = grad_clean + smoothing
-            batch_probs = batch_counts / batch_counts.sum(dim=-1, keepdim=True)
-
-            current_probs = torch.exp(layer.log_w.data)
-            new_probs = (1.0 - step_size) * current_probs + step_size * batch_probs
-            layer.log_w.data.copy_(torch.log(new_probs.clamp(min=1e-12)))
-            layer.log_w.grad.zero_()
-
+                self.params[f"input_{i}_means"].data.copy_(nm)
+                self.params[f"input_{i}_stds"].data.copy_(ns)
+                getattr(self, f"input_{i}_lows").copy_(nl)
+                getattr(self, f"input_{i}_highs").copy_(nh)
+        for i in range(len(self.layers)):
+            w = self.params[f"layer_{i}_weights"]
+            if w.grad is not None:
+                gc = w.grad.nan_to_num(0.0).clamp(min=0.0)
+                bc = gc + smoothing
+                bp = bc / bc.sum(dim=-1, keepdim=True)
+                nw = (1.0 - step_size) * torch.exp(w.data) + step_size * bp
+                w.data.copy_(torch.log(nw.clamp(min=1e-12)))
+                w.grad.zero_()
         self.zero_grad()
-        return mean_ll
+        return log_probs.mean().item()
 
 
 class TensorizedCircuit(CompiledCircuit):
-    """Dense compiled circuit from a FusedCircuit."""
-
     def __init__(self, fused: FusedCircuit):
         super().__init__()
-
         for fid in fused.topological_sort():
-            fnode = fused.get_node_data(fid)
-
-            if isinstance(fnode, FusedInputLayer):
-                layer = self._compile_input(fnode)
-                self.input_layers.append(layer)
-
-                scopes_list = fnode.scopes if fnode.scopes else list(range(layer.num_nodes))
-                fnode_md_sets = getattr(fnode, "md_sets", None)
-                for i, var_idx in enumerate(scopes_list):
-                    self.node_scopes.append({var_idx})
-                    self.node_md_sets.append(fnode_md_sets[i] if fnode_md_sets else None)
-
-                self._register_input_flat(layer, layer.num_nodes, layer.h_out)
-
-            elif isinstance(fnode, SparseKroneckerLayer):
-                layer = TensorizedSparseKronecker(
-                    fnode.num_nodes,
-                    fnode.h_out,
-                    fnode.h_in,
-                    fnode.h_left,
-                    fnode.h_right,
-                )
-                self.layers.append(layer)
-
-                fnode_md_sets = getattr(fnode, "md_sets", None)
-                for i in range(fnode.num_nodes):
-                    l_idx = fnode.left_indices[i].item()
-                    r_idx = fnode.right_indices[i].item()
-                    self.node_scopes.append(self.node_scopes[l_idx] | self.node_scopes[r_idx])
-                    self.node_md_sets.append(fnode_md_sets[i] if fnode_md_sets else None)
-
+            fn = fused.get_node_data(fid)
+            if isinstance(fn, FusedInputLayer):
+                l_idx = len(self.input_layers)
+                fl = fn.folded_layer
+                sc = fn.scopes if fn.scopes else list(range(fl.num_nodes))
+                self.max_var_index = max(self.max_var_index, max(sc) if sc else 0)
+                il = TensorizedGaussianInput(sc, fl.num_nodes, fl.h_out)
+                self.input_layers.append(il)
+                self.params[f"input_{l_idx}_means"] = nn.Parameter(fl.means.clone())
+                self.params[f"input_{l_idx}_stds"] = nn.Parameter(fl.stddevs.clone())
+                self.register_buffer(f"input_{l_idx}_lows", fl.lows.clone())
+                self.register_buffer(f"input_{l_idx}_highs", fl.highs.clone())
+                mo = getattr(fl, "leaf_modes", torch.ones(fl.num_nodes, dtype=torch.float32))
+                self.register_buffer(f"input_{l_idx}_modes", mo.clone().float())
+                self._register_input_flat(l_idx, fl.num_nodes, fl.h_out)
+            else:
+                l_idx = len(self.layers)
+                if isinstance(fn, SparseKroneckerLayer):
+                    l = TensorizedSparseKronecker(fn.num_nodes, fn.h_out, fn.h_in)
+                    hl, hr = fn.h_left, fn.h_right
+                elif isinstance(fn, SparseHadamardLayer):
+                    l = TensorizedSparseHadamard(fn.num_nodes, fn.h_out, fn.h_in)
+                    hl, hr = fn.h_child, fn.h_child
+                elif isinstance(fn, CPTLayer):
+                    l = TensorizedCPT(fn.num_nodes, fn.h_out, fn.h_child)
+                    hl, hr = fn.h_child, fn.h_child
+                elif isinstance(fn, TuckerLayer):
+                    l = TensorizedTucker(fn.num_nodes, fn.h_out, fn.h_left * fn.h_right)
+                    hl, hr = fn.h_left, fn.h_right
+                else:
+                    raise ValueError
+                self.layers.append(l)
+                if hasattr(fn, "log_weights") and fn.log_weights is not None:
+                    w = torch.log(fn.log_weights.clamp(min=1e-12))
+                else:
+                    w = torch.rand(fn.num_nodes, fn.h_out, l.h_in)
+                    w = w / w.sum(dim=-1, keepdim=True)
+                    w = torch.log(w.clamp(min=1e-12))
+                self.params[f"layer_{l_idx}_weights"] = nn.Parameter(w)
                 self._register_layer_flat(
-                    layer,
-                    fnode.left_indices,
-                    fnode.right_indices,
-                    fnode.num_nodes,
-                    fnode.h_left,
-                    fnode.h_right,
-                    fnode.h_out,
+                    l_idx, fn.left_indices, fn.right_indices, fn.num_nodes, hl, hr, fn.h_out
                 )
 
-            elif isinstance(fnode, SparseHadamardLayer):
-                layer = TensorizedSparseHadamard(
-                    fnode.num_nodes,
-                    fnode.h_out,
-                    fnode.h_in,
-                    fnode.h_child,
+    def get_base_state(self) -> CircuitState:
+        """Return a structured state cloned from the circuit's current parameters."""
+        input_states = []
+        for i, il in enumerate(self.input_layers):
+            input_states.append(
+                InputLayerState(
+                    modes=getattr(self, f"input_{i}_modes").clone(),
+                    scopes=torch.tensor(il.scopes, dtype=torch.long),
+                    means=self.params[f"input_{i}_means"].clone(),
+                    stds=self.params[f"input_{i}_stds"].clone(),
+                    lows=getattr(self, f"input_{i}_lows").clone(),
+                    highs=getattr(self, f"input_{i}_highs").clone(),
+                    scatter=getattr(self, f"input_{i}_scatter").clone(),
                 )
-                self.layers.append(layer)
+            )
 
-                fnode_md_sets = getattr(fnode, "md_sets", None)
-                for i in range(fnode.num_nodes):
-                    l_idx = fnode.left_indices[i].item()
-                    r_idx = fnode.right_indices[i].item()
-                    self.node_scopes.append(self.node_scopes[l_idx] | self.node_scopes[r_idx])
-                    self.node_md_sets.append(fnode_md_sets[i] if fnode_md_sets else None)
-
-                self._register_layer_flat(
-                    layer,
-                    fnode.left_indices,
-                    fnode.right_indices,
-                    fnode.num_nodes,
-                    fnode.h_child,
-                    fnode.h_child,
-                    fnode.h_out,
+        sum_states = []
+        for i, l in enumerate(self.layers):
+            sum_states.append(
+                SumLayerState(
+                    weights=self.params[f"layer_{i}_weights"].clone(),
+                    gather_L=getattr(self, f"layer_{i}_gather_L").clone(),
+                    gather_R=getattr(self, f"layer_{i}_gather_R").clone(),
+                    scatter=getattr(self, f"layer_{i}_scatter").clone(),
                 )
-
-            elif isinstance(fnode, CPTLayer):
-                layer = TensorizedCPT(
-                    fnode.num_nodes,
-                    fnode.h_out,
-                    fnode.h_child,
-                    log_weights=getattr(fnode, "log_weights", None),
-                )
-                self.layers.append(layer)
-
-                fnode_md_sets = getattr(fnode, "md_sets", None)
-                for i in range(fnode.num_nodes):
-                    l_idx = fnode.left_indices[i].item()
-                    r_idx = fnode.right_indices[i].item()
-                    self.node_scopes.append(self.node_scopes[l_idx] | self.node_scopes[r_idx])
-                    self.node_md_sets.append(fnode_md_sets[i] if fnode_md_sets else None)
-
-                self._register_layer_flat(
-                    layer,
-                    fnode.left_indices,
-                    fnode.right_indices,
-                    fnode.num_nodes,
-                    fnode.h_child,
-                    fnode.h_child,
-                    fnode.h_out,
-                )
-
-            elif isinstance(fnode, TuckerLayer):
-                layer = TensorizedTucker(
-                    fnode.num_nodes,
-                    fnode.h_out,
-                    fnode.h_left,
-                    fnode.h_right,
-                )
-                self.layers.append(layer)
-
-                fnode_md_sets = getattr(fnode, "md_sets", None)
-                for i in range(fnode.num_nodes):
-                    l_idx = fnode.left_indices[i].item()
-                    r_idx = fnode.right_indices[i].item()
-                    self.node_scopes.append(self.node_scopes[l_idx] | self.node_scopes[r_idx])
-                    self.node_md_sets.append(fnode_md_sets[i] if fnode_md_sets else None)
-
-                self._register_layer_flat(
-                    layer,
-                    fnode.left_indices,
-                    fnode.right_indices,
-                    fnode.num_nodes,
-                    fnode.h_left,
-                    fnode.h_right,
-                    fnode.h_out,
-                )
+            )
+        return CircuitState(input_states=input_states, sum_states=sum_states)

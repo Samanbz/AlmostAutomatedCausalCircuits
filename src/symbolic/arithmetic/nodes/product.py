@@ -24,15 +24,3 @@ class KroneckerProductNode(ProductNode):
         h_R = R.shape[1]
         outer = L.unsqueeze(2) + R.unsqueeze(1)
         return outer.reshape(B, h_L * h_R)
-
-
-class HadamardProductNode(ProductNode):
-    """Represents an element-wise (Hadamard) product operation."""
-
-    def forward(
-        self, data: torch.Tensor, children_outputs: list[torch.Tensor] = None
-    ) -> torch.Tensor:
-        assert children_outputs is not None and len(children_outputs) >= 1
-        if len(children_outputs) == 1:
-            return children_outputs[0]
-        return children_outputs[0] + children_outputs[1]

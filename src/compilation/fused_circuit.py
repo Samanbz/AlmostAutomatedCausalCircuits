@@ -11,11 +11,8 @@ from typing import Any, Dict, List, Tuple
 import torch
 
 from src.compilation.folded_circuit import (
-    FoldedCPTSumLayer,
     FoldedGaussianInputLayer,
-    FoldedHadamardProductLayer,
     FoldedKroneckerProductLayer,
-    FoldedSparseHadamardSumLayer,
     FoldedSparseKroneckerSumLayer,
     FoldedSymbolicCircuit,
     FoldedTuckerSumLayer,
@@ -281,20 +278,10 @@ class CircuitFuser:
         ):
             self._fuse_sparse_kronecker(fid, fnode, prod_fid, prod_layer, folded_to_fused)
 
-        elif isinstance(fnode, FoldedSparseHadamardSumLayer) and isinstance(
-            prod_layer, FoldedHadamardProductLayer
-        ):
-            self._fuse_sparse_hadamard(fid, fnode, prod_fid, prod_layer, folded_to_fused)
-
         elif isinstance(fnode, FoldedTuckerSumLayer) and isinstance(
             prod_layer, FoldedKroneckerProductLayer
         ):
             self._fuse_tucker(fid, fnode, prod_fid, prod_layer, folded_to_fused)
-
-        elif isinstance(fnode, FoldedCPTSumLayer) and isinstance(
-            prod_layer, FoldedHadamardProductLayer
-        ):
-            self._fuse_cpt(fid, fnode, prod_fid, prod_layer, folded_to_fused)
 
         else:
             raise ValueError(
@@ -338,6 +325,8 @@ class CircuitFuser:
             h_left=prod_layer.h_left,
             h_right=prod_layer.h_right,
         )
+        if hasattr(sum_layer, "log_weights"):
+            layer.log_weights = sum_layer.log_weights
         layer.md_sets = getattr(sum_layer, "md_sets", None)
         fused_id = self.fused._add_node(layer)
 
@@ -410,6 +399,8 @@ class CircuitFuser:
             h_left=prod_layer.h_left,
             h_right=prod_layer.h_right,
         )
+        if hasattr(sum_layer, "log_weights"):
+            layer.log_weights = sum_layer.log_weights
         layer.md_sets = getattr(sum_layer, "md_sets", None)
         fused_id = self.fused._add_node(layer)
 
