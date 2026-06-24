@@ -126,10 +126,10 @@ class BitSet:
             return NotImplemented
         return BitSet.from_int(self._val ^ other._val)
 
-    def issubset(self, other: "BitSet") -> bool:
+    def is_subset(self, other: "BitSet") -> bool:
         return (self._val & other._val) == self._val
 
-    def issuperset(self, other: "BitSet") -> bool:
+    def is_superset(self, other: "BitSet") -> bool:
         return (self._val & other._val) == other._val
 
     def copy(self) -> "BitSet":

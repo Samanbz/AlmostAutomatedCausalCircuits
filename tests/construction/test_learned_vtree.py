@@ -141,8 +141,9 @@ def test_joint_constraint_satisfaction(synthetic_data):
 
 def test_disjoint_md_sets_validation(synthetic_data):
     """1.3.1 Disjoint MD Sets Validation: Test md_sets=[{0}, {1}, {2}].
-    The builder should explicitly raise a ValueError."""
-    with pytest.raises(ValueError, match="increasing subsets"):
+    The builder should explicitly raise a ValueError because MD sets must be
+    closed under union."""
+    with pytest.raises(ValueError, match="closed under intersection"):
         construct_optimal_md_vtree(synthetic_data, md_sets=[{0}, {1}, {2}])
 
 

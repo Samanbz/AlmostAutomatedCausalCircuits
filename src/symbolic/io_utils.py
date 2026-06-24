@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from matplotlib.colors import LinearSegmentedColormap
 
-from src.symbolic import StructuralCausalModel
+from src.symbolic.scm import StructuralCausalModel
 
 from .base import DirectedAcyclicGraph
 

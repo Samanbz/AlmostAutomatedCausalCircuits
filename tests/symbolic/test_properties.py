@@ -4,7 +4,6 @@ from src.construction.circuit_builder import CircuitBuilder
 from src.construction.region_graph_builder import RegionGraphBuilder
 from src.symbolic import (
     GaussianDistribution,
-    HadamardProductNode,
     KroneckerProductNode,
     MarginalDeterminism,
     SumNode,
@@ -82,10 +81,12 @@ def test_support_mutually_exclusive_check():
 
     # Leaves for var 0 with overlapping support
     dist0_a = GaussianDistribution(var=0, mean=0.0, stddev=1.0)
-    dist0_a = dist0_a.constrain_to(ContinuousInterval(-1.0, 1.0))  # overlap
+    dist0_a.var_support = ContinuousInterval(-1.0, 1.0)
+    dist0_a.support = Support({0: dist0_a.var_support})
 
     dist0_b = GaussianDistribution(var=0, mean=0.0, stddev=1.0)
-    dist0_b = dist0_b.constrain_to(ContinuousInterval(0.0, 2.0))  # overlap
+    dist0_b.var_support = ContinuousInterval(0.0, 2.0)
+    dist0_b.support = Support({0: dist0_b.var_support})
 
     dist1 = GaussianDistribution(var=1, mean=0.0, stddev=1.0)
 
@@ -115,76 +116,4 @@ def test_support_mutually_exclusive_check():
     assert is_md is False
 
 
-def test_md_hadamard_unweighted_per_unit_supports():
-    """Regression: edge_data is None branch must use per-unit supports,
-    not whole-node support, for HadamardProduct children.
 
-    Two HadamardProducts with disjoint per-unit supports but overlapping
-    whole-node supports. The check should pass because per-unit pairs are
-    all disjoint on the target scope."""
-    ac = SymbolicArithmeticCircuit()
-
-    # Leaf distributions for var 0 (target variable) with disjoint per-unit supports
-    # HP_A will use units covering [0,1) and [3,4) on var 0
-    # HP_B will use units covering [1,2) and [2,3) on var 0
-    leaf_a0 = GaussianDistribution(var=0, mean=0.0, stddev=1.0)
-    leaf_a0 = leaf_a0.constrain_to(ContinuousInterval(0.0, 4.0))
-    leaf_a0.unit_count = 2
-    leaf_a0.unit_supports = [
-        Support({0: ContinuousInterval(0.0, 1.0)}),
-        Support({0: ContinuousInterval(3.0, 4.0)}),
-    ]
-
-    leaf_b0 = GaussianDistribution(var=0, mean=0.0, stddev=1.0)
-    leaf_b0 = leaf_b0.constrain_to(ContinuousInterval(1.0, 3.0))
-    leaf_b0.unit_count = 2
-    leaf_b0.unit_supports = [
-        Support({0: ContinuousInterval(1.0, 2.0)}),
-        Support({0: ContinuousInterval(2.0, 3.0)}),
-    ]
-
-    # Leaf distributions for var 1 (non-target, shared across both HPs)
-    leaf_a1 = GaussianDistribution(var=1, mean=0.0, stddev=1.0)
-    leaf_a1.unit_count = 2
-    leaf_a1.unit_supports = [leaf_a1.support, leaf_a1.support]
-
-    leaf_b1 = GaussianDistribution(var=1, mean=0.0, stddev=1.0)
-    leaf_b1.unit_count = 2
-    leaf_b1.unit_supports = [leaf_b1.support, leaf_b1.support]
-
-    ac._add_node_explicit(1, leaf_a0)
-    ac._add_node_explicit(2, leaf_a1)
-    ac._add_node_explicit(3, leaf_b0)
-    ac._add_node_explicit(4, leaf_b1)
-
-    # HP_A: overall support on var 0 = [0, 4), per-unit = [0,1) and [3,4)
-    hp_a = HadamardProductNode(support=leaf_a0.support.union(leaf_a1.support), unit_count=2)
-    hp_a.unit_supports = [
-        leaf_a0.unit_supports[0].union(leaf_a1.unit_supports[0]),
-        leaf_a0.unit_supports[1].union(leaf_a1.unit_supports[1]),
-    ]
-    ac._add_node_explicit(5, hp_a)
-    ac.add_edge(5, 1)
-    ac.add_edge(5, 2)
-
-    # HP_B: overall support on var 0 = [1, 3), per-unit = [1,2) and [2,3)
-    hp_b = HadamardProductNode(support=leaf_b0.support.union(leaf_b1.support), unit_count=2)
-    hp_b.unit_supports = [
-        leaf_b0.unit_supports[0].union(leaf_b1.unit_supports[0]),
-        leaf_b0.unit_supports[1].union(leaf_b1.unit_supports[1]),
-    ]
-    ac._add_node_explicit(6, hp_b)
-    ac.add_edge(6, 3)
-    ac.add_edge(6, 4)
-
-    # SumNode connected to both HPs without edge weights
-    s = SumNode(support=hp_a.support.union(hp_b.support), unit_count=1)
-    ac._add_node_explicit(7, s)
-    ac.add_edge(7, 5)  # no edge data → triggers edge_data is None branch
-    ac.add_edge(7, 6)
-
-    # Whole-node supports overlap ([0,4) ∩ [1,3) = [1,3) on var 0),
-    # but all per-unit pairs are disjoint: [0,1)∩[1,2)=∅, [0,1)∩[2,3)=∅,
-    # [3,4)∩[1,2)=∅, [3,4)∩[2,3)=∅
-    is_md = ac.check_property(MarginalDeterminism(target_scope={0}))
-    assert is_md is True

@@ -21,7 +21,7 @@ def test_isomorphism_and_leaf_instantiation(basic_input_dists, trivial_vtree):
     rg_builder = RegionGraphBuilder(basic_input_dists, trivial_vtree)
     rg = rg_builder.build()
 
-    ac_builder = CircuitBuilder(rg=rg, h=4, input_dists=basic_input_dists)
+    ac_builder = CircuitBuilder(rg=rg, leaf_h=4, sum_h=4, input_dists=basic_input_dists)
     ac = ac_builder.build()
 
     # Note: RG nodes and AC nodes might have different IDs since NodeAllocator is shared or unique per builder.
@@ -57,7 +57,7 @@ def test_block_scaling(basic_input_dists, trivial_vtree):
     h = 4
 
     rg = RegionGraphBuilder(basic_input_dists, trivial_vtree).build()
-    ac = CircuitBuilder(rg=rg, h=h, input_dists=basic_input_dists).build()
+    ac = CircuitBuilder(rg=rg, leaf_h=h, sum_h=h, input_dists=basic_input_dists).build()
 
     root_id = [n for n in ac._nodes if not ac.get_parents(n)][0]
     assert root_id is not None
@@ -96,7 +96,7 @@ def test_property_validation_pipeline(basic_input_dists, complex_vtree):
     successfully passes all structural property checks."""
 
     # We already have complex_vtree with md_sets = [{0, 1}] on nodes
-    circuit = create_md_circuit(input_dists=basic_input_dists, md_var_decomp=complex_vtree, h=4)
+    circuit = create_md_circuit(input_dists=basic_input_dists, md_var_decomp=complex_vtree, leaf_h=4, sum_h=4)
 
     # Check structural properties
     # Smoothness

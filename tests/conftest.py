@@ -1,7 +1,7 @@
 import pytest
 import torch
-from src.construction.random_scm import generate_random_scm
 
+from src.construction.random_scm import generate_random_scm
 from src.symbolic import (
     GaussianDistribution,
     KroneckerProductNode,
