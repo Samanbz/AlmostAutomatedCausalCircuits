@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from src.utils import BitSet
 from src.utils.support import Support
@@ -67,6 +67,12 @@ class PartitionNode(RegionGraphNode):
 
 
 class RegionGraph(DirectedAcyclicGraph[int, RegionGraphNode, Any]):
+    def __init__(self, node_allocator=None, vtree=None):
+        super().__init__(node_allocator=node_allocator)
+        self.vtree = vtree
+        self.vtree_to_region: Dict[int, List[int]] = {}
+        self.region_to_vtree: Dict[int, int] = {}
+
     def _get_base_node_config(self) -> Dict[type, Dict[str, Any]]:
         config = super()._get_base_node_config()
 
