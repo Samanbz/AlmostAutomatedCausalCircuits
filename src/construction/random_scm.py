@@ -53,7 +53,8 @@ def generate_random_scm(n_nodes: int, expected_degree: float = 2.0) -> Structura
         logic = LinearLogic(coeffs) if parents else None
 
         # 2. Additive Noise (50% Gaussian, 50% Uniform mixing)
-        noise_type = np.random.choice(["gaussian", "uniform"])
+        # noise_type = np.random.choice(["gaussian", "uniform"])
+        noise_type = "gaussian"  # --- IGNORE ---
 
         if noise_type == "gaussian":
             loc = float(np.random.uniform(-0.5, 0.5))

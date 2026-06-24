@@ -28,7 +28,7 @@ class RegionGraphBuilder:
         self.md_vtree = md_vtree
 
     def build(self) -> RegionGraph:
-        rg = RegionGraph()
+        rg = RegionGraph(vtree=self.md_vtree)
         md_root = self.md_vtree.get_root()
         self._build_recursive(rg, md_root)
         return rg
@@ -46,11 +46,11 @@ class RegionGraphBuilder:
         # its md_set is a non-universal subset of the parent's md_set.
         # Otherwise it's unconstrained (leaves don't split, sums are dense).
         if parent_md_set is None:
-            is_constrained = not md_set.is_universal  # root: constrained if it has any md-set
+            is_constrained = False  # root: always unconstrained and dense
         elif md_set.is_universal:
             is_constrained = False
         else:
-            is_constrained = md_set.issubset(parent_md_set) and not parent_md_set.is_universal
+            is_constrained = md_set.is_subset(parent_md_set) and not parent_md_set.is_universal
 
         if not self.md_vtree._adj[md_vid]:
             dist = self.input_dists[md_vnode.scope.min]
@@ -62,6 +62,8 @@ class RegionGraphBuilder:
                 is_constrained=is_constrained,
             )
             reg_id = rg._add_node(reg_node)
+            rg.vtree_to_region.setdefault(md_vid, []).append(reg_id)
+            rg.region_to_vtree[reg_id] = md_vid
             return reg_id
 
         l_child_id, r_child_id = self.md_vtree._children_pair[md_vid]
@@ -96,5 +98,8 @@ class RegionGraphBuilder:
             )
         )
         rg._add_edge(rg_id, part_id)
+
+        rg.vtree_to_region.setdefault(md_vid, []).append(rg_id)
+        rg.region_to_vtree[rg_id] = md_vid
 
         return rg_id

@@ -203,7 +203,21 @@ def construct_optimal_md_vtree(
     Builds a VTree that explicitly enforces MD-Set constraints.
     These sets will not be sliced apart during recursive min-cut partitioning,
     thus guaranteeing causal tractability.
+
+    MD sets must be closed under intersection: if A and B are in md_sets, then
+    A ∩ B must also be in md_sets.
     """
+    # Validate intersection-closure
+    md_sets_bs = [BitSet(s) for s in md_sets]
+    for i in range(len(md_sets_bs)):
+        for j in range(i + 1, len(md_sets_bs)):
+            intersection = md_sets_bs[i].intersection(md_sets_bs[j])
+            if not any(intersection == s for s in md_sets_bs):
+                raise ValueError(
+                    f"MD sets must be closed under intersection. "
+                    f"{set(md_sets_bs[i])} ∩ {set(md_sets_bs[j])} = {set(intersection)} is missing."
+                )
+
     n_vars = data.shape[1]
     skeleton = build_skeleton(dag, n_vars)
     apply_md_constraints(skeleton, md_sets, md_weight=1e9)
