@@ -116,11 +116,15 @@ class TestBitSet:
         bs1 = BitSet([1, 2])
         bs2 = BitSet([1, 2, 3])
 
-        assert bs1.issubset(bs2)
-        assert not bs2.issubset(bs1)
+        assert bs1.is_subset(bs2)
+        assert not bs2.is_subset(bs1)
 
-        assert bs2.issuperset(bs1)
-        assert not bs1.issuperset(bs2)
+        assert bs2.is_superset(bs1)
+        assert not bs1.is_superset(bs2)
+
+        # Universal set
+        univ = BitSet.universal()
+        assert bs1.is_subset(univ)
 
     def test_from_bool_mask(self):
         mask = np.array([True, False, True], dtype=bool)  # indices 0, 2

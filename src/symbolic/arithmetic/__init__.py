@@ -1,39 +1,24 @@
 from .circuit import SymbolicArithmeticCircuit
 from .nodes import (
+    ArithmeticNode,
     CategoricalDistribution,
     Distribution,
     GaussianDistribution,
-    GaussianMixture,
-    KroneckerProductNode,
-    LeafNode,
-    ProductNode,
-    SumNode,
-    UniformDistribution,
-)
-from .properties import (
-    Decomposability,
-    Determinism,
-    MarginalDeterminism,
-    Smoothness,
-    StructuredDecomposability,
+    LeafLayer,
+    MixtureLeafLayer,
+    ProductLeafLayer,
+    SumLayer,
 )
 
 
 __all__ = [
-    "SumNode",
-    "ProductNode",
-    "KroneckerProductNode",
-    "GaussianMixture",
-    "LeafNode",
     "SymbolicArithmeticCircuit",
-    "Distribution",
+    "ArithmeticNode",
     "CategoricalDistribution",
+    "Distribution",
     "GaussianDistribution",
-    "UniformDistribution",
-    "Property",
-    "Smoothness",
-    "Decomposability",
-    "Determinism",
-    "StructuredDecomposability",
-    "MarginalDeterminism",
+    "MixtureLeafLayer",
+    "LeafLayer",
+    "ProductLeafLayer",
+    "SumLayer",
 ]

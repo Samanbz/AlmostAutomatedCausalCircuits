@@ -15,9 +15,8 @@ def test_gaussian_leaf_truncated_integration():
     # Initialize a multi-unit Gaussian
     dist = GaussianDistribution(
         var=var,
-        mean=torch.tensor([0.0, 0.0, 0.0, 0.0]),
-        stddev=torch.tensor([1.0, 1.0, 1.0, 1.0]),
-        unit_count=h,
+        base_mean=0.0,
+        base_stddev=1.0,
     )
 
     # Create disjoint intervals using split_support
@@ -25,12 +24,14 @@ def test_gaussian_leaf_truncated_integration():
     # Actually split_support uses the mean of the means and stds across units in the current implementation.
     intervals = dist.split_support(split_count=h)
 
-    # Manually assign disjoint supports to each unit
-    dist.unit_supports = []
+    from src.symbolic.arithmetic.nodes.leaf_layer import GaussianLeafLayer
+    node_supports = []
     from src.utils import Support
 
     for i in range(h):
-        dist.unit_supports.append(Support({var: intervals[i]}))
+        node_supports.append(Support({var: intervals[i]}))
+
+    leaf = GaussianLeafLayer(dist, num_nodes=h, num_groups=1, node_supports=node_supports)
 
     # Numerically integrate each unit using Monte Carlo
     # We sample uniformly over a large interval covering the supports
@@ -48,7 +49,8 @@ def test_gaussian_leaf_truncated_integration():
     data[:, var] = samples.squeeze()
 
     # Forward pass
-    log_probs = dist.forward(data)  # shape: [N, h]
+    log_probs = leaf.forward(data)  # shape: [N, 1, h]
+    log_probs = log_probs.squeeze(1)  # shape: [N, h]
 
     # Log proposal density
     proposal_log_probs = (

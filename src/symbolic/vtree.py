@@ -20,6 +20,15 @@ class VNode(Node):
 class VTree(BinaryTree[int, VNode, None]):
     """A variable tree (vtree) represented as a directed acyclic graph."""
 
+    @property
+    def num_vars(self) -> int:
+        """Return the number of variables in the vtree."""
+        root_id = self.get_root()
+        if root_id is None:
+            return 0
+        root_node = self.get_node_data(root_id)
+        return len(root_node.scope)
+
     def compute_md_labeling(self, md_sets: List[Set[int]]) -> None:
         """
         Compute optimal labeling of a VTree given a list of marginal determinism sets following the
@@ -56,53 +65,25 @@ class VTree(BinaryTree[int, VNode, None]):
         root_id = self.get_root()
         label_recursive(root_id)
 
-    def to_dot(self, **kwargs) -> str:
-        """Returns a string in Graphviz DOT format representing the VTree."""
-        lines = ["digraph VTree {"]
-        lines.append('  node [shape=box, style=filled, fontname="Helvetica"];')
-        lines.append('  edge [fontname="Helvetica", fontsize=10];')
-
-        config = self.get_node_config(show_node_id=True, **kwargs)
-
-        def escape(s: str) -> str:
-            return s.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
-
-        for node_id in self.topological_sort():
-            node = self.get_node_data(node_id)
-
-            style = {}
-            for cls, c in config.items():
-                if isinstance(node, cls):
-                    style = c
-                    break
-
-            shape = style.get("shape", "box")
-            color = style.get("color", "white")
-
-            label_val = style.get("label", str(node))
-            if callable(label_val):
-                label_str = str(label_val(node))
-            else:
-                label_str = str(label_val)
-
-            label_str = escape(label_str)
-
-            lines.append(f'  {node_id} [label="{label_str}", shape="{shape}", fillcolor="{color}"];')
-
-            for child_id in self.get_children(node_id):
-                lines.append(f'  {node_id} -> {child_id};')
-
-        lines.append("}")
-        return "\n".join(lines)
-
-    def _get_base_node_config(self) -> Dict[type, Dict[str, Any]]:
+    def _get_base_node_config(self, var_to_name: dict = None) -> Dict[type, Dict[str, Any]]:
         config = super()._get_base_node_config()
+
+        def format_set(s: set) -> str:
+            if s is None:
+                return "None"
+            if hasattr(s, "is_universal") and s.is_universal:
+                return "Univ."
+            if not s:
+                return "None"
+            if var_to_name:
+                return "{" + ",".join(str(var_to_name.get(x, x)) for x in sorted(s)) + "}"
+            return "{" + ",".join(str(x) for x in sorted(s)) + "}"
 
         config.update(
             {
                 VNode: {
                     "shape": "box",
-                    "label": lambda n: f"Scope: {list(n.scope)}\nMD-Set: {list(n.md_set) if not n.md_set.is_universal else 'Univ.'}",
+                    "label": lambda n: f"Scope: {format_set(n.scope)}\\nMD-Set: {format_set(n.md_set)}",
                     "color": "lightblue",
                 }
             }

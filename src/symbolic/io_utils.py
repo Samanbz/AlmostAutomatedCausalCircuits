@@ -29,7 +29,7 @@ def plot_dag(
     Args:
         dag: The graph object to plot.
         node_config: Dictionary mapping Node classes to style attributes.
-                     e.g. {SumNode: {'color': 'red', 'label': '+'}, ...}
+                     e.g. {SumLayer: {'color': 'red', 'label': '+'}, ...}
                      Values for 'label' and 'color' can be strings or callables taking the node as input.
                      If None, uses dag.node_config.
         output_path: Path to save the image. If None, returns object for Jupyter display.
@@ -137,7 +137,6 @@ def plot_dag(
                 out_file.write_text(html_content, encoding="utf-8")
             else:
                 dot.render(str(out_file.with_suffix("")), cleanup=True)
-            print("Done.")
         except Exception as e:
             print(f"Graphviz render failed: {e}. Check if graphviz is installed on system.")
 

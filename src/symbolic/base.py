@@ -97,6 +97,13 @@ class DirectedAcyclicGraph(Generic[K, N, E]):
         """Returns a list of parent node IDs."""
         return list(self._rev_adj[node_id].keys())
 
+    def get_grandparents(self, node_id: K) -> List[K]:
+        """Returns a list of grandparent node IDs."""
+        grandparents = set()
+        for parent in self.get_parents(node_id):
+            grandparents.update(self.get_parents(parent))
+        return list(grandparents)
+
     def get_incoming_edges(self, node_id: K) -> List[Tuple[K, E]]:
         """Returns a list of (parent_id, edge_data) tuples for incoming edges."""
         return list(self._rev_adj[node_id].items())
@@ -120,6 +127,13 @@ class DirectedAcyclicGraph(Generic[K, N, E]):
         if node_id not in self._adj:
             return []
         return list(self._adj[node_id].keys())
+
+    def get_grandchildren(self, node_id: K) -> List[K]:
+        """Returns a list of grandchildren node IDs."""
+        grandchildren = set()
+        for child in self.get_children(node_id):
+            grandchildren.update(self.get_children(child))
+        return list(grandchildren)
 
     def get_leaves(self) -> List[K]:
         """Returns a list of leaf node IDs (nodes with out-degree 0)."""

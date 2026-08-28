@@ -12,29 +12,32 @@ class ArithmeticNode(Node):
     def __init__(
         self,
         support: Support = None,
-        unit_count: int = 1,
-        unit_supports: Optional[List[Support]] = None,
+        num_nodes: int = 1,
+        num_groups: int = 1,
+        node_supports: Optional[List[Support]] = None,
         md_set: Optional[BitSet] = None,
     ):
         self.support = support
-        self.unit_count = unit_count
-        # If unit_supports is not provided, all units share the same support
-        self.unit_supports = (
-            unit_supports or [support] * unit_count if support is not None else None
-        )
-        # Marginal determinism set for this node's region (None if unknown)
+        self.num_groups = num_groups
+        self.num_nodes = num_nodes
+        self.node_supports = node_supports if node_supports is not None else ([support] * num_nodes if support is not None else None)
         self.md_set = md_set
+        self.marg_scope = BitSet()
 
     @property
     def scope(self) -> BitSet:
         if self.support is None:
-            return BitSet.empty()
+            return BitSet()
         return self.support.scope
 
     def forward(
         self, data: torch.Tensor, children_outputs: list[torch.Tensor] = None
     ) -> torch.Tensor:
         raise NotImplementedError
+
+    def to(self, device: torch.device):
+        """Moves any tensor attributes of this node to the given device."""
+        return self
 
     def __repr__(self):
         scope_str = self.support.scope if self.support is not None else None

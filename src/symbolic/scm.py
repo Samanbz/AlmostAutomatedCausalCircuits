@@ -40,15 +40,7 @@ class AdditiveNoiseMechanism(Mechanism):
         # Generate noise (Ensure size=n_samples is handled by the generic utils or passed callable)
         noise = self.noise_dist(n_samples)
 
-        if self.logic is None:
-            return noise
-
-        try:
-            deterministic = self.logic(**parents)
-        except TypeError as e:
-            raise TypeError(f"Mechanism arguments mismatch. {e}") from e
-
-        return deterministic + noise
+        return self.evaluate(noise, **parents)
 
     def evaluate(self, noise: np.ndarray, **parents: np.ndarray) -> np.ndarray:
         if self.logic is None:
@@ -97,6 +89,36 @@ class ConstantMechanism(Mechanism):
 
     def __str__(self) -> str:
         return str(self.value)
+
+
+class BinaryMechanism(Mechanism):
+    """
+    Y = 1 if U < P(Y=1 | Parents) else 0
+    where U ~ Uniform(0, 1)
+    """
+
+    def __init__(self, logic: Optional[Callable[..., np.ndarray]] = None, base_p: float = 0.5):
+        self.logic = logic
+        self.base_p = base_p
+
+    def __call__(self, n_samples: int, **parents: np.ndarray) -> np.ndarray:
+        noise = np.random.uniform(0, 1, size=n_samples)
+        return self.evaluate(noise, **parents)
+
+    def evaluate(self, noise: np.ndarray, **parents: np.ndarray) -> np.ndarray:
+        if self.logic is None:
+            probs = np.full(len(noise), self.base_p, dtype=np.float64)
+        else:
+            probs = self.logic(**parents)
+        return (noise < probs).astype(np.float64)
+
+    def abduct(self, value: np.ndarray, **parents: np.ndarray) -> np.ndarray:
+        raise NotImplementedError("Abduction is ill-posed for threshold-based binary SCMs.")
+
+    def __str__(self) -> str:
+        if self.logic is None:
+            return f"Bernoulli({self.base_p})"
+        return f"Bernoulli({self.logic})"
 
 
 class StructuralCausalModel(DirectedAcyclicGraph[Union[str, int], Mechanism, Any]):
@@ -384,21 +406,44 @@ class StructuralCausalModel(DirectedAcyclicGraph[Union[str, int], Mechanism, Any
 
 
 class LinearLogic:
-    def __init__(self, coefficients: dict[str, float]):
+    def __init__(self, coefficients: dict[str, float], intercept: float = 0.0):
         self.coefficients = coefficients
+        self.intercept = intercept
 
     def __call__(self, **kwargs) -> np.ndarray:
         if not kwargs:
-            return 0.0
+            return self.intercept
         first_val = next(iter(kwargs.values()))
-        res = np.zeros_like(first_val, dtype=np.float64)
+        res = np.full_like(first_val, self.intercept, dtype=np.float64)
         for k, v in kwargs.items():
             res += self.coefficients[k] * v
         return res
 
     def __str__(self):
         terms = [f"{v:.2f}*{k}" for k, v in self.coefficients.items()]
-        return " + ".join(terms) if terms else "0"
+        eq = " + ".join(terms) if terms else "0"
+        return f"{self.intercept:.2f} + {eq}"
+
+
+class LogisticLogic:
+    def __init__(self, coefficients: dict[str, float], intercept: float = 0.0):
+        self.coefficients = coefficients
+        self.intercept = intercept
+
+    def __call__(self, **kwargs) -> np.ndarray:
+        if not kwargs:
+            return np.full(1, 1 / (1 + np.exp(-self.intercept)), dtype=np.float64)
+
+        first_val = next(iter(kwargs.values()))
+        logits = np.full_like(first_val, self.intercept, dtype=np.float64)
+        for k, v in kwargs.items():
+            logits += self.coefficients[k] * v
+        return 1 / (1 + np.exp(-logits))
+
+    def __str__(self):
+        terms = [f"{v:.2f}*{k}" for k, v in self.coefficients.items()]
+        eq = " + ".join(terms) if terms else "0"
+        return f"σ({eq} + {self.intercept:.2f})"
 
 
 class GaussianNoise:
@@ -423,3 +468,152 @@ class UniformNoise:
 
     def __str__(self):
         return f"U({self.low:.2f}, {self.high:.2f})"
+
+
+def build_synthetic_continuous_scm(
+    num_confounders: int = 4,
+    confounding_strength: float = 1.0,
+    seed: Optional[int] = None,
+) -> StructuralCausalModel:
+    """Builds a strictly linear-Gaussian SCM with random means and bounded variance.
+
+    Coefficients are chosen so that, for typical random seeds, both X and Y (and the
+    interventional distribution P(Y|do(X))) lie mostly inside [-20, 20].
+
+    Args:
+        num_confounders: Number of Z variables.
+        confounding_strength: A knob to control the magnitude of confounding.
+            0.0 means no confounding (P(Y|X) == P(Y|do(X))),
+            > 0.0 increases the divergence.
+        seed: Optional random seed for reproducibility.
+    """
+    if seed is not None:
+        np.random.seed(seed)
+
+    scm = StructuralCausalModel()
+
+    # Z0 is exogenous with a random (non-zero) mean.
+    scm.add_variable(
+        name="Z0",
+        mechanism=AdditiveNoiseMechanism(
+            logic=None,
+            noise_dist=GaussianNoise(np.random.uniform(-0.5, 0.5), np.random.uniform(0.1, 0.5)),
+        ),
+        parents=[],
+        is_exogenous=True,
+    )
+
+    # Branching tree for Z variables with random intercepts.
+    for i in range(1, num_confounders):
+        parent_i = (i - 1) // 2
+        parent_name = f"Z{parent_i}"
+        scm.add_variable(
+            name=f"Z{i}",
+            mechanism=AdditiveNoiseMechanism(
+                logic=LinearLogic(
+                    {parent_name: np.random.uniform(-0.8, 0.8)},
+                    intercept=np.random.uniform(-0.5, 0.5),
+                ),
+                noise_dist=GaussianNoise(0.0, np.random.uniform(0.1, 0.5)),
+            ),
+            parents=[parent_name],
+            is_exogenous=False,
+        )
+
+    # X depends on all Z.  Coefficients are moderate so the marginal stays bounded.
+    x_intercept = np.random.uniform(-0.5, 0.5)
+    x_logic = {f"Z{i}": np.random.uniform(-1, 1) for i in range(num_confounders)}
+    scm.add_variable(
+        name="X",
+        mechanism=AdditiveNoiseMechanism(
+            logic=LinearLogic(x_logic, intercept=x_intercept),
+            noise_dist=GaussianNoise(0.0, np.random.uniform(0.1, 0.5)),
+        ),
+        parents=[f"Z{i}" for i in range(num_confounders)],
+        is_exogenous=False,
+    )
+
+    # Y depends on X and all Z.  The Z coefficients create the backdoor confounding.
+    y_intercept = np.random.uniform(-0.5, 0.5)
+    y_logic = {"X": np.random.uniform(-0.5, 0.5)}
+    for i in range(num_confounders):
+        y_logic[f"Z{i}"] = np.random.uniform(-0.2, 1) * confounding_strength
+
+    scm.add_variable(
+        name="Y",
+        mechanism=AdditiveNoiseMechanism(
+            logic=LinearLogic(y_logic, intercept=y_intercept),
+            noise_dist=GaussianNoise(0.0, np.random.uniform(0.1, 0.5)),
+        ),
+        parents=["X"] + [f"Z{i}" for i in range(num_confounders)],
+        is_exogenous=False,
+    )
+
+    return scm
+
+
+def build_synthetic_binary_scm(
+    num_confounders: int = 4, confounding_strength: float = 1.0
+) -> StructuralCausalModel:
+    """Builds a binary SCM with a branching confounder tree.
+
+    Args:
+        num_confounders: Number of Z variables.
+        confounding_strength: A knob to control the magnitude of confounding.
+            0.0 means no confounding (P(Y|X) == P(Y|do(X))),
+            > 0.0 increases the divergence.
+    """
+    scm = StructuralCausalModel()
+
+    # Z0 is strictly exogenous
+    scm.add_variable(
+        name="Z0",
+        mechanism=BinaryMechanism(logic=None, base_p=0.5),
+        parents=[],
+        is_exogenous=True,
+    )
+
+    # Building a branching tree for Z variables (Logistic logic)
+    z_vars = ["Z0"]
+    for i in range(1, num_confounders):
+        parent_i = (i - 1) // 2
+        z_var = f"Z{i}"
+        z_vars.append(z_var)
+        scm.add_variable(
+            name=z_var,
+            mechanism=BinaryMechanism(logic=LogisticLogic({f"Z{parent_i}": 2.0}, intercept=-1.0)),
+            parents=[f"Z{parent_i}"],
+            is_exogenous=False,
+        )
+
+    # X depends on Z strongly to create high confounding
+    x_logic = {f"Z{i}": 2.0 for i in range(num_confounders)}
+    scm.add_variable(
+        "X",
+        mechanism=BinaryMechanism(
+            logic=LogisticLogic(coefficients=x_logic, intercept=-float(num_confounders))
+        ),
+        parents=[f"Z{i}" for i in range(num_confounders)],
+        is_exogenous=False,
+    )
+
+    # Y is caused by X and Z
+    # We want X to positively influence Y (+2.0)
+    # We want Z to negatively influence Y (-confounding_strength) to create a backdoor path
+    y_coeffs = {"X": 2.0}
+    for z in z_vars:
+        y_coeffs[z] = -1.0 * confounding_strength
+
+    # Intercept compensates for Z so that the interventional distribution stays relatively stable
+    scm.add_variable(
+        "Y",
+        mechanism=BinaryMechanism(
+            logic=LogisticLogic(
+                coefficients=y_coeffs, intercept=confounding_strength * (num_confounders / 2.0)
+            )
+        ),
+        parents=["X"] + z_vars,
+        is_exogenous=False,
+    )
+
+    return scm
