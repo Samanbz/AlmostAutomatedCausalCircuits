@@ -20,7 +20,11 @@ class ArithmeticNode(Node):
         self.support = support
         self.num_groups = num_groups
         self.num_nodes = num_nodes
-        self.node_supports = node_supports if node_supports is not None else ([support] * num_nodes if support is not None else None)
+        self.node_supports = (
+            node_supports
+            if node_supports is not None
+            else ([support] * num_nodes if support is not None else None)
+        )
         self.md_set = md_set
         self.marg_scope = BitSet()
 

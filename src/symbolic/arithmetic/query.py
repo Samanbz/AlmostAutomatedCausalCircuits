@@ -8,6 +8,7 @@ from src.symbolic.arithmetic.nodes.leaf_layer import MixtureLeafLayer
 from src.symbolic.arithmetic.weights import (
     LOG_ZERO,
     DenseWeights,
+    MixingCondWeights,
     ProductWeights,
 )
 from src.symbolic.vtree import VNode, VTree
@@ -172,13 +173,13 @@ def _conditional(ac: SymbolicArithmeticCircuit, cond_vars: Set[int]) -> Symbolic
                 log_weights = node.log_weights.uniformize()
             elif (
                 vnode.md_set == l_vnode.md_set
-            ):  # Left mixing, uniformize left using the right child values
+            ):  # Left mixing, normalize over the right (other-child) axis — lazily, so training updates are tracked
                 # NOTE: Here we're assuming a one-to-one vtree to sum mapping, which is true for our circuits currently, but maybe not always.
                 if not cond_vars_bitset.intersection(r_vnode.scope).is_empty:
                     raise ValueError(
                         f"Conditioning set {cond_vars} intersects with the right child scope {r_vnode.scope} in a left mixing layer. This case currently is not supported."
                     )
-                log_weights = node.log_weights.uniformize(other_child_axis="right")
+                log_weights = MixingCondWeights(node.log_weights, other_child_axis="right")
             elif (
                 vnode.md_set == r_vnode.md_set
             ):  # Right mixing, unformize right using the left child values
@@ -186,7 +187,7 @@ def _conditional(ac: SymbolicArithmeticCircuit, cond_vars: Set[int]) -> Symbolic
                     raise ValueError(
                         f"Conditioning set {cond_vars} intersects with the left child scope {l_vnode.scope} in a right mixing layer. This case currently is not supported."
                     )
-                log_weights = node.log_weights.uniformize(other_child_axis="left")
+                log_weights = MixingCondWeights(node.log_weights, other_child_axis="left")
             else:
                 raise ValueError(
                     "Invalid layer type. Must be either synthesizing or left/right mixing layer."
@@ -360,6 +361,8 @@ def _multiply(
                 support=l_new_node.support.union(r_new_node.support),
             )
 
+            ref_w = s1_node.log_weights
+            device = ref_w.log_weights.device if hasattr(ref_w, "log_weights") else ref_w.device
             lw = torch.full(
                 (
                     new_num_groups,
@@ -371,17 +374,19 @@ def _multiply(
                 ),
                 LOG_ZERO,
                 dtype=torch.float32,
+                device=device,
             )
 
             # Weights are of size [G, U, G_L, L, G_R, R]. Since sum nodes are naive, for each index of G,U, there is only one non-zero entry of [G_L, L, G_R, R]
             # Since we have G_L*G_R groups of L*R nodes each, each combination of (G_L, L, G_R, R) corresponds to a unique (G, U) index. Therefore, we can use an identity matrix for the weights.
-            for g_l in range(s1_node.num_groups):
-                for g_r in range(s2_node.num_groups):
-                    g = g_l * s2_node.num_groups + g_r
-                    for u_l in range(s1_node.num_nodes):
-                        for u_r in range(s2_node.num_nodes):
-                            u = u_l * s2_node.num_nodes + u_r
-                            lw[g, u, g_l, u_l, g_r, u_r] = 0.0
+            gl = torch.arange(s1_node.num_groups, device=device)
+            gr = torch.arange(s2_node.num_groups, device=device)
+            ul = torch.arange(s1_node.num_nodes, device=device)
+            ur = torch.arange(s2_node.num_nodes, device=device)
+            GL, GR, UL, UR = torch.meshgrid(gl, gr, ul, ur, indexing="ij")
+            g_idx = GL * s2_node.num_groups + GR
+            u_idx = UL * s2_node.num_nodes + UR
+            lw[g_idx, u_idx, GL, UL, GR, UR] = 0.0
 
             new_node.log_weights = DenseWeights(lw)
             new_vnode = VNode(scope=new_node.scope, md_set=new_node.md_set)

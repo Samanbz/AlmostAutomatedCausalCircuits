@@ -16,7 +16,7 @@ and verify the fixes:
 import torch
 
 from src.construction.circuit_builder import create_md_circuit
-from src.symbolic.arithmetic.circuit import SymbolicArithmeticCircuit, eval_circuit
+from src.symbolic.arithmetic.circuit import SymbolicArithmeticCircuit
 from src.symbolic.arithmetic.nodes import GaussianDistribution
 from src.symbolic.arithmetic.nodes.leaf_layer import GaussianLeafLayer
 from src.symbolic.arithmetic.train import SymbolicEMTrainer
@@ -130,7 +130,7 @@ def test_n16_training_stays_finite():
     for step in range(80):
         batch = pts_t[torch.randperm(len(pts_t))[:500]]
         nll = trainer.em_step(batch, step_size=1.0)
-        assert not torch.isnan(torch.tensor(nll)), f"NaN NLL at step {step}"
+        assert not torch.isnan(nll).item(), f"NaN NLL at step {step}"
 
         for _, node in ac._nodes.items():
             if isinstance(node, GaussianLeafLayer):

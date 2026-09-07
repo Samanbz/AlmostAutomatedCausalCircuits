@@ -11,7 +11,16 @@ from src.symbolic.arithmetic.nodes.leaf_layer import (
     CategoricalDistribution,
     Distribution,
     GaussianDistribution,
+    GaussianLeafLayer,
+    LinearSplineDistribution,
+    LinearSplineLeafLayer,
+    LogLinearSplineDistribution,
+    LogLinearSplineLeafLayer,
     MixtureLeafLayer,
+    QuadraticSplineDistribution,
+    QuadraticSplineLeafLayer,
+    RationalQuadraticSplineDistribution,
+    RationalQuadraticSplineLeafLayer,
 )
 from src.symbolic.arithmetic.nodes.sum_layer import SumLayer
 from src.symbolic.arithmetic.weights import DenseWeights, SparseWeights
@@ -90,6 +99,7 @@ class CircuitBuilder:
             return n, 1, 1, n
         elif layer_type == LayerType.SYNTHESIZING:
             a = 1
+            # Find the largest factor of n that is less than or equal to sqrt(n)
             for i in range(math.floor(math.sqrt(n)), 0, -1):
                 if n % i == 0:
                     a = i
@@ -163,11 +173,9 @@ class CircuitBuilder:
             else:
                 leaf_supports = [Support({var_id: iv}) for iv in dist.split_support(H)]
 
-            if isinstance(dist, GaussianDistribution):
-                from src.symbolic.arithmetic.nodes.leaf_layer import GaussianLeafLayer
-
+            if isinstance(dist, GaussianDistribution) or len(leaf_supports) == 1:
                 leaf_layer = GaussianLeafLayer(
-                    dist,
+                    GaussianDistribution(var=var_id, base_mean=0, base_stddev=1.0),
                     num_nodes=H,
                     num_groups=G,
                     node_supports=leaf_supports if is_constrained else None,
@@ -176,6 +184,22 @@ class CircuitBuilder:
                 from src.symbolic.arithmetic.nodes.leaf_layer import CategoricalLeafLayer
 
                 leaf_layer = CategoricalLeafLayer(dist, num_nodes=H, num_groups=G)
+            elif is_constrained and isinstance(dist, LogLinearSplineDistribution):
+                leaf_layer = LogLinearSplineLeafLayer(
+                    dist, num_nodes=H, num_groups=G, node_supports=leaf_supports
+                )
+            elif is_constrained and isinstance(dist, LinearSplineDistribution):
+                leaf_layer = LinearSplineLeafLayer(
+                    dist, num_nodes=H, num_groups=G, node_supports=leaf_supports
+                )
+            elif is_constrained and isinstance(dist, QuadraticSplineDistribution):
+                leaf_layer = QuadraticSplineLeafLayer(
+                    dist, num_nodes=H, num_groups=G, node_supports=leaf_supports
+                )
+            elif is_constrained and isinstance(dist, RationalQuadraticSplineDistribution):
+                leaf_layer = RationalQuadraticSplineLeafLayer(
+                    dist, num_nodes=H, num_groups=G, node_supports=leaf_supports
+                )
             else:
                 raise NotImplementedError(f"Unsupported distribution type: {type(dist)}")
 

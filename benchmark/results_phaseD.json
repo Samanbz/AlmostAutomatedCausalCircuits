@@ -1,0 +1,87 @@
+{
+  "device": "cpu",
+  "n_samples": 8192,
+  "grid": 100,
+  "runs": [
+    {
+      "num_nodes": 4,
+      "batch_size": 1024,
+      "vtree_s": 0.001793542003724724,
+      "build_s": 0.0037786249886266887,
+      "em_epoch_s": 0.03991970798233524,
+      "em_peak_mem_bytes": 386072576,
+      "grid_eval_s": 0.014217249990906566,
+      "grid_peak_mem_bytes": 386662400
+    },
+    {
+      "num_nodes": 4,
+      "batch_size": 4096,
+      "vtree_s": 0.001793542003724724,
+      "build_s": 0.0037786249886266887,
+      "em_epoch_s": 0.012170875008450821,
+      "em_peak_mem_bytes": 390381568,
+      "grid_eval_s": 0.006658665981376544,
+      "grid_peak_mem_bytes": 391200768
+    },
+    {
+      "num_nodes": 8,
+      "batch_size": 1024,
+      "vtree_s": 0.0011693749984260648,
+      "build_s": 0.008769249980105087,
+      "em_epoch_s": 0.040239374997327104,
+      "em_peak_mem_bytes": 398360576,
+      "grid_eval_s": 0.019184625009074807,
+      "grid_peak_mem_bytes": 400506880
+    },
+    {
+      "num_nodes": 8,
+      "batch_size": 4096,
+      "vtree_s": 0.0011693749984260648,
+      "build_s": 0.008769249980105087,
+      "em_epoch_s": 0.028271959017729387,
+      "em_peak_mem_bytes": 434585600,
+      "grid_eval_s": 0.014965792011935264,
+      "grid_peak_mem_bytes": 442974208
+    },
+    {
+      "num_nodes": 16,
+      "batch_size": 1024,
+      "vtree_s": 0.00106712500564754,
+      "build_s": 0.028225917019881308,
+      "em_epoch_s": 0.12418949999846518,
+      "em_peak_mem_bytes": 476577792,
+      "grid_eval_s": 0.058839957986492664,
+      "grid_peak_mem_bytes": 476577792
+    },
+    {
+      "num_nodes": 16,
+      "batch_size": 4096,
+      "vtree_s": 0.00106712500564754,
+      "build_s": 0.028225917019881308,
+      "em_epoch_s": 0.106458708003629,
+      "em_peak_mem_bytes": 560775168,
+      "grid_eval_s": 0.05064545900677331,
+      "grid_peak_mem_bytes": 597803008
+    },
+    {
+      "num_nodes": 32,
+      "batch_size": 1024,
+      "vtree_s": 0.0010935000027529895,
+      "build_s": 0.1411123749858234,
+      "em_epoch_s": 0.698274708003737,
+      "em_peak_mem_bytes": 770473984,
+      "grid_eval_s": 0.36276379201444797,
+      "grid_peak_mem_bytes": 770473984
+    },
+    {
+      "num_nodes": 32,
+      "batch_size": 4096,
+      "vtree_s": 0.0010935000027529895,
+      "build_s": 0.1411123749858234,
+      "em_epoch_s": 0.6715550840017386,
+      "em_peak_mem_bytes": 1449902080,
+      "grid_eval_s": 0.4178824580158107,
+      "grid_peak_mem_bytes": 1458028544
+    }
+  ]
+}

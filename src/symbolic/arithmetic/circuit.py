@@ -1,6 +1,7 @@
 from typing import Any, Dict, List, Type
 
 import torch
+from wandb.util import np
 
 from src.utils import BitSet, NodeAllocator
 
@@ -109,42 +110,23 @@ class SymbolicArithmeticCircuit(DirectedAcyclicGraph[int, ArithmeticNode, Any]):
             _zero(node)
 
     def leaf_parameters(self):
-        """Yields optimizable parameters from leaf nodes."""
+        """Yields optimizable parameters from leaf nodes.
+
+        New leaf classes can simply store tensors with ``requires_grad=True`` as
+        attributes; they will be picked up automatically. Cached outputs and
+        structural objects are excluded.
+        """
         seen_params = set()
+        denylist = {"_last_forward_output", "support", "node_supports"}
 
         def _yield_params(node):
-            if (
-                hasattr(node, "means")
-                and isinstance(node.means, torch.Tensor)
-                and node.means.requires_grad
-            ):
-                if id(node.means) not in seen_params:
-                    seen_params.add(id(node.means))
-                    yield node.means
-            if (
-                hasattr(node, "_raw_stddevs")
-                and isinstance(node._raw_stddevs, torch.Tensor)
-                and node._raw_stddevs.requires_grad
-            ):
-                if id(node._raw_stddevs) not in seen_params:
-                    seen_params.add(id(node._raw_stddevs))
-                    yield node._raw_stddevs
-            if (
-                hasattr(node, "log_weights")
-                and isinstance(node.log_weights, torch.Tensor)
-                and node.log_weights.requires_grad
-            ):
-                if id(node.log_weights) not in seen_params:
-                    seen_params.add(id(node.log_weights))
-                    yield node.log_weights
-            if (
-                hasattr(node, "logits")
-                and isinstance(node.logits, torch.Tensor)
-                and node.logits.requires_grad
-            ):
-                if id(node.logits) not in seen_params:
-                    seen_params.add(id(node.logits))
-                    yield node.logits
+            for attr_name, attr in node.__dict__.items():
+                if attr_name in denylist:
+                    continue
+                if isinstance(attr, torch.Tensor) and attr.requires_grad:
+                    if id(attr) not in seen_params:
+                        seen_params.add(id(attr))
+                        yield attr
             if hasattr(node, "base_dist"):
                 yield from _yield_params(node.base_dist)
             if hasattr(node, "leaf_a"):
@@ -253,13 +235,40 @@ def eval_circuit(
     show_leaves_only: bool = False,
     show_weights: bool = False,
     log_domain: bool = True,
+    debug_check_finite: bool = False,
+    keep_intermediates: bool = True,
 ) -> torch.Tensor:
-    """Evaluates the circuit on the given data."""
+    """Evaluates the circuit on the given data.
+
+    Args:
+        debug_check_finite: If True, raise a ``ValueError`` when the root output
+            is non-finite for any row.  This makes structural disconnects
+            explicit instead of silently producing huge NLLs.
+        keep_intermediates: If False, free each node's output as soon as all of
+            its parents have consumed it.  This reduces peak memory for
+            inference; backward still works because autograd holds its own
+            references.
+    """
     outputs = {}
+    roots = ac.get_roots()
+    root_set = set(roots)
+    remaining_parents = None
+    if not keep_intermediates:
+        # dict() copy: the eval loop decrements counts, the cache must not.
+        remaining_parents = dict(ac.in_degrees())
+
     for node_id in ac.topological_sort(reverse=True):
         node = ac.get_node_data(node_id)
 
-        if show_weights and isinstance(node, SumLayer):
+        if (
+            show_weights
+            and isinstance(node, SumLayer)
+            and (
+                2 in node.scope
+                and 3 in node.scope
+                and 1 not in node.scope  # DEBUG: only print nodes that involve Y or Z
+            )
+        ):
             w_obj = node.log_weights
             wt = (
                 w_obj.log_weights.detach().cpu()
@@ -282,12 +291,43 @@ def eval_circuit(
                         f"DEBUG: Node {node_id:2d} ({type(node).__name__}) (scope: {list(node.scope) if node.scope and not node.scope.is_empty else 'N/A'}) weights for group {g}, node {h}:\n{wt_rounded[g, h]}"
                     )
 
+            # wt_rounded has shape (G, H, G_L * H_L, G_R * H_R)
+            wt_np = wt_rounded.detach().cpu().numpy()
+            wt_np = np.where(np.isinf(wt_np), np.nan, wt_np).clip(min=-6)
+
+            # 2. Compute standard deviation ignoring NaNs
+            per_node_stds_over_group = np.nansum(np.nanstd(wt_np, axis=0, ddof=0), axis=0)
+            per_group_stds_over_left_child = np.nanstd(wt_np, axis=(1, 2), ddof=0)
+
+            # 3. Convert back to torch if needed
+            per_node_stds_over_group = torch.from_numpy(per_node_stds_over_group)
+            per_group_stds_over_left_child = torch.from_numpy(per_group_stds_over_left_child)
+
+            print(
+                f"DEBUG: STDs for node {node_id:2d} ({type(node).__name__}) (scope: {list(node.scope) if node.scope and not node.scope.is_empty else 'N/A'}) of nodes (overlapped) over groups:\n{per_node_stds_over_group}\nmean:{per_node_stds_over_group.mean()}"
+            )
+
+            for g in range(G):
+                print(
+                    f"DEBUG: STDs for node {node_id:2d} ({type(node).__name__}) (scope: {list(node.scope) if node.scope and not node.scope.is_empty else 'N/A'}) of group {g} over all nodes over left children:\n{per_group_stds_over_left_child[g]}\nmean:{per_group_stds_over_left_child[g].mean()}"
+                )
+
         child_ids = ac.get_children(node_id)
         child_outs = [outputs[cid] for cid in child_ids]
         out = node.forward(data, child_outs)
         outputs[node_id] = out
 
-        if verbose:
+        if not keep_intermediates:
+            for cid in child_ids:
+                remaining_parents[cid] -= 1
+                if remaining_parents[cid] == 0 and cid not in root_set:
+                    outputs.pop(cid, None)
+
+        if verbose and (
+            2 in node.scope
+            and 3 in node.scope
+            and 1 not in node.scope  # DEBUG: only print nodes that involve Y or Z
+        ):
             if not show_leaves_only or isinstance(node, LeafLayer):
                 if out.numel() > 0:
                     # Convert to linear domain if requested and remove numerical artifacts
@@ -307,4 +347,11 @@ def eval_circuit(
     if not roots:
         return torch.empty(data.shape[0], 0)
     # Return the first root's output
-    return outputs[roots[0]]
+    out = outputs[roots[0]]
+    if debug_check_finite and not torch.isfinite(out).all():
+        bad = (~torch.isfinite(out)).nonzero(as_tuple=False)
+        raise ValueError(
+            f"eval_circuit produced non-finite root output for {bad.shape[0]} row(s); "
+            f"first bad row index: {bad[0].tolist()}"
+        )
+    return out

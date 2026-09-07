@@ -25,6 +25,7 @@ def test_gaussian_leaf_truncated_integration():
     intervals = dist.split_support(split_count=h)
 
     from src.symbolic.arithmetic.nodes.leaf_layer import GaussianLeafLayer
+
     node_supports = []
     from src.utils import Support
 

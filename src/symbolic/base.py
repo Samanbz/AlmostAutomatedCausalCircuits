@@ -24,6 +24,9 @@ class DirectedAcyclicGraph(Generic[K, N, E]):
         self._adj: Dict[K, Dict[K, E]] = {}
         # Reverse Adjacency: child_id -> {parent_id: edge_data}
         self._rev_adj: Dict[K, Dict[K, E]] = {}
+        # Memoized topological orders; cleared on any structural mutation.
+        self._topo_cache: Dict[bool, List[K]] = {}
+        self._in_degree_cache: Dict[K, int] = {}
 
         if node_allocator is None:
             # Default to IncrementalNodeAllocator if K is int
@@ -31,6 +34,17 @@ class DirectedAcyclicGraph(Generic[K, N, E]):
         else:
             self.node_allocator = node_allocator
         # For generating unique node IDs
+
+    def _clear_structure_caches(self) -> None:
+        """Invalidate memoized graph walks after a structural mutation."""
+        self._topo_cache.clear()
+        self._in_degree_cache.clear()
+
+    def in_degrees(self) -> Dict[K, int]:
+        """In-degree of every node, memoized; cleared on structural mutation."""
+        if not self._in_degree_cache and self._nodes:
+            self._in_degree_cache = {u: len(self._rev_adj[u]) for u in self._nodes}
+        return self._in_degree_cache
 
     def add_node(self, data: N) -> K:
         """Adds a node to the graph."""
@@ -40,6 +54,7 @@ class DirectedAcyclicGraph(Generic[K, N, E]):
         self._nodes[node_id] = data
         self._adj[node_id] = {}
         self._rev_adj[node_id] = {}
+        self._clear_structure_caches()
         return node_id
 
     def _add_node(self, data: N) -> K:
@@ -48,6 +63,7 @@ class DirectedAcyclicGraph(Generic[K, N, E]):
         self._nodes[node_id] = data
         self._adj[node_id] = {}
         self._rev_adj[node_id] = {}
+        self._clear_structure_caches()
         return node_id
 
     def _add_node_explicit(self, node_id: K, data: N) -> None:
@@ -57,6 +73,7 @@ class DirectedAcyclicGraph(Generic[K, N, E]):
         self._nodes[node_id] = data
         self._adj[node_id] = {}
         self._rev_adj[node_id] = {}
+        self._clear_structure_caches()
 
     def add_edge(self, source: K, target: K, data: E = None) -> None:
         """Adds a directed edge from source to target."""
@@ -64,17 +81,20 @@ class DirectedAcyclicGraph(Generic[K, N, E]):
             raise KeyError(f"Source '{source}' or Target '{target}' not found.")
         self._adj[source][target] = data
         self._rev_adj[target][source] = data
+        self._clear_structure_caches()
 
     def _add_edge(self, source: K, target: K, data: E = None) -> None:
         """Adds an edge without existence checks — caller must guarantee both nodes exist."""
         self._adj[source][target] = data
         self._rev_adj[target][source] = data
+        self._clear_structure_caches()
 
     def remove_edge(self, source: K, target: K) -> None:
         """Removes a directed edge from source to target."""
         if source in self._adj and target in self._adj[source]:
             del self._adj[source][target]
             del self._rev_adj[target][source]
+            self._clear_structure_caches()
 
     def remove_node(self, node_id: K) -> None:
         """Removes a node and all its incident edges."""
@@ -92,6 +112,7 @@ class DirectedAcyclicGraph(Generic[K, N, E]):
         del self._adj[node_id]
         del self._rev_adj[node_id]
         del self._nodes[node_id]
+        self._clear_structure_caches()
 
     def get_parents(self, node_id: K) -> List[K]:
         """Returns a list of parent node IDs."""
@@ -190,7 +211,18 @@ class DirectedAcyclicGraph(Generic[K, N, E]):
     def topological_sort(self, reverse: bool = False) -> Generator[K, None, None]:
         """
         Yields node_ids in topological order using Kahn's Algorithm.
+
+        The order is computed once and memoized on the instance; any structural
+        mutation (adding/removing nodes or edges) invalidates the cache.
         """
+        cached = self._topo_cache.get(reverse)
+        if cached is None:
+            cached = list(self._kahn_topological_sort(reverse))
+            self._topo_cache[reverse] = cached
+        return iter(cached)
+
+    def _kahn_topological_sort(self, reverse: bool = False) -> Generator[K, None, None]:
+        """Uncached Kahn's algorithm — see :meth:`topological_sort`."""
         # Calculate in-degrees based on existing edges
         if reverse:
             # Out-degree for reverse topological sort
@@ -202,8 +234,6 @@ class DirectedAcyclicGraph(Generic[K, N, E]):
             degree = {u: len(self._rev_adj[u]) for u in self._nodes}
             queue = deque([u for u, deg in degree.items() if deg == 0])
             adjacency = self._adj
-
-        # print(f"DEBUG topo sort: degree={degree}")
 
         visited_count = 0
         while queue:

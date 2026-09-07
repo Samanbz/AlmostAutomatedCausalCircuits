@@ -8,9 +8,13 @@ import numpy as np
 import torch
 from matplotlib.colors import LinearSegmentedColormap
 
+from src.logger import logger as g_logger
 from src.symbolic.scm import StructuralCausalModel
 
 from .base import DirectedAcyclicGraph
+
+
+logger = g_logger.getChild("io_utils")
 
 
 def plot_dag(
@@ -129,7 +133,7 @@ def plot_dag(
     # 5. Render or Return
     if output_path is not None:
         out_file = Path(output_path)
-        print(f"Rendering graph to {output_path}...")
+        logger.debug(f"Rendering graph to {output_path}...")
         try:
             if is_html:
                 svg_data = dot.pipe(format="svg").decode("utf-8")

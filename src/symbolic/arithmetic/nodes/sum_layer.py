@@ -1,5 +1,6 @@
-import torch
 from typing import List, Optional
+
+import torch
 
 from src.logger import logger as g_logger
 from src.symbolic.arithmetic.weights import Weights
@@ -60,10 +61,6 @@ class SumLayer(ArithmeticNode):
         )
 
         left_out, right_out = children_outputs
-
-        # Clamp inputs
-        left_out = left_out.clamp(min=-1e10)
-        right_out = right_out.clamp(min=-1e10)
 
         return self.log_weights.forward(left_out, right_out)
 

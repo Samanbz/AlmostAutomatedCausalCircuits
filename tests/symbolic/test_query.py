@@ -639,20 +639,7 @@ def check_conditional_dependencies(ac, scm, data=None):
     out_z = eval_circuit(q_z, data)
     out_cond_yz = out_yz - out_z
 
-    # print("\nSample | circuit P(Y|X,Z) | circuit P(Y|X) | true P(Y|X,Z) | true P(Y|X)")
-    # for i in range(data.shape[0]):
-    #     z0 = float(data[i, 0])
-    #     z1 = float(data[i, 1])
-    #     x = float(data[i, 2])
-    #     y = float(data[i, 3])
-    #     c_yxz = float(out_cond_yxz[i])
-    #     c_yx = float(out_cond_yx[i])
-    #     t_yxz = scm.empirical_log_density(
-    #         {"Y": y}, {"X": x, "Z0": z0, "Z1": z1}, n_samples=5000000, eps=0.2
-    #     )
-    #     t_yx = scm.empirical_log_density({"Y": y}, {"X": x}, n_samples=5000000, eps=0.2)
-    #     print(f"{data[i]} | {c_yxz:16.4f} | {c_yx:14.4f} | {t_yxz:13.4f} | {t_yx:11.4f}")
-
+    # pri
     diff_yx = out_cond_yxz - out_cond_yx
     diff_yz = out_cond_yxz - out_cond_yz
 

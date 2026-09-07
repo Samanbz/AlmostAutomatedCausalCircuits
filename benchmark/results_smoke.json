@@ -1,0 +1,27 @@
+{
+  "device": "cpu",
+  "n_samples": 8192,
+  "grid": 100,
+  "runs": [
+    {
+      "num_nodes": 4,
+      "batch_size": 4096,
+      "vtree_s": 0.009748708020197228,
+      "build_s": 0.014380750013515353,
+      "em_epoch_s": 0.03764641599263996,
+      "em_peak_mem_bytes": 401092902912,
+      "grid_eval_s": 0.00580591699690558,
+      "grid_peak_mem_bytes": 401361338368
+    },
+    {
+      "num_nodes": 8,
+      "batch_size": 4096,
+      "vtree_s": 0.0011140420101583004,
+      "build_s": 0.0038120840035844594,
+      "em_epoch_s": 0.07233991698012687,
+      "em_peak_mem_bytes": 501168996352,
+      "grid_eval_s": 0.023270666017197073,
+      "grid_peak_mem_bytes": 526938800128
+    }
+  ]
+}

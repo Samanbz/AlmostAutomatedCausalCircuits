@@ -32,6 +32,7 @@ class _SafeLogSumExp(torch.autograd.Function):
 
         if not keepdim:
             dims = dim if isinstance(dim, (tuple, list)) else (dim,)
+            dims = tuple(d if d >= 0 else d + input.ndim for d in dims)
             dims_set = set(dims)
             target_shape = []
             out_ptr = 0
@@ -63,6 +64,52 @@ class _SafeLogSumExp(torch.autograd.Function):
 
 def safe_logsumexp(input: torch.Tensor, dim, keepdim: bool = False) -> torch.Tensor:
     return _SafeLogSumExp.apply(input, dim, keepdim)
+
+
+def _blocked_broadcast_lse(
+    prod: torch.Tensor, w: torch.Tensor, dim, max_elems: Optional[int] = None
+) -> torch.Tensor:
+    """``safe_logsumexp(prod + w, dim=dim)`` without materializing the full broadcast.
+
+    ``prod`` and ``w`` must have the same rank with aligned axes (typically both
+    already-unsqueezed views of a layer contraction), and axis 0 must be a real,
+    independent batch dimension of ``prod`` that is *not* part of ``dim``. The
+    materialized broadcast ``prod + w`` has the elementwise-max shape of the two
+    operands; the batch axis is processed in chunks so the temporary stays under
+    the element budget (default 256 MB in fp32 on CPU, 1 GB on CUDA), and the
+    per-row results are concatenated. Chunking the batch axis never splits the
+    reduction, so each row's result is bit-identical to the unchunked op (no
+    ``logaddexp`` accumulation chain). When a single chunk covers the batch,
+    the original op sequence runs unchanged. Only transient memory is bounded:
+    under autograd each chunk input is still saved for backward by
+    ``safe_logsumexp``.
+    """
+    dims = tuple(
+        d if d >= 0 else d + prod.dim() for d in (dim if isinstance(dim, (tuple, list)) else (dim,))
+    )
+    if 0 in dims:
+        raise ValueError("batch axis 0 must not be part of the reduction dim")
+    bshape = [max(p, q) for p, q in zip(prod.shape, w.shape)]
+    budget = max_elems if max_elems is not None else (1 << 28 if prod.is_cuda else 1 << 26)
+    per_slice = max(1, _prod(bshape[1:]))
+    rows_per_chunk = max(1, budget // per_slice)
+    if rows_per_chunk >= bshape[0]:
+        return safe_logsumexp(prod + w, dim=dim)
+
+    parts = [
+        safe_logsumexp(
+            prod.narrow(0, start, min(start + rows_per_chunk, bshape[0]) - start) + w, dim=dim
+        )
+        for start in range(0, bshape[0], rows_per_chunk)
+    ]
+    return torch.cat(parts, dim=0)
+
+
+def _prod(sizes) -> int:
+    out = 1
+    for s in sizes:
+        out *= s
+    return out
 
 
 class Weights(ABC):
@@ -161,7 +208,9 @@ class DenseWeights(Weights):
         else:
             prod = left_out.view(B, G_L, L, 1, 1) + right_out.view(B, 1, 1, G_R, R)
 
-        out = safe_logsumexp(prod.unsqueeze(1).unsqueeze(2) + w.unsqueeze(0), dim=(3, 4, 5, 6))
+        out = _blocked_broadcast_lse(
+            prod.unsqueeze(1).unsqueeze(2), w.unsqueeze(0), dim=(3, 4, 5, 6)
+        )
         return out.view(B, G, U)
 
     def detach(self) -> "DenseWeights":
@@ -216,13 +265,64 @@ class DenseWeights(Weights):
 
 
 class SparseWeights(Weights):
-    """Masked weights that enforce structural zeros."""
+    """Masked weights that enforce structural zeros.
+
+    The canonical representation remains the dense ``log_weights`` tensor plus a
+    boolean ``mask`` (so ``ProductWeights`` and the query compiler are
+    unaffected).  Additionally, when the mask is genuinely sparse, we precompute
+    coordinate indices of the non-zero entries so ``forward`` can gather only
+    those child combinations instead of materializing the full dense product.
+    """
+
+    # Only use the gather-based forward when the mask density is below this.
+    _SPARSE_FORWARD_MAX_DENSITY = 0.5
 
     def __init__(self, log_weights: torch.Tensor, mask: torch.Tensor = None):
         self.log_weights = log_weights
         if mask is None:
             mask = (log_weights.data > -20.0).float()
         self.mask = mask
+        self._build_sparse_index()
+
+    def _build_sparse_index(self) -> None:
+        """Precompute coordinate indices of non-zero mask entries."""
+        self._sparse_indices = None
+        self._sparse_num = None
+        self._sparse_widx = None
+
+        mask_bool = self.mask > 0
+        G, U, G_L, L, G_R, R = mask_bool.shape
+        total = mask_bool.numel()
+        nnz = int(mask_bool.sum().item())
+        if nnz == 0 or nnz / total > self._SPARSE_FORWARD_MAX_DENSITY:
+            return
+
+        device = self.mask.device
+        counts = mask_bool.sum(dim=(2, 3, 4, 5)).to(torch.long)  # [G, U]
+        K = int(counts.max().item())
+
+        indices = torch.zeros(G, U, K, 4, dtype=torch.long, device=device)
+        counter = torch.zeros(G, U, dtype=torch.long, device=device)
+        nz = mask_bool.nonzero(as_tuple=False)
+        # Sort by (g, u) so entries for the same parent unit are contiguous.
+        key = nz[:, 0] * U + nz[:, 1]
+        nz = nz[torch.argsort(key)]
+        for row in nz:
+            g, u, gl, li, gr, r = row.tolist()
+            k = int(counter[g, u].item())
+            indices[g, u, k, 0] = gl
+            indices[g, u, k, 1] = li
+            indices[g, u, k, 2] = gr
+            indices[g, u, k, 3] = r
+            counter[g, u] += 1
+
+        # Flat index into the [G_L, L, G_R, R] weight dimensions.
+        widx = (indices[..., 0] * L + indices[..., 1]) * G_R + indices[..., 2]
+        widx = widx * R + indices[..., 3]
+
+        self._sparse_indices = indices
+        self._sparse_num = counts
+        self._sparse_widx = widx
 
     def to(self, device: torch.device) -> "Weights":
         if isinstance(self.log_weights, torch.Tensor):
@@ -233,6 +333,10 @@ class SparseWeights(Weights):
                 )
         if isinstance(self.mask, torch.Tensor):
             self.mask = self.mask.to(device)
+        for attr in ("_sparse_indices", "_sparse_num", "_sparse_widx"):
+            t = getattr(self, attr, None)
+            if isinstance(t, torch.Tensor):
+                setattr(self, attr, t.to(device))
         return self
 
     @property
@@ -265,6 +369,21 @@ class SparseWeights(Weights):
         w = self.log_weights
         G, U, G_L, L, G_R, R = w.shape
         B = left_out.shape[0]
+
+        # Sparse gather path: only evaluate the non-masked child combinations.
+        if self._sparse_indices is not None and right_out is not None:
+            idx = self._sparse_indices  # [G, U, K, 4]
+            K = idx.shape[2]
+            gl, li, gr, r = idx[..., 0], idx[..., 1], idx[..., 2], idx[..., 3]
+            left_sel = left_out[:, gl, li]  # [B, G, U, K]
+            right_sel = right_out[:, gr, r]  # [B, G, U, K]
+            w_sel = torch.gather(w.view(G, U, -1), 2, self._sparse_widx)  # [G, U, K]
+            vals = left_sel + right_sel + w_sel.unsqueeze(0)  # [B, G, U, K]
+            pad = torch.arange(K, device=w.device).view(1, 1, 1, K) >= self._sparse_num.view(
+                1, G, U, 1
+            )
+            vals = vals.masked_fill(pad, float("-inf"))
+            return safe_logsumexp(vals, dim=-1)  # [B, G, U]
 
         if right_out is None:
             child = left_out.view(B, G_L, L, 1, 1)
@@ -307,11 +426,11 @@ class SparseWeights(Weights):
 
         new_probs = torch.where(
             self.mask > 0,
-            new_probs,
-            torch.tensor(1e-15, dtype=new_probs.dtype, device=new_probs.device),
+            new_probs.clamp(min=1e-20),
+            torch.tensor(1e-20, dtype=new_probs.dtype, device=new_probs.device),
         )
 
-        self.log_weights.data.copy_(torch.log(new_probs.clamp(min=1e-20)))
+        self.log_weights.data.copy_(torch.log(new_probs))
         self.log_weights.grad.zero_()
 
     def __str__(self) -> str:
@@ -465,52 +584,68 @@ class ProductWeights(Weights):
             left_p = left_r.permute(0, 1, 3, 2, 4).reshape(B, G_L1, 1, L1, 1, G_L2, L2, 1, 1)
             right_p = right_r.permute(0, 1, 3, 2, 4).reshape(B, 1, G_R1, 1, R1, 1, 1, G_R2, R2)
             child2 = left_p + right_p
-            temp = child2.unsqueeze(5).unsqueeze(6) + lw2.view(
-                1, 1, 1, 1, 1, G2, U2, G_L2, L2, G_R2, R2
+            temp = _blocked_broadcast_lse(
+                child2.unsqueeze(5).unsqueeze(6),
+                lw2.view(1, 1, 1, 1, 1, G2, U2, G_L2, L2, G_R2, R2),
+                dim=(7, 8, 9, 10),
             )
-            temp = safe_logsumexp(temp, dim=(7, 8, 9, 10))
             temp = temp.permute(0, 5, 6, 1, 3, 2, 4)
-            out = temp.unsqueeze(3).unsqueeze(4) + lw1.view(1, 1, 1, G1, U1, G_L1, L1, G_R1, R1)
-            out = safe_logsumexp(out, dim=(5, 6, 7, 8))
+            out = _blocked_broadcast_lse(
+                temp.unsqueeze(3).unsqueeze(4),
+                lw1.view(1, 1, 1, G1, U1, G_L1, L1, G_R1, R1),
+                dim=(5, 6, 7, 8),
+            )
             out = out.permute(0, 3, 1, 4, 2)
 
         elif self.expand_L and not self.expand_R:
             left_p = left_r.permute(0, 1, 3, 2, 4).reshape(B, G_L1, 1, L1, G_L2, L2, 1, 1)
             right_p = right_r.reshape(B, 1, G_R1, 1, 1, 1, G_R2, R1)
             child2 = left_p + right_p
-            temp = child2.unsqueeze(4).unsqueeze(5) + lw2.view(
-                1, 1, 1, 1, G2, U2, G_L2, L2, G_R2, R1
+            temp = _blocked_broadcast_lse(
+                child2.unsqueeze(4).unsqueeze(5),
+                lw2.view(1, 1, 1, 1, G2, U2, G_L2, L2, G_R2, R1),
+                dim=(6, 7, 8),
             )
-            temp = safe_logsumexp(temp, dim=(6, 7, 8))
             temp = temp.permute(0, 4, 5, 1, 3, 2, 6)
-            out = temp.unsqueeze(3).unsqueeze(4) + lw1.view(1, 1, 1, G1, U1, G_L1, L1, G_R1, R1)
-            out = safe_logsumexp(out, dim=(5, 6, 7, 8))
+            out = _blocked_broadcast_lse(
+                temp.unsqueeze(3).unsqueeze(4),
+                lw1.view(1, 1, 1, G1, U1, G_L1, L1, G_R1, R1),
+                dim=(5, 6, 7, 8),
+            )
             out = out.permute(0, 3, 1, 4, 2)
 
         elif not self.expand_L and self.expand_R:
             left_p = left_r.reshape(B, G_L1, 1, 1, G_L2, 1, 1, L1)
             right_p = right_r.permute(0, 1, 3, 2, 4).reshape(B, 1, G_R1, R1, 1, G_R2, R2, 1)
             child2 = left_p + right_p
-            temp = child2.unsqueeze(4).unsqueeze(5) + lw2.permute(0, 1, 2, 4, 5, 3).reshape(
-                1, 1, 1, 1, G2, U2, G_L2, G_R2, R2, L1
+            temp = _blocked_broadcast_lse(
+                child2.unsqueeze(4).unsqueeze(5),
+                lw2.permute(0, 1, 2, 4, 5, 3).reshape(1, 1, 1, 1, G2, U2, G_L2, G_R2, R2, L1),
+                dim=(6, 7, 8),
             )
-            temp = safe_logsumexp(temp, dim=(6, 7, 8))
             temp = temp.permute(0, 4, 5, 1, 6, 2, 3)
-            out = temp.unsqueeze(3).unsqueeze(4) + lw1.view(1, 1, 1, G1, U1, G_L1, L1, G_R1, R1)
-            out = safe_logsumexp(out, dim=(5, 6, 7, 8))
+            out = _blocked_broadcast_lse(
+                temp.unsqueeze(3).unsqueeze(4),
+                lw1.view(1, 1, 1, G1, U1, G_L1, L1, G_R1, R1),
+                dim=(5, 6, 7, 8),
+            )
             out = out.permute(0, 3, 1, 4, 2)
 
         else:
             left_p = left_r.reshape(B, G_L1, 1, G_L2, 1, L1, 1)
             right_p = right_r.reshape(B, 1, G_R1, 1, G_R2, 1, R1)
             child2 = left_p + right_p
-            temp = child2.unsqueeze(3).unsqueeze(4) + lw2.permute(0, 1, 2, 4, 3, 5).reshape(
-                1, 1, 1, G2, U2, G_L2, G_R2, L1, R1
+            temp = _blocked_broadcast_lse(
+                child2.unsqueeze(3).unsqueeze(4),
+                lw2.permute(0, 1, 2, 4, 3, 5).reshape(1, 1, 1, G2, U2, G_L2, G_R2, L1, R1),
+                dim=(5, 6),
             )
-            temp = safe_logsumexp(temp, dim=(5, 6))
             temp = temp.permute(0, 3, 4, 1, 5, 2, 6)
-            out = temp.unsqueeze(3).unsqueeze(4) + lw1.view(1, 1, 1, G1, U1, G_L1, L1, G_R1, R1)
-            out = safe_logsumexp(out, dim=(5, 6, 7, 8))
+            out = _blocked_broadcast_lse(
+                temp.unsqueeze(3).unsqueeze(4),
+                lw1.view(1, 1, 1, G1, U1, G_L1, L1, G_R1, R1),
+                dim=(5, 6, 7, 8),
+            )
             out = out.permute(0, 3, 1, 4, 2)
 
         if self.expand_U:
@@ -542,8 +677,78 @@ class ProductWeights(Weights):
         return self
 
     def update_params(self, step_size: float = 1.0, smoothing: float = 1e-4) -> None:
-        self.w1.update_params(step_size, smoothing)
-        self.w2.update_params(step_size, smoothing)
+        raise NotImplementedError(
+            "ProductWeights does not support update_params; update the base weights instead."
+        )
 
     def __str__(self) -> str:
         return f"ProductWeights(expand_U={self.expand_U}, L={self.expand_L}, R={self.expand_R}\n{self.w1.__str__()},\n{self.w2.__str__()})"
+
+
+class MixingCondWeights(Weights):
+    """Lazy view of base weights normalized over the non-MD child axis.
+
+    Used by the conditional-circuit compiler (Wang's algorithm) for
+    left/right-mixing layers that are MD with respect to the conditioning set:
+    the conditional weights are ``base - logsumexp(base, over the mixing
+    axis)``.  Unlike ``uniformize(other_child_axis=...)`` — which bakes the
+    current values into a new tensor at compile time — this wrapper recomputes
+    the normalization from the live base tensor at every forward pass, so a
+    query circuit compiled before training keeps tracking EM updates of the
+    base circuit.
+    """
+
+    def __init__(self, base: Weights, other_child_axis: str):
+        assert other_child_axis in ("left", "right")
+        self.base = base
+        self.other_child_axis = other_child_axis
+
+    def _normalized_log_weights(self) -> torch.Tensor:
+        lw = self.base.log_weights
+        total = safe_logsumexp(
+            lw,
+            dim=(4, 5) if self.other_child_axis == "right" else (2, 3),
+            keepdim=True,
+        )
+        lw = lw - total
+        mask = getattr(self.base, "mask", None)
+        if mask is not None:
+            lw = torch.where(mask == 0, float("-inf"), lw)
+        return lw
+
+    @property
+    def log_weights(self) -> torch.Tensor:
+        """Normalized log-weights, recomputed from the live base tensor."""
+        return self._normalized_log_weights()
+
+    @property
+    def shape(self) -> Tuple[int, ...]:
+        return self.base.shape
+
+    def forward(
+        self, left_out: torch.Tensor, right_out: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        return DenseWeights(self._normalized_log_weights()).forward(left_out, right_out)
+
+    def to(self, device: torch.device) -> "Weights":
+        # The base weights object is shared with the base circuit and is moved
+        # by its own ``to``; nothing device-resident lives here.
+        return self
+
+    def detach(self) -> "Weights":
+        return self.base.detach()
+
+    def requires_grad_(self, requires_grad: bool) -> "Weights":
+        self.base.requires_grad_(requires_grad)
+        return self
+
+    def update_params(self, step_size: float = 1.0, smoothing: float = 1e-4) -> None:
+        raise NotImplementedError(
+            "MixingCondWeights does not support update_params; update the base weights instead."
+        )
+
+    def uniformize(self) -> "Weights":
+        return MixingCondWeights(self.base.uniformize(), self.other_child_axis)
+
+    def __str__(self) -> str:
+        return f"MixingCondWeights(axis={self.other_child_axis}, base={self.base})"

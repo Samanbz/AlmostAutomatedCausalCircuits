@@ -101,9 +101,13 @@ def main():
         print(f"  expand_L={expand_L}, expand_R={expand_R}, expand_U={expand_U}: {status}")
 
     # Performance benchmarks
-    print("\n--- Performance Benchmark (Full Kronecker: expand_L=True, expand_R=True, expand_U=True) ---")
-    print(f"{'H':>4} {'G':>3} {'B':>4} {'weight_shape':>30} {'weight_elems':>14} "
-          f"{'avg_ms':>10} {'min_ms':>10} {'peak_MB':>10}")
+    print(
+        "\n--- Performance Benchmark (Full Kronecker: expand_L=True, expand_R=True, expand_U=True) ---"
+    )
+    print(
+        f"{'H':>4} {'G':>3} {'B':>4} {'weight_shape':>30} {'weight_elems':>14} "
+        f"{'avg_ms':>10} {'min_ms':>10} {'peak_MB':>10}"
+    )
     print("-" * 100)
 
     configs = [
@@ -121,25 +125,33 @@ def main():
         try:
             r = benchmark_forward(H, G, B, expand_L=True, expand_R=True, expand_U=True)
             results.append(r)
-            print(f"{r['H']:>4} {r['G']:>3} {r['B']:>4} {str(r['weight_shape']):>30} "
-                  f"{r['weight_elements']:>14,} {r['avg_time_ms']:>10.2f} "
-                  f"{r['min_time_ms']:>10.2f} {r['peak_mem_MB']:>10.2f}")
+            print(
+                f"{r['H']:>4} {r['G']:>3} {r['B']:>4} {str(r['weight_shape']):>30} "
+                f"{r['weight_elements']:>14,} {r['avg_time_ms']:>10.2f} "
+                f"{r['min_time_ms']:>10.2f} {r['peak_mem_MB']:>10.2f}"
+            )
         except Exception as e:
             print(f"{H:>4} {G:>3} {B:>4} {'FAILED':>30} -- {e}")
 
     # Also benchmark Hadamard case for comparison
-    print("\n--- Performance Benchmark (Hadamard: expand_L=False, expand_R=False, expand_U=False) ---")
-    print(f"{'H':>4} {'G':>3} {'B':>4} {'weight_shape':>30} {'weight_elems':>14} "
-          f"{'avg_ms':>10} {'min_ms':>10} {'peak_MB':>10}")
+    print(
+        "\n--- Performance Benchmark (Hadamard: expand_L=False, expand_R=False, expand_U=False) ---"
+    )
+    print(
+        f"{'H':>4} {'G':>3} {'B':>4} {'weight_shape':>30} {'weight_elems':>14} "
+        f"{'avg_ms':>10} {'min_ms':>10} {'peak_MB':>10}"
+    )
     print("-" * 100)
 
     for H, G, B in configs:
         try:
             r = benchmark_forward(H, G, B, expand_L=False, expand_R=False, expand_U=False)
             results.append(r)
-            print(f"{r['H']:>4} {r['G']:>3} {r['B']:>4} {str(r['weight_shape']):>30} "
-                  f"{r['weight_elements']:>14,} {r['avg_time_ms']:>10.2f} "
-                  f"{r['min_time_ms']:>10.2f} {r['peak_mem_MB']:>10.2f}")
+            print(
+                f"{r['H']:>4} {r['G']:>3} {r['B']:>4} {str(r['weight_shape']):>30} "
+                f"{r['weight_elements']:>14,} {r['avg_time_ms']:>10.2f} "
+                f"{r['min_time_ms']:>10.2f} {r['peak_mem_MB']:>10.2f}"
+            )
         except Exception as e:
             print(f"{H:>4} {G:>3} {B:>4} {'FAILED':>30} -- {e}")
 

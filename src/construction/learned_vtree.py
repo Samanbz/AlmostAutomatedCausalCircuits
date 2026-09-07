@@ -72,10 +72,16 @@ def evaluate_data_mi(skeleton: nx.Graph, data: torch.Tensor):
 
 
 class LearnedVTreeBuilder:
-    def __init__(self, prioritize: str = "hardware", md_sets: list[set[int]] | None = None):
+    def __init__(
+        self,
+        prioritize: str = "hardware",
+        md_sets: list[set[int]] | None = None,
+        keep_together: list[tuple[int, int]] | None = None,
+    ):
         self.vt = VTree()
         self.prioritize = prioritize
         self.md_sets = md_sets or []
+        self.keep_together = [tuple(sorted((u, v))) for u, v in (keep_together or [])]
 
     def _apply_pymetis(self, G: nx.Graph) -> tuple[list[int], list[int]]:
         nodes = list(G.nodes())
@@ -119,13 +125,32 @@ class LearnedVTreeBuilder:
         return best_left, best_right
 
     def _bisect_graph(self, G: nx.Graph, scope_list: list[int]) -> tuple[list[int], list[int]]:
-        components = list(nx.connected_components(G))
-        if len(components) > 1:
-            left_vars = list(components[0])
-            right_vars = [node for c in components[1:] for node in c]
-            return left_vars, right_vars
-
         scope_set = set(scope_list)
+
+        # Contract any keep_together pairs that are fully inside this scope.
+        # This forces the partitioner to put the paired variables on the same
+        # side, so they are split as late/deep in the tree as possible.
+        G_contracted = G.copy()
+        merged = {n: {n} for n in G_contracted.nodes()}
+        for u, v in self.keep_together:
+            if (
+                u in scope_set
+                and v in scope_set
+                and u in G_contracted
+                and v in G_contracted
+                and u != v
+            ):
+                keep, discard = (v, u) if v > u else (u, v)
+                G_contracted = nx.contracted_nodes(G_contracted, keep, discard, self_loops=False)
+                merged[keep].update(merged.pop(discard))
+
+        components = list(nx.connected_components(G_contracted))
+        if len(components) > 1:
+            left_super = list(components[0])
+            right_super = [node for c in components[1:] for node in c]
+            left_vars = sorted([x for sn in left_super for x in merged[sn]])
+            right_vars = sorted([x for sn in right_super for x in merged[sn]])
+            return left_vars, right_vars
 
         # Expressivity: split on the largest md-set boundary first.
         # Find the largest md-set that is a proper subset of the current scope.
@@ -137,21 +162,32 @@ class LearnedVTreeBuilder:
                     best_md = md_in_scope
                     break
             if best_md is not None:
-                left_vars = sorted(best_md)
-                right_vars = sorted(scope_set - best_md)
-                return left_vars, right_vars
+                # If an explicit MD split would separate a keep_together pair,
+                # fall back to the partitioner so the pair stays together.
+                cuts_pair = any(
+                    (u in best_md) != (v in best_md)
+                    for u, v in self.keep_together
+                    if u in scope_set and v in scope_set
+                )
+                if not cuts_pair:
+                    left_vars = sorted(best_md)
+                    right_vars = sorted(scope_set - best_md)
+                    return left_vars, right_vars
 
         try:
             if self.prioritize == "expressivity":
                 try:
-                    left_vars, right_vars = self._apply_pymetis(G)
+                    left_super, right_super = self._apply_pymetis(G_contracted)
                 except ImportError:
-                    left_vars, right_vars = self._apply_greedy_modularity(G)
+                    left_super, right_super = self._apply_greedy_modularity(G_contracted)
             else:
-                left_vars, right_vars = self._apply_kernighan_lin(G)
+                left_super, right_super = self._apply_kernighan_lin(G_contracted)
 
-            if not left_vars or not right_vars:
+            if not left_super or not right_super:
                 raise ValueError("Bisection failed")
+
+            left_vars = sorted([x for sn in left_super for x in merged[sn]])
+            right_vars = sorted([x for sn in right_super for x in merged[sn]])
             return left_vars, right_vars
         except (nx.NetworkXError, ValueError):
             half = len(scope_list) // 2
@@ -180,7 +216,10 @@ class LearnedVTreeBuilder:
 
 
 def construct_optimal_vtree(
-    data: torch.Tensor, dag: nx.DiGraph | None = None, prioritize: str = "hardware"
+    data: torch.Tensor,
+    dag: nx.DiGraph | None = None,
+    prioritize: str = "hardware",
+    keep_together: list[tuple[int, int]] | None = None,
 ) -> VTree:
     """
     Builds a pure data-driven and skeleton-constrained VTree.
@@ -189,7 +228,7 @@ def construct_optimal_vtree(
     skeleton = build_skeleton(dag, n_vars)
     evaluate_data_mi(skeleton, data)
 
-    builder = LearnedVTreeBuilder(prioritize=prioritize)
+    builder = LearnedVTreeBuilder(prioritize=prioritize, keep_together=keep_together)
     return builder.build(skeleton)
 
 
@@ -198,6 +237,7 @@ def construct_optimal_md_vtree(
     md_sets: list[set[int]],
     dag: nx.DiGraph | None = None,
     prioritize: str = "hardware",  # or "expressivity"
+    keep_together: list[tuple[int, int]] | None = None,
 ) -> VTree:
     """
     Builds a VTree that explicitly enforces MD-Set constraints.
@@ -206,6 +246,10 @@ def construct_optimal_md_vtree(
 
     MD sets must be closed under intersection: if A and B are in md_sets, then
     A ∩ B must also be in md_sets.
+
+    ``keep_together`` is a list of variable pairs that should stay on the same
+    side of every bisection for as long as possible (i.e. they are split as
+    deep in the tree as possible).
     """
     # Validate intersection-closure
     md_sets_bs = [BitSet(s) for s in md_sets]
@@ -223,7 +267,9 @@ def construct_optimal_md_vtree(
     apply_md_constraints(skeleton, md_sets, md_weight=1e9)
     evaluate_data_mi(skeleton, data)
 
-    builder = LearnedVTreeBuilder(prioritize=prioritize, md_sets=md_sets)
+    builder = LearnedVTreeBuilder(
+        prioritize=prioritize, md_sets=md_sets, keep_together=keep_together
+    )
     vt = builder.build(skeleton)
 
     vt.compute_md_labeling(md_sets)

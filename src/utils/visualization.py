@@ -9,6 +9,7 @@ from scipy.stats import norm
 from src.symbolic.arithmetic.nodes.leaf_layer import (
     GaussianLeafLayer,
     MixtureLeafLayer,
+    SplineLeafLayer,
 )
 from src.symbolic.arithmetic.weights import DenseWeights
 
@@ -94,11 +95,11 @@ def create_interactive_plot(ac, output_path="circuit.html", var_to_name=None):
             <div id="matrix-wrapper"></div>
         </div>
     </div>
-    
+
     <script type="text/javascript">
         const nodesData = {json.dumps(nodes)};
         const edgesData = {json.dumps(edges)};
-        
+
         const container = document.getElementById('network');
         const data = {{
             nodes: new vis.DataSet(nodesData),
@@ -109,24 +110,24 @@ def create_interactive_plot(ac, output_path="circuit.html", var_to_name=None):
             physics: false
         }};
         const network = new vis.Network(container, data, options);
-        
+
         let currentWeights = null;
-        
+
         function formatLogWeight(val) {{
             if (val === 0) return "0.0000e+0";
             let absVal = Math.abs(val);
-            let exponent = Math.floor(Math.log10(absVal)) - 1; 
+            let exponent = Math.floor(Math.log10(absVal)) - 1;
             let mantissa = val / Math.pow(10, exponent);
             let sign = exponent >= 0 ? "+" : "";
             return mantissa.toFixed(4) + "e" + sign + exponent;
         }}
-        
+
         network.on("click", function (params) {{
             if (params.nodes.length > 0) {{
                 const nodeId = params.nodes[0];
                 const node = nodesData.find(n => n.id === nodeId);
                 document.getElementById('node-info').innerText = node.title;
-                
+
                 if (node.weights) {{
                     currentWeights = node.weights;
                     document.getElementById('weights-view').style.display = 'block';
@@ -136,28 +137,28 @@ def create_interactive_plot(ac, output_path="circuit.html", var_to_name=None):
                 }}
             }}
         }});
-        
+
         function renderMatrix() {{
             if (!currentWeights) return;
             const shape = currentWeights.shape;
             const probs = currentWeights.probs;
             const logWeights = currentWeights.log_weights;
-            
+
             let h_sum, h_left, h_right;
-            
+
             if (shape.length === 3) {{
                 h_sum = shape[0]; h_left = shape[1]; h_right = shape[2];
             }} else if (shape.length === 2) {{
-                h_sum = shape[0]; 
+                h_sum = shape[0];
                 h_left = shape[1]; h_right = 1;
             }} else {{
                 document.getElementById('matrix-wrapper').innerHTML = "Unsupported shape: " + shape;
                 return;
             }}
-            
+
             const wrapper = document.getElementById('matrix-wrapper');
             wrapper.innerHTML = '';
-            
+
             for (let p = 0; p < h_sum; p++) {{
                 let pageData, pageLogData;
                 if (shape.length === 3) {{
@@ -167,27 +168,27 @@ def create_interactive_plot(ac, output_path="circuit.html", var_to_name=None):
                     pageData = probs[p].map(val => [val]);
                     pageLogData = logWeights[p].map(val => [val]);
                 }}
-                
+
                 const label = document.createElement('div');
                 label.className = 'matrix-label';
                 label.innerText = `Unit ${{p}}`;
                 wrapper.appendChild(label);
-                
+
                 const grid = document.createElement('div');
                 grid.className = 'matrix-container';
                 grid.style.gridTemplateColumns = `repeat(${{h_right}}, 40px)`;
-                
+
                 for (let i = 0; i < h_left; i++) {{
                     for (let j = 0; j < h_right; j++) {{
                         const cell = document.createElement('div');
                         cell.className = 'matrix-cell';
                         const val = pageData[i][j];
                         const logVal = pageLogData[i][j];
-                        
+
                         // Amplify small non-zero values
                         const intensity = val > 0 ? Math.pow(val, 0.3) : 0;
                         const colorVal = Math.floor(255 * (1 - Math.min(1.0, intensity)));
-                        
+
                         cell.style.backgroundColor = `rgb(${{colorVal}}, ${{colorVal}}, ${{colorVal}})`;
                         cell.title = `Prob: ${{val.toFixed(5)}}\\nLog weight: ${{formatLogWeight(logVal)}}`;
                         grid.appendChild(cell);
@@ -195,7 +196,7 @@ def create_interactive_plot(ac, output_path="circuit.html", var_to_name=None):
                 }}
                 wrapper.appendChild(grid);
             }}
-            
+
             // Render sum matrix across h_sum
             let sumMatrix = [];
             for (let i = 0; i < h_left; i++) {{
@@ -214,28 +215,28 @@ def create_interactive_plot(ac, output_path="circuit.html", var_to_name=None):
                     sumMatrix[i][j] = total;
                 }}
             }}
-            
+
             const sumLabel = document.createElement('div');
             sumLabel.className = 'matrix-label';
             sumLabel.innerText = 'Sum across all units';
             sumLabel.style.color = '#aa0000';
             wrapper.appendChild(sumLabel);
-            
+
             const sumGrid = document.createElement('div');
             sumGrid.className = 'matrix-container';
             sumGrid.style.gridTemplateColumns = `repeat(${{h_right}}, 40px)`;
-            
+
             for (let i = 0; i < h_left; i++) {{
                 for (let j = 0; j < h_right; j++) {{
                     const cell = document.createElement('div');
                     cell.className = 'matrix-cell';
                     const val = sumMatrix[i][j];
-                    
+
                     // Normalize by h_sum so the root (where h_sum=1) looks identical to its only unit
                     const avgVal = val / h_sum;
                     const intensity = avgVal > 0 ? Math.pow(avgVal, 0.3) : 0;
                     const colorVal = Math.floor(255 * (1 - Math.min(1.0, intensity)));
-                    
+
                     cell.style.backgroundColor = `rgb(${{colorVal}}, ${{colorVal}}, ${{colorVal}})`;
                     cell.title = "Sum Prob: " + val.toFixed(5);
                     sumGrid.appendChild(cell);
@@ -559,4 +560,71 @@ def plot_mixture_leaf(leaf: MixtureLeafLayer, ax=None, plot_components: bool = F
         ax_g.grid(True, alpha=0.3)
 
     plt.tight_layout()
+    return axes
+
+
+def plot_spline_leaf(leaf: SplineLeafLayer, ax=None):
+    """
+    Plot the per-child densities of a SplineLeafLayer.
+
+    The leaf has ``num_groups`` groups and ``num_nodes`` spline nodes per
+    group. One subplot is created per group (arranged vertically), and within
+    each subplot all ``num_nodes`` piecewise-log-linear densities are overlaid.
+    Learned split points are drawn as dotted vertical lines.
+
+    Parameters
+    ----------
+    leaf : SplineLeafLayer
+        The spline leaf layer to visualize.
+    ax : matplotlib.axes.Axes or array-like of Axes, optional
+        If ``None``, a new figure with one axis per group is created. If an
+        array-like of ``Axes`` is provided, its length must match
+        ``leaf.num_groups``.
+
+    Returns
+    -------
+    axes : list of matplotlib.axes.Axes
+        One axis per group.
+    """
+    if not isinstance(leaf, SplineLeafLayer):
+        raise ValueError("leaf must be a SplineLeafLayer")
+
+    n_groups = leaf.num_groups
+    if ax is None:
+        _, axes = plt.subplots(n_groups, 1, figsize=(6, 2 * n_groups), sharex=True)
+        if n_groups == 1:
+            axes = [axes]
+    else:
+        axes = np.atleast_1d(ax).tolist()
+
+    with torch.no_grad():
+        b = leaf._split_points().cpu().numpy()  # [G, N-1]
+
+    # Plotting range from the finite split points, padded so the exponential
+    # tails are visible on both sides.
+    finite = b[np.isfinite(b)]
+    lo = float(finite.min()) if finite.size else -3.0
+    hi = float(finite.max()) if finite.size else 3.0
+    pad = max(2.0, (hi - lo) * 0.5)
+    device = leaf._log_heights.device
+    xs = torch.linspace(lo - pad, hi + pad, 1001, device=device).unsqueeze(1)
+
+    # ``forward`` indexes ``data[:, self.var]``, so we need at least var+1 columns.
+    data = torch.zeros((xs.shape[0], leaf.var + 1), dtype=xs.dtype, device=device)
+    data[:, leaf.var] = xs.squeeze(1)
+
+    with torch.no_grad():
+        log_probs = leaf.forward(data).cpu().numpy()  # [B, G, N]
+    probs = np.exp(log_probs)
+    xs_np = xs.squeeze().cpu().numpy()
+
+    split_vals = b[0] if b.ndim == 2 else b
+    for g, ax_g in enumerate(axes):
+        for j in range(leaf.num_nodes):
+            ax_g.plot(xs_np, probs[:, g, j], alpha=0.7, lw=1.0)
+        for split in split_vals:
+            if np.isfinite(split):
+                ax_g.axvline(split, color="gray", linestyle=":", lw=0.8)
+        ax_g.set_ylabel("density")
+    axes[-1].set_xlabel("value")
     return axes
