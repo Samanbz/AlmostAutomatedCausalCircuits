@@ -1,0 +1,60 @@
+{
+  "experiment": {
+    "seed": 27,
+    "device": null,
+    "output_dir": "experiments/results/config_DE1.0_OS2.5_S27_DS2_OB0.5_XS0.9",
+    "models_dir": "models"
+  },
+  "dataset": {
+    "data_dir": "data",
+    "dataset": "N50000_Z2_DE1.0_OS2.5_S27_DS2_OB0.5_XS0.9",
+    "train_size": 0.8
+  },
+  "model": {
+    "n_confounders": 2,
+    "num_nodes": 20,
+    "prioritize": "H",
+    "md_sets": "XZ",
+    "fairness_temperature": 1.0,
+    "leaf": {
+      "Y": {
+        "distribution": "gaussian",
+        "base_stddev_scale": 2.0
+      },
+      "default": {
+        "distribution": "log_linear_spline",
+        "base_stddev_scale": 2.0
+      }
+    }
+  },
+  "training": {
+    "batch_size": 4096,
+    "total_iters": 50,
+    "step_size": 0.1,
+    "decay_rate": 0.98,
+    "decay_every": 5,
+    "log_interval": 5,
+    "leaf_lr": null,
+    "do_eval_every": 0
+  },
+  "checkpointing": {
+    "checkpoint_every_epochs": 10,
+    "save_initial": true,
+    "save_final": true
+  },
+  "evaluation": {
+    "plot": true,
+    "plot_leaves": true,
+    "hist_bins": 50,
+    "heatmap_eval_batch_size": 1024,
+    "heatmap_min_x_count": 100
+  },
+  "wandb": {
+    "enabled": false,
+    "project": "monarch-causal-circuits",
+    "entity": null,
+    "mode": "online",
+    "tags": [],
+    "log_plots": true
+  }
+}
