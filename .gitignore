@@ -54,3 +54,8 @@ wandb/
 CLAUDE.md
 GEMINI.md
 .claude/
+
+# temporary
+iclr/
+experiments/results/
+models/

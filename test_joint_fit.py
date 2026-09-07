@@ -12,7 +12,12 @@ from src.construction.circuit_builder import create_md_circuit
 from src.construction.learned_vtree import construct_optimal_md_vtree
 from src.symbolic.arithmetic.circuit import eval_circuit
 from src.symbolic.arithmetic.nodes import GaussianDistribution, SumLayer
-from src.symbolic.arithmetic.nodes.leaf_layer import GaussianLeafLayer, MixtureLeafLayer
+from src.symbolic.arithmetic.nodes.leaf_layer import (
+    GaussianLeafLayer,
+    LogLinearSplineDistribution,
+    MixtureLeafLayer,
+    SplineLeafLayer,
+)
 from src.symbolic.arithmetic.query import compile_query
 from src.symbolic.arithmetic.train import SymbolicEMTrainer
 from src.symbolic.id_ast import make_cond, make_marg, make_p, make_prod
@@ -42,17 +47,17 @@ CONFIG = {
     "seed": 27,
     "grid_size": 500,
     "x_range": (-2, 2),
-    "y_range": (-7, 7),
+    "y_range": (-20, 20),
     "output_dir": "scratch",
     "data_dir": "data",
-    "dataset": "N100000_Z2_CF3.0_S27",
+    "dataset": "N100000_Z2_DE1.5_OS0.5_S27",
     "plot": False,
     "n_eval_x": 3,
     "grid_size_3d_x": 100,
     "grid_size_3d_y": 100,
     "x_std_range": 2.5,
     "hist_bins": 50,
-    "heatmap_eval_batch_size": 1024,
+    "heatmap_eval_batch_size": 128,
     "heatmap_density_gamma": 0.4,
     "heatmap_diff_percentile": 98,
     "heatmap_min_x_count": 100,
@@ -210,7 +215,10 @@ def setup_and_train():
     md_sets = [set([x_id] + z_ids)]
     # md_sets = [set([x_id] + z_ids), set(z_ids)] if CONFIG["md_sets"] == "Z+XZ" else md_sets
     md_vtree = construct_optimal_md_vtree(
-        data, md_sets, prioritize="hardware" if CONFIG["prioritize"] == "H" else "expressivity"
+        data,
+        md_sets,
+        prioritize="hardware" if CONFIG["prioritize"] == "H" else "expressivity",
+        keep_together=[(x_id, y_id)],
     )
 
     plot_dag(
@@ -219,12 +227,22 @@ def setup_and_train():
     )
 
     dists = {}
+    print(f"var_to_id: {var_to_id}")
     for _name, vid in var_to_id.items():
-        dists[vid] = GaussianDistribution(
-            var=vid,
-            base_mean=float(data_mean[vid]),
-            base_stddev=float(data_std[vid]) * 2,
-        )
+        if vid == y_id:
+            # Y is unconstrained: keep a Gaussian mixture leaf.
+            dists[vid] = GaussianDistribution(
+                var=vid,
+                base_mean=float(data_mean[vid]),
+                base_stddev=float(data_std[vid]) * 2,
+            )
+        else:
+            # Constrained variables (X and the Z's) use disjoint-support spline leaves.
+            dists[vid] = LogLinearSplineDistribution(
+                var=vid,
+                base_mean=float(data_mean[vid]),
+                base_stddev=float(data_std[vid]) * 2,
+            )
 
     ac = create_md_circuit(
         dists,
@@ -233,8 +251,8 @@ def setup_and_train():
         initialize_weights=True,
     )
 
-    device = torch.device("cpu")
-    print(f"Using device: {device} (MPS is slow for autograd EM)")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
     ac.to(device)
 
     base_root_id = ac.get_roots()[0]
@@ -261,7 +279,10 @@ def setup_and_train():
     print(f"Test NLL (before): {compute_nll(ac, test_data):.4f}")
     print(f"Data NLL (before): {compute_nll(ac, data_tensor):.4f}")
 
-    trainer = SymbolicEMTrainer(ac)
+    has_spline_leaf = any(isinstance(d, LogLinearSplineDistribution) for d in dists.values())
+    leaf_lr = 0.01 if has_spline_leaf else 0.05
+
+    trainer = SymbolicEMTrainer(ac, leaf_lr=leaf_lr)
     trainer.train(
         data_tensor,
         n_iter=CONFIG["total_iters"],
@@ -348,6 +369,8 @@ def _num_leaf_nodes(leaf):
     """Return the number of output nodes (plotted curves) for a leaf."""
     if isinstance(leaf, GaussianLeafLayer):
         return leaf.num_nodes
+    if isinstance(leaf, SplineLeafLayer):
+        return leaf.num_nodes
     if isinstance(leaf, MixtureLeafLayer):
         w = torch.exp(leaf.log_weights.log_weights).detach().cpu().numpy()
         if w.ndim == 6:
@@ -356,8 +379,54 @@ def _num_leaf_nodes(leaf):
     return 1
 
 
+def _plot_spline_leaf(leaf: SplineLeafLayer, ax=None):
+    """Plot the per-child densities of a spline leaf layer."""
+    n_groups = leaf.num_groups
+    n_nodes = leaf.num_nodes
+    if ax is None:
+        _, axes = plt.subplots(n_groups, 1, figsize=(6, 2 * n_groups), sharex=True)
+        if n_groups == 1:
+            axes = [axes]
+    else:
+        axes = np.atleast_1d(ax).tolist()
+
+    with torch.no_grad():
+        b = leaf._split_points().cpu().numpy()  # [G, N-1]
+
+    # Determine a plotting range from the finite split points, but leave plenty
+    # of room on both sides so the exponential tails are visible.
+    finite = b[np.isfinite(b)]
+    lo = float(finite.min()) if finite.size else -3.0
+    hi = float(finite.max()) if finite.size else 3.0
+    pad = max(2.0, (hi - lo) * 0.5)
+    device = leaf._log_heights.device
+    xs = torch.linspace(lo - pad, hi + pad, 1001, device=device).unsqueeze(1)
+
+    # ``forward`` indexes ``data[:, self.var]``, so we need at least var+1 columns.
+    data = torch.zeros((xs.shape[0], leaf.var + 1), dtype=xs.dtype, device=device)
+    data[:, leaf.var] = xs.squeeze(1)
+
+    with torch.no_grad():
+        log_probs = leaf.forward(data).cpu().numpy()  # [B, G, N]
+    probs = np.exp(log_probs)
+    xs_np = xs.squeeze().cpu().numpy()
+
+    split_vals = b[0] if b.ndim == 2 else b
+    for g, ax_g in enumerate(axes):
+        for j in range(n_nodes):
+            ax_g.plot(
+                xs_np, probs[:, g, j], alpha=0.7, lw=1.0, label=f"child {j}" if j == 0 else None
+            )
+        for split in split_vals:
+            if np.isfinite(split):
+                ax_g.axvline(split, color="gray", linestyle=":", lw=0.8)
+        ax_g.set_ylabel("density")
+    axes[-1].set_xlabel("value")
+    return axes
+
+
 def plot_leaves(ac, var_to_name, output_dir, df_obs=None):
-    """Plot every Gaussian / mixture leaf distribution, like in test_query.py.
+    """Plot every Gaussian / mixture / spline leaf distribution, like in test_query.py.
 
     If ``df_obs`` is provided, the empirical marginal of the corresponding
     variable is overlaid as a black step histogram on each subplot so the
@@ -374,6 +443,8 @@ def plot_leaves(ac, var_to_name, output_dir, df_obs=None):
             axes = plot_gaussian_leaf(leaf)
         elif isinstance(leaf, MixtureLeafLayer):
             axes = plot_mixture_leaf(leaf)
+        elif isinstance(leaf, SplineLeafLayer):
+            axes = _plot_spline_leaf(leaf)
         else:
             continue
 
@@ -402,7 +473,9 @@ def plot_leaves(ac, var_to_name, output_dir, df_obs=None):
                 )
                 ax.legend(loc="best", fontsize="small")
 
-        out_path = os.path.join(output_dir, f"leaf_{leaf_id}_{var_name}_distribution.png")
+        out_path = os.path.join(
+            output_dir, f"leaf_N{CONFIG['num_nodes']}_{var_name}_distribution.png"
+        )
         plt.savefig(out_path, dpi=150)
         plt.close()
         print(f"Saved leaf plot to {out_path}")
@@ -420,14 +493,33 @@ def run_experiment():
     plot_leaves(res["ac"], var_to_name, CONFIG["output_dir"], df_obs=res["df_obs"])
 
     print("\n--- 5. Plotting ---")
-    x_mean = res["data_mean"][res["x_id"]]
-    x_std = res["data_std"][res["x_id"]]
-    n_x = CONFIG.get("n_eval_x", 6)
+    x_id_name = "X"
+    y_id_name = "Y"
+    df_obs = res["df_obs"]
+    df_do = res["df_do"]
 
-    contexts = np.linspace(
-        x_mean - CONFIG["x_std_range"] * x_std, x_mean + CONFIG["x_std_range"] * x_std, n_x
-    )
-    context_labels = [f"X={x:.2f}" for x in contexts]
+    # Pick one X value per leaf support interval instead of a uniform linspace.
+    x_intervals = _get_x_leaf_support_intervals(res["ac"], res["x_id"])
+    if x_intervals:
+        contexts, context_labels = _choose_x_values_from_intervals(
+            x_intervals, df_obs=df_obs, x_id_name=x_id_name
+        )
+        print(f"  Plotting at one X value per leaf support ({len(contexts)} values):")
+        for lbl in context_labels:
+            print(f"    {lbl}")
+    else:
+        # Fallback to the old uniform linspace if no leaf supports are available.
+        x_mean = res["data_mean"][res["x_id"]]
+        x_std = res["data_std"][res["x_id"]]
+        n_x = CONFIG.get("n_eval_x", 6)
+        contexts = np.linspace(
+            x_mean - CONFIG["x_std_range"] * x_std,
+            x_mean + CONFIG["x_std_range"] * x_std,
+            n_x,
+        )
+        context_labels = [f"X={x:.2f}" for x in contexts]
+
+    n_x = len(contexts)
 
     hist_bins = CONFIG.get("hist_bins", 100)
     y_edges = np.linspace(CONFIG["y_range"][0], CONFIG["y_range"][1], hist_bins + 1)
@@ -436,10 +528,6 @@ def run_experiment():
 
     # Ground truth from the paired datasets on disk.
     print("  Preparing GT from observational / interventional datasets...")
-    df_obs = res["df_obs"]
-    df_do = res["df_do"]
-    x_id_name = "X"
-    y_id_name = "Y"
     x_data = df_obs[x_id_name].values
     x_bandwidth = max(0.1, (x_data.max() - x_data.min()) / 20.0)
 
@@ -464,13 +552,13 @@ def run_experiment():
     )
     print("-" * 115)
 
-    x_vals_list = []
-    kl_obs_list = []
-    kl_do_list = []
-    jsd_circ_list = []
-    jsd_gt_list = []
-    jsd_obs_list = []
-    jsd_do_list = []
+    # x_vals_list = []
+    # kl_obs_list = []
+    # kl_do_list = []
+    # jsd_circ_list = []
+    # jsd_gt_list = []
+    # jsd_obs_list = []
+    # jsd_do_list = []
 
     for row, (x_val, label) in enumerate(zip(contexts, context_labels)):
         ax = axes[row]
@@ -492,30 +580,30 @@ def run_experiment():
         )
 
         # GT from datasets: P(Y|X) on observational, P(Y|X) on interventional.
-        gt_obs = _py_given_x_histogram(df_obs, x_id_name, y_id_name, x_val, y_edges, x_bandwidth)
-        gt_do = _py_given_x_histogram(df_do, x_id_name, y_id_name, x_val, y_edges, x_bandwidth)
+        gt_obs = _py_given_x_kde(df_obs, x_id_name, y_id_name, x_val, grid_y, x_bandwidth)
+        gt_do = _py_given_x_kde(df_do, x_id_name, y_id_name, x_val, grid_y, x_bandwidth)
 
-        kl_obs = compute_kl(gt_obs, p_obs, dy)
-        kl_do = compute_kl(gt_do, p_do, dy)
+        # kl_obs = compute_kl(gt_obs, p_obs, dy)
+        # kl_do = compute_kl(gt_do, p_do, dy)
 
-        jsd_circ = compute_jsd(p_obs, p_do, dy)
-        jsd_gt = compute_jsd(gt_obs, gt_do, dy)
-        jsd_obs = compute_jsd(gt_obs, p_obs, dy)
-        jsd_do = compute_jsd(gt_do, p_do, dy)
+        # jsd_circ = compute_jsd(p_obs, p_do, dy)
+        # jsd_gt = compute_jsd(gt_obs, gt_do, dy)
+        # jsd_obs = compute_jsd(gt_obs, p_obs, dy)
+        # jsd_do = compute_jsd(gt_do, p_do, dy)
 
-        print(
-            f"{x_val:<10.2f} | {kl_obs:<17.4f} | {kl_do:<17.4f} | {jsd_circ:<17.4f} | {jsd_gt:<18.4f} | {jsd_obs:<18.4f} | {jsd_do:.4f}"
-        )
+        # print(
+        #     f"{x_val:<10.2f} | {kl_obs:<17.4f} | {kl_do:<17.4f} | {jsd_circ:<17.4f} | {jsd_gt:<18.4f} | {jsd_obs:<18.4f} | {jsd_do:.4f}"
+        # )
 
-        x_vals_list.append(x_val)
-        kl_obs_list.append(kl_obs)
-        kl_do_list.append(kl_do)
-        jsd_circ_list.append(jsd_circ)
-        jsd_gt_list.append(jsd_gt)
-        jsd_obs_list.append(jsd_obs)
-        jsd_do_list.append(jsd_do)
+        # x_vals_list.append(x_val)
+        # kl_obs_list.append(kl_obs)
+        # kl_do_list.append(kl_do)
+        # jsd_circ_list.append(jsd_circ)
+        # jsd_gt_list.append(jsd_gt)
+        # jsd_obs_list.append(jsd_obs)
+        # jsd_do_list.append(jsd_do)
 
-        # Plotting
+        # Plotting (smooth lines so the KDE ground truth looks continuous)
         ax.plot(
             grid_y,
             p_do,
@@ -523,7 +611,6 @@ def run_experiment():
             alpha=0.5,
             label="Learned P(Y|do(X))",
             linewidth=2,
-            drawstyle="steps-mid",
         )
         ax.plot(
             grid_y,
@@ -532,7 +619,6 @@ def run_experiment():
             alpha=0.5,
             label="Learned P(Y|X)",
             linewidth=2,
-            drawstyle="steps-mid",
         )
         ax.plot(
             grid_y,
@@ -540,7 +626,7 @@ def run_experiment():
             color="red",
             alpha=0.3,
             label="GT P(Y|do(X))",
-            drawstyle="steps-mid",
+            linewidth=2,
         )
         ax.plot(
             grid_y,
@@ -548,7 +634,7 @@ def run_experiment():
             color="blue",
             alpha=0.3,
             label="GT P(Y|X)",
-            drawstyle="steps-mid",
+            linewidth=2,
         )
 
         # Calculate and plot means
@@ -574,74 +660,116 @@ def run_experiment():
     plt.savefig(out_file, dpi=150)
     print(f"Saved plot to {out_file}")
 
-    # Plot Divergence Metrics
-    fig2, axes2 = plt.subplots(1, 2, figsize=(10, 4))
-    axes2[0].plot(x_vals_list, kl_obs_list, label="KL(GT_obs||C_obs)")
-    axes2[0].plot(x_vals_list, kl_do_list, label="KL(GT_do||C_do)")
-    axes2[0].set_xlabel("X")
-    axes2[0].set_ylabel("KL Divergence")
-    axes2[0].set_title("KL Divergences")
-    axes2[0].legend()
-    axes2[0].grid(True)
+    # # Plot Divergence Metrics
+    # fig2, axes2 = plt.subplots(1, 2, figsize=(10, 4))
+    # axes2[0].plot(x_vals_list, kl_obs_list, label="KL(GT_obs||C_obs)")
+    # axes2[0].plot(x_vals_list, kl_do_list, label="KL(GT_do||C_do)")
+    # axes2[0].set_xlabel("X")
+    # axes2[0].set_ylabel("KL Divergence")
+    # axes2[0].set_title("KL Divergences")
+    # axes2[0].legend()
+    # axes2[0].grid(True)
 
-    axes2[1].plot(x_vals_list, jsd_circ_list, label="JSD(C_obs||C_do)")
-    axes2[1].plot(x_vals_list, jsd_gt_list, label="JSD(GT_obs||GT_do)")
-    axes2[1].set_xlabel("X")
-    axes2[1].set_ylabel("JSD")
-    axes2[1].set_title("Jensen-Shannon Divergences")
-    axes2[1].legend()
-    axes2[1].grid(True)
+    # axes2[1].plot(x_vals_list, jsd_circ_list, label="JSD(C_obs||C_do)")
+    # axes2[1].plot(x_vals_list, jsd_gt_list, label="JSD(GT_obs||GT_do)")
+    # axes2[1].set_xlabel("X")
+    # axes2[1].set_ylabel("JSD")
+    # axes2[1].set_title("Jensen-Shannon Divergences")
+    # axes2[1].legend()
+    # axes2[1].grid(True)
 
-    plt.tight_layout()
-    div_out_file = f"{CONFIG['output_dir']}/divergences_{CONFIG['dataset']}_N{CONFIG['num_nodes']}_{CONFIG['md_sets']}_{CONFIG['prioritize']}.png"
-    plt.savefig(div_out_file, dpi=150)
-    print(f"Saved divergence plot to {div_out_file}")
+    # plt.tight_layout()
+    # div_out_file = f"{CONFIG['output_dir']}/divergences_{CONFIG['dataset']}_N{CONFIG['num_nodes']}_{CONFIG['md_sets']}_{CONFIG['prioritize']}.png"
+    # plt.savefig(div_out_file, dpi=150)
+    # print(f"Saved divergence plot to {div_out_file}")
 
     plot_2d_heatmaps(res)
 
 
-def _py_given_x_histogram(df, x_col, y_col, x_val, y_edges, bandwidth):
-    """P(Y | X ~ x_val) histogram from a dataset."""
-    mask = np.abs(df[x_col].values - x_val) <= bandwidth
-    y_vals = df[y_col].values[mask]
-    if len(y_vals) == 0:
-        return np.zeros(len(y_edges) - 1)
-    hist, _ = np.histogram(y_vals, bins=y_edges, density=True)
-    return hist
+def _py_given_x_kde(df, x_col, y_col, x_val, grid_y, x_bandwidth=None, y_bandwidth=None):
+    """P(Y | X = x_val) via a fast Gaussian conditional KDE.
+
+    Only samples within a few X bandwidths of ``x_val`` are used so the
+    computation stays O(local samples) rather than the full dataset size.
+    """
+    x_vals = df[x_col].values
+    y_vals = df[y_col].values
+
+    if x_bandwidth is None:
+        x_bandwidth = max(0.1, (x_vals.max() - x_vals.min()) / 20.0)
+
+    # Hard window for speed: the Gaussian kernel is negligible past 3 bandwidths.
+    window = 3.0 * x_bandwidth
+    mask = np.abs(x_vals - x_val) <= window
+    x_vals = x_vals[mask]
+    y_vals = y_vals[mask]
+
+    n = len(y_vals)
+    if n == 0:
+        return np.zeros_like(grid_y)
+
+    # Gaussian weights in X.
+    x_weights = np.exp(-0.5 * ((x_vals - x_val) / x_bandwidth) ** 2)
+    weight_sum = x_weights.sum()
+    if weight_sum <= 0:
+        return np.zeros_like(grid_y)
+
+    if y_bandwidth is None:
+        # Silverman's rule of thumb on the selected Y samples.
+        std = np.std(y_vals)
+        iqr = np.subtract(*np.percentile(y_vals, [75, 25]))
+        h = 0.9 * min(std, iqr / 1.34) * n ** (-0.2) if n > 1 else 1.0
+        y_bandwidth = max(h, 1e-6)
+
+    # Vectorized Gaussian KDE over grid_y.
+    diffs = grid_y[:, None] - y_vals[None, :]  # [M, n]
+    y_kernels = np.exp(-0.5 * (diffs / y_bandwidth) ** 2)
+    y_kernels /= y_bandwidth * np.sqrt(2.0 * np.pi)
+
+    kde = (x_weights[None, :] * y_kernels).sum(axis=1) / weight_sum
+    return kde
 
 
 def _py_given_x_surface(df, x_col, y_col, grid_x, y_edges, min_x_count=100, x_bandwidth=None):
-    """P(Y | X) surface (rows=Y bins, cols=X bins) from a dataset.
+    """P(Y | X) surface (rows=Y bins, cols=X bins) via conditional KDE.
 
-    Uses a sliding window over X rather than disjoint bins.  Neighbouring grid
-    points share samples, which removes the isolated vertical gray lines that
-    can appear in the middle of the domain when a single fixed-width bin happens
-    to contain too few points.
-
-    X positions with fewer than ``min_x_count`` samples inside their window are
-    masked with NaN.
+    X positions with fewer than ``min_x_count`` samples inside the hard window
+    are masked with NaN.
     """
+    grid_y = (y_edges[:-1] + y_edges[1:]) / 2.0
+    surface = np.zeros((len(grid_y), len(grid_x)))
+    x_vals = df[x_col].values
     if x_bandwidth is None:
         x_bandwidth = max(0.1, (grid_x[-1] - grid_x[0]) / 20.0)
 
-    surface = np.zeros((len(y_edges) - 1, len(grid_x)))
-    x_vals = df[x_col].values
-    y_vals = df[y_col].values
     for i, x_c in enumerate(grid_x):
-        mask = np.abs(x_vals - x_c) <= x_bandwidth
+        window = 3.0 * x_bandwidth
+        mask = np.abs(x_vals - x_c) <= window
         if mask.sum() >= min_x_count:
-            surface[:, i] = np.histogram(y_vals[mask], bins=y_edges, density=True)[0]
+            surface[:, i] = _py_given_x_kde(df, x_col, y_col, x_c, grid_y, x_bandwidth=x_bandwidth)
         else:
             surface[:, i] = np.nan
     return surface
 
 
 def _get_x_split_points(ac, x_id):
-    """Return sorted finite boundaries of the X leaf's unit supports."""
+    """Return sorted finite boundaries of the X leaf's unit supports.
+
+    For spline leaves the split points are learnable, so the live learned
+    boundaries (``_split_points()``) are used instead of the static initial
+    ``node_supports``.
+    """
     split_points = set()
     for leaf_id in ac.get_leaves():
         leaf = ac.get_node_data(leaf_id)
-        if getattr(leaf, "var", None) == x_id:
+        if getattr(leaf, "var", None) != x_id:
+            continue
+        if hasattr(leaf, "_split_points"):
+            with torch.no_grad():
+                for b in leaf._split_points().cpu().numpy().ravel():
+                    if not math.isinf(b):
+                        split_points.add(float(b))
+        else:
             supports = getattr(leaf, "node_supports", None)
             if supports is None:
                 continue
@@ -654,6 +782,77 @@ def _get_x_split_points(ac, x_id):
                 if not math.isinf(interval.high):
                     split_points.add(float(interval.high))
     return sorted(split_points)
+
+
+def _get_x_leaf_support_intervals(ac, x_id):
+    """Return support intervals (low, high) for the X leaf's node supports.
+
+    Each tuple corresponds to one leaf child / node support.  Infinite bounds
+    are preserved; callers should clip to the data range when choosing a
+    representative X value.
+    """
+    for leaf_id in ac.get_leaves():
+        leaf = ac.get_node_data(leaf_id)
+        if getattr(leaf, "var", None) != x_id:
+            continue
+        node_supports = getattr(leaf, "node_supports", None)
+        if not node_supports:
+            continue
+        intervals = []
+        for supp in node_supports:
+            iv = supp.intervals.get(x_id)
+            if iv is None:
+                continue
+            intervals.append((float(iv.low), float(iv.high)))
+        return intervals
+    return []
+
+
+def _choose_x_values_from_intervals(intervals, df_obs=None, x_id_name="X", pad_fraction=0.05):
+    """Pick one representative X value inside each leaf support interval.
+
+    For finite intervals the midpoint is used.  For infinite tails the value is
+    clipped to the observed data range (with a small padding) so the ground-
+    truth histograms still contain samples.
+    """
+    if df_obs is not None and x_id_name in df_obs.columns:
+        x_data = df_obs[x_id_name].values
+        x_min, x_max = float(np.percentile(x_data, 0.5)), float(np.percentile(x_data, 99.5))
+    else:
+        x_min, x_max = float("-inf"), float("inf")
+
+    finite_bounds = [
+        bound for low, high in intervals for bound in (low, high) if math.isfinite(bound)
+    ]
+    span = max(finite_bounds) - min(finite_bounds) if finite_bounds else 1.0
+    pad = pad_fraction * span
+
+    values = []
+    labels = []
+    for i, (low, high) in enumerate(intervals):
+        if math.isfinite(low) and math.isfinite(high):
+            x_val = 0.5 * (low + high)
+            label = f"X={x_val:.2f} (support {i})"
+        elif math.isfinite(low):
+            # Right tail [low, +inf).
+            candidate = low + pad
+            if x_max < float("inf"):
+                candidate = min(candidate, x_max)
+            x_val = max(low, candidate)
+            label = f"X={x_val:.2f} (right tail {i})"
+        elif math.isfinite(high):
+            # Left tail (-inf, high].
+            candidate = high - pad
+            if x_min > float("-inf"):
+                candidate = max(candidate, x_min)
+            x_val = min(high, candidate)
+            label = f"X={x_val:.2f} (left tail {i})"
+        else:
+            x_val = 0.5 * (x_min + x_max) if x_min > float("-inf") and x_max < float("inf") else 0.0
+            label = f"X={x_val:.2f} (full range {i})"
+        values.append(x_val)
+        labels.append(label)
+    return np.array(values), labels
 
 
 def plot_2d_heatmaps(res):

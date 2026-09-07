@@ -31,6 +31,9 @@ test = [
 dev = [
     "ruff"
 ]
+wandb = [
+    "wandb"
+]
 
 [tool.ruff]
 line-length = 100
