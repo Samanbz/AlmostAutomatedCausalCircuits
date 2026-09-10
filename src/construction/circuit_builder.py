@@ -1,7 +1,7 @@
 import math
 import random
 from enum import Enum
-from typing import Dict
+from typing import Dict, Optional
 
 import torch
 
@@ -24,13 +24,24 @@ from src.symbolic.arithmetic.nodes.leaf_layer import (
 )
 from src.symbolic.arithmetic.nodes.sum_layer import SumLayer
 from src.symbolic.arithmetic.weights import DenseWeights, SparseWeights
-from src.symbolic.vtree import VTree
+from src.symbolic.vtree import VNode, VTree
 from src.utils import BitSet, Support
 from src.utils.node_allocator import IncrementalNodeAllocator
 
 
 logger = g_logger.getChild("CircuitBuilder")
 logger.setLevel("ERROR")
+
+
+def find_closest_factor(n: int, max_val: int = None) -> int:
+    """Find the largest factor of n that is less than or equal to sqrt(n)."""
+    max_val = math.floor(max_val)
+    if max_val > n:
+        raise ValueError("max_val must be less than or equal to n")
+    for i in range(max_val, 0, -1):
+        if n % i == 0:
+            return i
+    return 1
 
 
 def get_support(scope: BitSet, input_dists: Dict[int, Distribution]) -> Support:
@@ -55,14 +66,29 @@ class CircuitBuilder:
         num_nodes: int,
         input_dists: Dict[int, Distribution] = None,
         initialize_weights: bool = False,
+        weight_softmax_temperature: float = 0.5,
+        max_leaf_num_nodes: Optional[int] = None,
+        max_leaf_num_groups: Optional[int] = None,
+        max_sum_num_groups: Optional[int] = None,
+        leaf_mixture_num_nodes: Optional[int] = None,
+        leaf_mixture_num_groups: Optional[int] = None,
         fairness_temperature: float = 1.0,
     ):
         self.vtree = vtree
         self.num_nodes = num_nodes
-        self.node_allocator = IncrementalNodeAllocator()
         self.input_dists = input_dists
+        self.node_allocator = IncrementalNodeAllocator()
+
+        self.weight_softmax_temperature = weight_softmax_temperature
         self.initialize_weights = initialize_weights
         self.fairness_temperature = fairness_temperature
+
+        self.max_leaf_num_nodes = max_leaf_num_nodes
+        self.max_leaf_num_groups = max_leaf_num_groups
+        self.max_sum_num_groups = max_sum_num_groups
+        self.leaf_mixture_num_nodes = leaf_mixture_num_nodes
+        self.leaf_mixture_num_groups = leaf_mixture_num_groups
+
         self.built_nodes = {}
 
     def _get_layer_type(self, vid: int) -> LayerType:
@@ -82,6 +108,129 @@ class CircuitBuilder:
         else:
             return LayerType.SYNTHESIZING
 
+    def _handle_leaf(
+        self,
+        vnode: VNode,
+        G: int,
+        H: int,
+        is_constrained: bool,
+    ):
+        var_id = vnode.scope.min
+        dist = self.input_dists[var_id]
+
+        G_b = (
+            G
+            if (is_constrained or self.leaf_mixture_num_groups is None)
+            else self.leaf_mixture_num_groups
+        )
+        H_b = (
+            H
+            if (is_constrained or self.leaf_mixture_num_nodes is None)
+            else self.leaf_mixture_num_nodes
+        )
+
+        if not is_constrained and vnode.md_set.is_universal:
+            leaf_supports = [dist.support] * H_b
+        else:
+            leaf_supports = [Support({var_id: iv}) for iv in dist.split_support(H_b)]
+
+        if isinstance(dist, GaussianDistribution) or len(leaf_supports) == 1:
+            leaf_layer = GaussianLeafLayer(
+                GaussianDistribution(var=var_id, base_mean=0, base_stddev=1.0),
+                num_nodes=H_b,
+                num_groups=G_b,
+                node_supports=leaf_supports if is_constrained else None,
+            )
+        elif isinstance(dist, CategoricalDistribution):
+            from src.symbolic.arithmetic.nodes.leaf_layer import CategoricalLeafLayer
+
+            leaf_layer = CategoricalLeafLayer(dist, num_nodes=H, num_groups=G)
+        elif is_constrained and isinstance(dist, LogLinearSplineDistribution):
+            leaf_layer = LogLinearSplineLeafLayer(
+                dist, num_nodes=H_b, num_groups=G_b, node_supports=leaf_supports
+            )
+        elif is_constrained and isinstance(dist, LinearSplineDistribution):
+            leaf_layer = LinearSplineLeafLayer(
+                dist, num_nodes=H_b, num_groups=G_b, node_supports=leaf_supports
+            )
+        elif is_constrained and isinstance(dist, QuadraticSplineDistribution):
+            leaf_layer = QuadraticSplineLeafLayer(
+                dist, num_nodes=H_b, num_groups=G_b, node_supports=leaf_supports
+            )
+        elif is_constrained and isinstance(dist, RationalQuadraticSplineDistribution):
+            leaf_layer = RationalQuadraticSplineLeafLayer(
+                dist, num_nodes=H_b, num_groups=G_b, node_supports=leaf_supports
+            )
+        else:
+            raise NotImplementedError(f"Unsupported distribution type: {type(dist)}")
+
+        leaf_layer.node_supports = leaf_supports
+        leaf_layer.md_set = vnode.md_set
+
+        if not is_constrained:
+            raw_weights = (
+                torch.randn(
+                    (
+                        G,
+                        H,
+                        G_b,
+                        H_b,
+                        1,
+                        1,
+                    )
+                )
+                * 0.1
+            )
+            for g in range(G_b):
+                raw_weights[g % G, :, g, :, :, :] += 0.5
+            weights = torch.exp(raw_weights)
+            weights = weights / weights.sum(dim=(2, 3, 4, 5), keepdim=True)
+            log_weights = torch.log(weights + 1e-20).detach().requires_grad_(True)
+            logger.debug(
+                f"Generated log weights for mixture leaf node with scope {vnode.scope}:\n{log_weights.view(G, H, G_b, H_b)}"
+            )
+            mixture_leaf_layer = MixtureLeafLayer(
+                base_dist=leaf_layer, log_weights=DenseWeights(log_weights)
+            )
+            leaf_layer = mixture_leaf_layer
+
+        return leaf_layer
+
+    def _sample_balanced_assignment(
+        self, num_items: int, num_bins: int, temperature: float
+    ) -> list[list[int]]:
+        """Sample an assignment of items to bins biased toward balanced loads.
+
+        The score for each bin is ``-temperature * (count / target)`` plus a small
+        Gaussian jitter. ``temperature = 0`` recovers uniform random assignment;
+        larger values make perfectly balanced assignments the most likely outcome
+        while still allowing unbalanced ones.
+        """
+        if num_bins == 0:
+            raise ValueError("num_bins must be positive")
+        if num_items == 0:
+            return [[] for _ in range(num_bins)]
+
+        counts = [0] * num_bins
+        target = num_items / num_bins
+        assignments: list[list[int]] = [[] for _ in range(num_bins)]
+
+        for item in range(num_items):
+            scores = torch.tensor(
+                [
+                    -temperature * (counts[b] / target if target > 0 else 0.0)
+                    + random.gauss(0.0, 1.0)
+                    for b in range(num_bins)
+                ],
+                dtype=torch.float32,
+            )
+            probs = torch.softmax(scores, dim=0)
+            sampled = int(torch.multinomial(probs, 1).item())
+            assignments[sampled].append(item)
+            counts[sampled] += 1
+
+        return assignments
+
     def _get_child_dimensions(
         self,
         layer_type: LayerType,
@@ -91,23 +240,32 @@ class CircuitBuilder:
         l_is_constrained: bool,
         r_is_constrained: bool,
     ):
+        G_l, H_l, G_r, H_r = 1, n, 1, n
+
+        if self.max_sum_num_groups is not None:
+            G_l = min(G_l, self.max_sum_num_groups)
+            G_r = min(G_r, self.max_sum_num_groups)
+            H_l = n // G_l
+            H_r = n // G_r
+            return G_l, H_l, G_r, H_r
+
         if layer_type == LayerType.UNIVERSAL:
-            return n, 1, n, 1
+            # doesn't really matter since the weights are dense over everything anyways
+            pass
         elif layer_type == LayerType.LEFT_MIXING:
-            return 1, n, n, 1
+            a = find_closest_factor(n, max_val=math.sqrt(math.sqrt(n)))
+            b = n // a
+            G_l, H_l, G_r, H_r = a, b, b, a
         elif layer_type == LayerType.RIGHT_MIXING:
-            return n, 1, 1, n
+            a = find_closest_factor(n, max_val=math.sqrt(math.sqrt(n)))
+            b = n // a
+            G_l, H_l, G_r, H_r = b, a, a, b
         elif layer_type == LayerType.SYNTHESIZING:
-            a = 1
-            # Find the largest factor of n that is less than or equal to sqrt(n)
-            for i in range(math.floor(math.sqrt(n)), 0, -1):
-                if n % i == 0:
-                    a = i
-                    break
+            a = find_closest_factor(n, max_val=math.sqrt(n))
             b = n // a
 
             if a == b:
-                return a, a, a, a
+                G_l, H_l, G_r, H_r = a, a, a, a
 
             l_child_type = (
                 self._get_layer_type(l_vid)
@@ -143,6 +301,157 @@ class CircuitBuilder:
 
             return G_l, h_l, G_r, h_r
 
+        # Handle leaf cases
+        if (
+            self.vtree.is_leaf(l_vid)
+            and l_is_constrained
+            and (not self.vtree.is_leaf(r_vid) or not r_is_constrained)
+            and self.max_leaf_num_nodes is not None
+        ):
+            # if only one child is a constrained leaf and max_leaf_num_nodes is set, then adapt the sibling sum layer's num_groups to match
+            G_l = (
+                n // self.max_leaf_num_nodes
+                if self.max_leaf_num_groups is None
+                else self.max_leaf_num_groups
+            )
+            H_l = self.max_leaf_num_nodes
+            G_r = self.max_leaf_num_nodes
+            H_r = n // self.max_leaf_num_nodes
+        elif (
+            self.vtree.is_leaf(r_vid)
+            and r_is_constrained
+            and (not self.vtree.is_leaf(l_vid) or not r_is_constrained)
+            and self.max_leaf_num_nodes is not None
+        ):
+            G_r = (
+                n // self.max_leaf_num_nodes
+                if self.max_leaf_num_groups is None
+                else self.max_leaf_num_groups
+            )
+            H_r = self.max_leaf_num_nodes
+            G_l = self.max_leaf_num_nodes
+            H_l = n // self.max_leaf_num_nodes
+        elif (
+            self.vtree.is_leaf(l_vid)
+            and l_is_constrained
+            and self.vtree.is_leaf(r_vid)
+            and r_is_constrained
+            and self.max_leaf_num_nodes is not None
+        ):
+            # if both children are constrained leaves and max_leaf_num_nodes is set, then adapt both sum layers' num_groups to match
+            G_l = (
+                n // self.max_leaf_num_nodes
+                if self.max_leaf_num_groups is None
+                else self.max_leaf_num_groups
+            )
+            H_l = self.max_leaf_num_nodes
+            G_r = (
+                n // self.max_leaf_num_nodes
+                if self.max_leaf_num_groups is None
+                else self.max_leaf_num_groups
+            )
+            H_r = self.max_leaf_num_nodes
+
+        if G_l == 1 or G_r == 1 and layer_type == LayerType.SYNTHESIZING:
+            logger.warning(
+                f"Synthesizing SumLayer and vtree children ({l_vid}, {r_vid}) has G_l={G_l}, G_r={G_r}. This may lead to degenerate behavior."
+            )
+        return G_l, H_l, G_r, H_r
+
+    def _generate_weights(
+        self,
+        G: int,
+        H: int,
+        G_L: int,
+        H_L: int,
+        G_R: int,
+        H_R: int,
+        layer_type: LayerType,
+        is_constrained: bool,
+        fairness_temperature: float = 2.0,
+    ) -> torch.Tensor:
+        """Generates global weight assignments ensuring determinism constraints."""
+
+        w = torch.zeros((G, H, G_L, H_L, G_R, H_R))
+
+        if layer_type == LayerType.UNIVERSAL:
+            w = torch.exp(torch.randn((G, H, G_L, H_L, G_R, H_R)) * self.weight_softmax_temperature)
+
+        elif layer_type == LayerType.LEFT_MIXING:
+            if is_constrained:
+                h_l_assignments = self._sample_balanced_assignment(H_L, H, fairness_temperature)
+                g_l_assignments = self._sample_balanced_assignment(H_L, G_L, fairness_temperature)
+                for g in range(G):
+                    for h in range(H):
+                        h_ls = h_l_assignments[h]
+                        g_ls = [
+                            [h_l in g_l_assignments[g_t] for g_t in range(G_L)].index(True)
+                            for h_l in h_ls
+                        ]
+                        w[g, h, g_ls, h_ls, :, :] = torch.exp(
+                            torch.randn((G_R, H_R)) * self.weight_softmax_temperature
+                        )
+            else:
+                raise ValueError("Unconstrained SumLayers are not supported.")
+
+        elif layer_type == LayerType.RIGHT_MIXING:
+            if is_constrained:
+                h_r_assignments = self._sample_balanced_assignment(H_R, H, fairness_temperature)
+                g_r_assignments = self._sample_balanced_assignment(H_R, G_R, fairness_temperature)
+                for g in range(G):
+                    for h in range(H):
+                        h_rs = h_r_assignments[h]
+                        g_rs = [
+                            [h_r in g_r_assignments[g_t] for g_t in range(G_R)].index(True)
+                            for h_r in h_rs
+                        ]
+                        w[g, h, :, :, g_rs, h_rs] = torch.exp(
+                            torch.randn((G_L, H_L)) * self.weight_softmax_temperature
+                        )
+            else:
+                raise ValueError("Unconstrained SumLayers are not supported.")
+
+        elif layer_type == LayerType.SYNTHESIZING:
+            if is_constrained:
+                # assign each combination of left and right child nodes to a unique sum node
+                flat_assignments = self._sample_balanced_assignment(
+                    H_L * H_R, H, fairness_temperature
+                )
+                assignments = [
+                    [(i // H_R, i % H_R) for i in row] for row in flat_assignments
+                ]  # convert to (left, right) pairs
+                for g in range(G):
+                    for h in range(H):
+                        h_ls = [i for i, _ in assignments[h]]
+                        h_rs = [k for _, k in assignments[h]]
+                        for h_l in h_ls:
+                            for h_r in h_rs:
+                                # If H_R < G_L or H_L < G_R, then some groups will be unused,
+                                # but this only occurs when both leaves are constrained and max_leaf_num_nodes is set (i.e. synthesizing).
+                                # If we know this will happen, we can additionally set max_leaf_num_groups to avoid the wasted leaf groups.
+                                g_l = h_r % G_L
+                                g_r = h_l % G_R
+                                w[g, h, g_l, h_l, g_r, h_r] = torch.exp(
+                                    torch.randn(1) * self.weight_softmax_temperature
+                                )
+            else:
+                raise ValueError("Unconstrained SumLayers are not supported.")
+        else:
+            raise ValueError(f"Unsupported layer type: {layer_type}")
+
+        w_sum = w.sum(dim=(2, 3, 4, 5), keepdim=True)
+
+        safe_w_sum = torch.where(w_sum == 0, torch.ones_like(w_sum), w_sum)
+        w = w / safe_w_sum
+
+        for g in range(G):
+            for n in range(H):
+                logger.debug(
+                    f"LayerType={layer_type}, is_constrained={is_constrained}, g={g}, n={n}, w[g,n,:,:,:, :]=\n{w[g, n, :, :, :, :].view(G_L * H_L, G_R * H_R)}"
+                )
+
+        return w
+
     def _build_recursive(
         self,
         ac: SymbolicArithmeticCircuit,
@@ -157,7 +466,7 @@ class CircuitBuilder:
         parent_vid = self.vtree.get_parent(vid)
 
         if parent_vid is None:  # root
-            is_constrained = False
+            is_constrained = True  # Since H=G=1 for root, this makes no difference.
         else:
             parent_vnode = self.vtree.get_node_data(parent_vid)
             is_constrained = not vnode.md_set.is_universal and vnode.md_set.is_subset(
@@ -165,73 +474,12 @@ class CircuitBuilder:
             )
 
         if self.vtree.is_leaf(vid):
-            var_id = vnode.scope.min
-            dist = self.input_dists[var_id]
-
-            if not is_constrained and vnode.md_set.is_universal:
-                leaf_supports = [dist.support] * H
-            else:
-                leaf_supports = [Support({var_id: iv}) for iv in dist.split_support(H)]
-
-            if isinstance(dist, GaussianDistribution) or len(leaf_supports) == 1:
-                leaf_layer = GaussianLeafLayer(
-                    GaussianDistribution(var=var_id, base_mean=0, base_stddev=1.0),
-                    num_nodes=H,
-                    num_groups=G,
-                    node_supports=leaf_supports if is_constrained else None,
-                )
-            elif isinstance(dist, CategoricalDistribution):
-                from src.symbolic.arithmetic.nodes.leaf_layer import CategoricalLeafLayer
-
-                leaf_layer = CategoricalLeafLayer(dist, num_nodes=H, num_groups=G)
-            elif is_constrained and isinstance(dist, LogLinearSplineDistribution):
-                leaf_layer = LogLinearSplineLeafLayer(
-                    dist, num_nodes=H, num_groups=G, node_supports=leaf_supports
-                )
-            elif is_constrained and isinstance(dist, LinearSplineDistribution):
-                leaf_layer = LinearSplineLeafLayer(
-                    dist, num_nodes=H, num_groups=G, node_supports=leaf_supports
-                )
-            elif is_constrained and isinstance(dist, QuadraticSplineDistribution):
-                leaf_layer = QuadraticSplineLeafLayer(
-                    dist, num_nodes=H, num_groups=G, node_supports=leaf_supports
-                )
-            elif is_constrained and isinstance(dist, RationalQuadraticSplineDistribution):
-                leaf_layer = RationalQuadraticSplineLeafLayer(
-                    dist, num_nodes=H, num_groups=G, node_supports=leaf_supports
-                )
-            else:
-                raise NotImplementedError(f"Unsupported distribution type: {type(dist)}")
-
-            leaf_layer.node_supports = leaf_supports
-            leaf_layer.md_set = vnode.md_set
-
-            if not is_constrained:
-                raw_weights = (
-                    torch.randn(
-                        (
-                            G,
-                            H,
-                            G,
-                            H,
-                            1,
-                            1,
-                        )
-                    )
-                    * 0.1
-                )
-                for g in range(G):
-                    raw_weights[g, :, g, :, :, :] += 0.5
-                weights = torch.exp(raw_weights)
-                weights = weights / weights.sum(dim=(2, 3, 4, 5), keepdim=True)
-                log_weights = torch.log(weights + 1e-20).detach().requires_grad_(True)
-                logger.debug(
-                    f"Generated log weights for mixture leaf node {vid}:\n{log_weights.view(G, H, G, H)}"
-                )
-                mixture_leaf_layer = MixtureLeafLayer(
-                    base_dist=leaf_layer, log_weights=DenseWeights(log_weights)
-                )
-                leaf_layer = mixture_leaf_layer
+            leaf_layer = self._handle_leaf(
+                vnode,
+                G if self.max_leaf_num_groups is None else self.max_leaf_num_groups,
+                H if self.max_leaf_num_nodes is None else self.max_leaf_num_nodes,
+                is_constrained,
+            )
 
             leaf_id = ac._add_node(leaf_layer)
             ac.sum_to_vtree[leaf_id] = vid
@@ -255,7 +503,12 @@ class CircuitBuilder:
         )
 
         G_L, H_L, G_R, H_R = self._get_child_dimensions(
-            layer_type, children[0], children[1], self.num_nodes, l_is_constrained, r_is_constrained
+            layer_type,
+            children[0],
+            children[1],
+            self.num_nodes,
+            l_is_constrained,
+            r_is_constrained,
         )
         logger.debug(
             f"\nBuilding node {vid} with layer type {layer_type}, G={G}, H={H}, G_L={G_L}, H_L={H_L}, G_R={G_R}, H_R={H_R}"
@@ -282,8 +535,16 @@ class CircuitBuilder:
         )
 
         logger.debug(f"Generating weights for node {vid} with scope {vnode.scope}")
-        w = CircuitBuilder._generate_weights(
-            G, H, G_L, H_L, G_R, H_R, layer_type, is_constrained, self.fairness_temperature
+        w = self._generate_weights(
+            G,
+            H,
+            G_L,
+            H_L,
+            G_R,
+            H_R,
+            layer_type,
+            is_constrained,
+            self.fairness_temperature,
         )
 
         log_w = torch.log(w + 1e-20).detach().requires_grad_(True)
@@ -311,172 +572,6 @@ class CircuitBuilder:
         self._build_recursive(circuit, root_vid, G=1, H=1)
         return circuit
 
-    @staticmethod
-    def _sample_balanced_assignment(num_items: int, num_bins: int, temperature: float) -> list[int]:
-        """Sample an assignment of items to bins biased toward balanced loads.
-
-        The score for each bin is ``-temperature * (count / target)`` plus a small
-        Gaussian jitter. ``temperature = 0`` recovers uniform random assignment;
-        larger values make perfectly balanced assignments the most likely outcome
-        while still allowing unbalanced ones.
-        """
-        if num_bins == 0:
-            raise ValueError("num_bins must be positive")
-        if num_items == 0:
-            return []
-
-        counts = [0] * num_bins
-        target = num_items / num_bins
-        assignments: list[int] = []
-
-        for _ in range(num_items):
-            scores = torch.tensor(
-                [
-                    -temperature * (counts[b] / target if target > 0 else 0.0)
-                    + random.gauss(0.0, 1.0)
-                    for b in range(num_bins)
-                ],
-                dtype=torch.float32,
-            )
-            probs = torch.softmax(scores, dim=0)
-            sampled = int(torch.multinomial(probs, 1).item())
-            assignments.append(sampled)
-            counts[sampled] += 1
-
-        return assignments
-
-    @staticmethod
-    def _generate_weights(
-        G: int,
-        H: int,
-        G_L: int,
-        H_L: int,
-        G_R: int,
-        H_R: int,
-        layer_type: LayerType,
-        is_constrained: bool,
-        fairness_temperature: float = 2.0,
-        weight_softmax_temperature: float = 0.5,
-    ) -> torch.Tensor:
-        """Generates global weight assignments ensuring determinism constraints."""
-
-        w = torch.zeros((G, H, G_L, H_L, G_R, H_R))
-
-        if layer_type == LayerType.UNIVERSAL:
-            w = torch.exp(torch.randn((G, H, G_L, H_L, G_R, H_R)) * weight_softmax_temperature)
-
-        elif layer_type == LayerType.LEFT_MIXING and not is_constrained:
-            g_l_assignments = CircuitBuilder._sample_balanced_assignment(
-                H_L, G_L, fairness_temperature
-            )  # H_L -> G_L mapping
-            logger.debug(list(enumerate(g_l_assignments)))
-            for g in range(G):
-                for n in range(H):
-                    # dense over all left child nodes for given sum node and group
-                    for i in range(H_L):
-                        g_l = g_l_assignments[i]
-                        # dense over the right nodes for given left node and group
-                        w[g, n, g_l, i, :, :] = torch.exp(
-                            torch.randn(G_R, H_R) * weight_softmax_temperature
-                        )
-
-        elif layer_type == LayerType.LEFT_MIXING and is_constrained:
-            g_l_assignments = CircuitBuilder._sample_balanced_assignment(
-                H_L, G_L, fairness_temperature
-            )  # H_L -> G_L mapping
-            h_l_assignments = CircuitBuilder._sample_balanced_assignment(
-                H_L, H, fairness_temperature
-            )  # H_L -> H mapping
-            logger.debug(list(enumerate(g_l_assignments)))
-            logger.debug(list(enumerate(h_l_assignments)))
-            for g in range(G):
-                for i, n in enumerate(h_l_assignments):
-                    # i = left child node index, n = assigned sum node index
-                    g_l = g_l_assignments[i]
-                    # dense over the right nodes for given left node and group
-                    w[g, n, g_l, i, :, :] = torch.exp(
-                        torch.randn(G_R, H_R) * weight_softmax_temperature
-                    )
-
-        elif layer_type == LayerType.RIGHT_MIXING and not is_constrained:
-            g_r_assignments = CircuitBuilder._sample_balanced_assignment(
-                H_R, G_R, fairness_temperature
-            )  # H_R -> G_R mapping
-            logger.debug(list(enumerate(g_r_assignments)))
-            for g in range(G):
-                for n in range(H):
-                    # dense over all right child nodes for given sum node and group
-                    for i in range(H_R):
-                        g_r = g_r_assignments[i]
-                        # dense over the left nodes for given right node and group
-                        w[g, n, :, :, g_r, i] = torch.exp(
-                            torch.randn(G_L, H_L) * weight_softmax_temperature
-                        )
-
-        elif layer_type == LayerType.RIGHT_MIXING and is_constrained:
-            g_r_assignments = CircuitBuilder._sample_balanced_assignment(
-                H_R, G_R, fairness_temperature
-            )  # H_R -> G_R mapping
-            h_r_assignments = CircuitBuilder._sample_balanced_assignment(
-                H_R, H, fairness_temperature
-            )  # H_R -> H mapping
-            logger.debug(list(enumerate(g_r_assignments)))
-            logger.debug(list(enumerate(h_r_assignments)))
-            for g in range(G):
-                for i, n in enumerate(h_r_assignments):
-                    # i = right child node index, n = assigned sum node index
-                    g_l = i
-                    g_r = g_r_assignments[i]
-                    # dense over the left nodes for given right node and group
-                    w[g, n, :, :, g_r, i] = torch.exp(
-                        torch.randn(G_L, H_L) * weight_softmax_temperature
-                    )
-
-        elif layer_type == LayerType.SYNTHESIZING and not is_constrained:
-            # Here we have the relationship H_L=G_R H_R=G_L
-            for g in range(G):
-                for n in range(H):
-                    # dense over all combinations of left and right child nodes for given sum node and group
-                    for i in range(H_L):
-                        for k in range(H_R):
-                            g_l = k  # right node index determines left node group
-                            g_r = i  # left node index determines right node group)
-                            w[g, n, g_l, i, g_r, k] = torch.exp(
-                                torch.randn(1) * weight_softmax_temperature
-                            )
-
-        elif layer_type == LayerType.SYNTHESIZING and is_constrained:
-            # assign each combination of left and right child nodes to a unique sum node
-            flat_assignments = CircuitBuilder._sample_balanced_assignment(
-                H_L * H_R, H, fairness_temperature
-            )
-            assignments = [flat_assignments[i * H_R : (i + 1) * H_R] for i in range(H_L)]
-            logger.debug(f"Assignments for SYNTHESIZING constrained: {assignments}")
-            for g in range(G):
-                for i, row in enumerate(assignments):
-                    for k, n in enumerate(row):
-                        g_l = k  # right node index determines left node group
-                        g_r = i  # left node index determines right node group
-                        w[g, n, g_l, i, g_r, k] = torch.exp(
-                            torch.randn(1) * weight_softmax_temperature
-                        )
-
-        else:
-            raise ValueError(f"Unsupported layer type: {layer_type}")
-
-        w_sum = w.sum(dim=(2, 3, 4, 5), keepdim=True)
-
-        safe_w_sum = torch.where(w_sum == 0, torch.ones_like(w_sum), w_sum)
-        w = w / safe_w_sum
-
-        for g in range(G):
-            for n in range(H):
-                logger.debug(
-                    f"LayerType={layer_type}, is_constrained={is_constrained}, g={g}, n={n}, w[g,n,:,:,:, :]=\n{w[g, n, :, :, :, :].view(G_L * H_L, G_R * H_R)}"
-                )
-
-        return w
-
 
 def create_md_circuit(
     input_dists: Dict[int, Distribution],
@@ -484,6 +579,12 @@ def create_md_circuit(
     num_nodes: int,
     initialize_weights: bool = False,
     fairness_temperature: float = 1.0,
+    weight_softmax_temperature: float = 0.5,
+    max_leaf_num_nodes: Optional[int] = None,
+    max_leaf_num_groups: Optional[int] = None,
+    max_sum_num_groups: Optional[int] = None,
+    leaf_mixture_num_nodes: Optional[int] = None,
+    leaf_mixture_num_groups: Optional[int] = None,
 ) -> SymbolicArithmeticCircuit:
     """Creates an MD-Circuit end-to-end."""
 
@@ -493,5 +594,11 @@ def create_md_circuit(
         input_dists=input_dists,
         initialize_weights=initialize_weights,
         fairness_temperature=fairness_temperature,
+        weight_softmax_temperature=weight_softmax_temperature,
+        max_leaf_num_nodes=max_leaf_num_nodes,
+        max_leaf_num_groups=max_leaf_num_groups,
+        max_sum_num_groups=max_sum_num_groups,
+        leaf_mixture_num_nodes=leaf_mixture_num_nodes,
+        leaf_mixture_num_groups=leaf_mixture_num_groups,
     )
     return c_builder.build()
