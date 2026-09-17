@@ -1,0 +1,80 @@
+{
+  "skeleton": {
+    "variables": [
+      {
+        "name": "U",
+        "kind": "continuous",
+        "cardinality": null,
+        "hidden": true
+      },
+      {
+        "name": "X",
+        "kind": "continuous",
+        "cardinality": null,
+        "hidden": false
+      },
+      {
+        "name": "M",
+        "kind": "continuous",
+        "cardinality": null,
+        "hidden": false
+      },
+      {
+        "name": "Y",
+        "kind": "continuous",
+        "cardinality": null,
+        "hidden": false
+      }
+    ],
+    "edges": [
+      [
+        "X",
+        "M"
+      ],
+      [
+        "M",
+        "Y"
+      ],
+      [
+        "U",
+        "X"
+      ],
+      [
+        "U",
+        "Y"
+      ]
+    ]
+  },
+  "treatments": [
+    "X"
+  ],
+  "mechanism_kwargs": {
+    "discrete_strategy": "regional",
+    "regions": 2,
+    "dirichlet_alpha": 1.0,
+    "gmm_components": [
+      1,
+      2
+    ],
+    "coef_range": [
+      0.5,
+      4.0
+    ],
+    "sigma2_range": [
+      0.2,
+      1.0
+    ],
+    "intercept_range": [
+      -3.0,
+      2.0
+    ],
+    "edge_coefs": {
+      "X->M": -1.5,
+      "M->Y": 1.0
+    },
+    "confounding_strength": 3.0
+  },
+  "n_samples": 100000,
+  "seed": 25,
+  "dataset_name": "frontdoor_cont_Z1_100K"
+}
