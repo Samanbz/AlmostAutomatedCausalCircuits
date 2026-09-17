@@ -136,25 +136,21 @@ def _conditional(ac: SymbolicArithmeticCircuit, cond_vars: Set[int]) -> Symbolic
         node = ac.get_node_data(node_id)
 
         if isinstance(node, LeafLayer):
-            if cond_vars_bitset.is_superset(node.md_set):
+            if not node.md_set.is_universal and node.scope.min in cond_vars_bitset:
                 # uniformize the leaf, turn it into an indicator function.
                 new_node = IndicatorLeafLayer(base_leaf=node)
-                new_id = new_ac.add_node(new_node)
-                new_ac.sum_to_vtree[new_id] = ac.sum_to_vtree.get(node_id)
-                if ac.sum_to_vtree.get(node_id) is not None:
-                    new_ac.vtree_to_sum[ac.sum_to_vtree.get(node_id)] = new_id
-                return new_id
-            elif node.scope.intersection(cond_vars_bitset).is_empty:
+            elif node.scope.min not in cond_vars_bitset:
+                # simply copy the leaf
                 new_node = copy.copy(node)
-                new_id = new_ac.add_node(new_node)
-                new_ac.sum_to_vtree[new_id] = ac.sum_to_vtree.get(node_id)
-                if ac.sum_to_vtree.get(node_id) is not None:
-                    new_ac.vtree_to_sum[ac.sum_to_vtree.get(node_id)] = new_id
-                return new_id
-            else:
+            else:  # triggers only if is universal and in cond_vars
                 raise ValueError(
                     "Circuit is not marginal deterministic with respect to the conditioning set."
                 )
+            new_id = new_ac.add_node(new_node)
+            new_ac.sum_to_vtree[new_id] = ac.sum_to_vtree.get(node_id)
+            if ac.sum_to_vtree.get(node_id) is not None:
+                new_ac.vtree_to_sum[ac.sum_to_vtree.get(node_id)] = new_id
+            return new_id
 
         node: SumLayer
 
@@ -167,38 +163,33 @@ def _conditional(ac: SymbolicArithmeticCircuit, cond_vars: Set[int]) -> Symbolic
         l_vnode = ac.vtree.get_node_data(l_vnode_id)
         r_vnode = ac.vtree.get_node_data(r_vnode_id)
 
-        if cond_vars_bitset.is_superset(node.md_set):
+        cond_vars_in_scope = cond_vars_bitset.intersection(vnode.scope)
+
+        if cond_vars_in_scope.is_empty:
+            # No need to normalize, for same reason as above. Just copy and continue
+            new_node = copy.copy(node)
+        elif cond_vars_in_scope.is_superset(node.md_set):
             # Distinguish between synthesizing, left/right mixing
             if vnode.md_set == l_vnode.md_set.union(r_vnode.md_set):  # Synthesizing, uniformize all
                 log_weights = node.log_weights.uniformize()
-            elif (
-                vnode.md_set == l_vnode.md_set
-            ):  # Left mixing, normalize over the right (other-child) axis — lazily, so training updates are tracked
-                # NOTE: Here we're assuming a one-to-one vtree to sum mapping, which is true for our circuits currently, but maybe not always.
-                if not cond_vars_bitset.intersection(r_vnode.scope).is_empty:
-                    raise ValueError(
-                        f"Conditioning set {cond_vars} intersects with the right child scope {r_vnode.scope} in a left mixing layer. This case currently is not supported."
-                    )
-                log_weights = MixingCondWeights(node.log_weights, other_child_axis="right")
+            elif vnode.md_set == l_vnode.md_set:
+                if cond_vars_in_scope.is_superset(r_vnode.md_set.union(l_vnode.md_set)):
+                    log_weights = node.log_weights.uniformize()
+                else:
+                    log_weights = MixingCondWeights(node.log_weights, other_child_axis="right")
             elif (
                 vnode.md_set == r_vnode.md_set
             ):  # Right mixing, unformize right using the left child values
-                if not cond_vars_bitset.intersection(l_vnode.scope).is_empty:
-                    raise ValueError(
-                        f"Conditioning set {cond_vars} intersects with the left child scope {l_vnode.scope} in a right mixing layer. This case currently is not supported."
-                    )
-                log_weights = MixingCondWeights(node.log_weights, other_child_axis="left")
+                if cond_vars_in_scope.is_superset(r_vnode.md_set.union(l_vnode.md_set)):
+                    log_weights = node.log_weights.uniformize()
+                else:
+                    log_weights = MixingCondWeights(node.log_weights, other_child_axis="left")
             else:
                 raise ValueError(
                     "Invalid layer type. Must be either synthesizing or left/right mixing layer."
                 )
             new_node = copy.copy(node)
             new_node.log_weights = log_weights
-
-        elif node.scope.intersection(cond_vars_bitset).is_empty:
-            # No need to normalize, for same reason as above. Just copy and continue
-            new_node = copy.copy(node)
-
         else:
             raise ValueError(
                 "Circuit is not marginal deterministic with respect to the conditioning set."
@@ -414,12 +405,7 @@ def _multiply(
                 ac2.vtree.get_node_data(v2_parent_id) if v2_parent_id is not None else None
             )
 
-            is_disjoint = (
-                not leaf1_node.md_set.is_universal
-                and not leaf2_node.md_set.is_universal
-                and (v1_parent_node is None or v1_parent_node.md_set.is_superset(leaf1_node.md_set))
-                and (v2_parent_node is None or v2_parent_node.md_set.is_superset(leaf2_node.md_set))
-            )
+            is_disjoint = not leaf1_node.md_set.is_universal and not leaf2_node.md_set.is_universal
             # if one of the operands is a constant node, simply return the non-constant operand
             new_node = ProductLeafLayer(
                 leaf_a=leaf1_node, leaf_b=leaf2_node, expand_leaves=not is_disjoint
@@ -544,26 +530,9 @@ def _multiply(
             l_new_node = new_ac.get_node_data(l_new_id)
             r_new_node = new_ac.get_node_data(r_new_id)
 
-            U_disjoint = (
-                not v1_node.md_set.is_universal
-                and not v2_node.md_set.is_universal
-                and v1_node.md_set.is_subset(v1_parent_node.md_set)
-                and v2_node.md_set.is_subset(v2_parent_node.md_set)
-                if (v1_parent_node and v2_parent_node)
-                else True  # The root is always unconstrained
-            )
-            L_disjoint = (
-                not v1_l_node.md_set.is_universal
-                and not v2_l_node.md_set.is_universal
-                and v1_l_node.md_set.is_subset(v1_node.md_set)
-                and v2_l_node.md_set.is_subset(v2_node.md_set)
-            )
-            R_disjoint = (
-                not v1_r_node.md_set.is_universal
-                and not v2_r_node.md_set.is_universal
-                and v1_r_node.md_set.is_subset(v1_node.md_set)
-                and v2_r_node.md_set.is_subset(v2_node.md_set)
-            )
+            U_disjoint = not v1_node.md_set.is_universal and not v2_node.md_set.is_universal
+            L_disjoint = not v1_l_node.md_set.is_universal and not v2_l_node.md_set.is_universal
+            R_disjoint = not v1_r_node.md_set.is_universal and not v2_r_node.md_set.is_universal
 
             pw = ProductWeights(
                 s1_node.log_weights,

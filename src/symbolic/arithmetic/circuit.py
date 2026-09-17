@@ -60,6 +60,71 @@ class SymbolicArithmeticCircuit(DirectedAcyclicGraph[int, ArithmeticNode, Any]):
             self.get_node_data(node_id), LeafLayer
         )
 
+    def num_parameters(self, verbose: bool = False) -> int:
+        """Total number of trainable scalar parameters referenced by the circuit.
+
+        Sum layers contribute their ``Weights.num_parameters()`` (sparse layers
+        count only mask-nonzero entries; lazy weights such as ``ProductWeights``
+        / ``MixingCondWeights`` count their underlying factors, not the
+        materialized broadcast); leaf layers contribute their parameter tensors.
+        Weight objects and tensors are deduplicated by identity, so query
+        circuits that share parameter tensors with the base circuit (or with
+        each other) never double-count them.
+        """
+        from .weights import Weights
+
+        total = 0
+        seen_weights: set = set()
+        seen_tensors: set = set()
+
+        def count_weights(w) -> int:
+            if id(w) in seen_weights:
+                return 0
+            seen_weights.add(id(w))
+            return w.num_parameters()
+
+        def count_tensors(node) -> int:
+            """Count a leaf node's own parameters (weights + tensors), recursing
+            into wrapped leaves (MixtureLeafLayer.base_dist, ProductLeafLayer.leaf_a/b)."""
+            count = 0
+            w = getattr(node, "log_weights", None)
+            if isinstance(w, Weights):
+                count += count_weights(w)
+            elif isinstance(w, torch.Tensor) and id(w) not in seen_tensors:
+                seen_tensors.add(id(w))
+                count += int(w.numel())
+            for attr in ("means", "_raw_stddevs", "_log_heights", "_b1", "logits"):
+                t = getattr(node, attr, None)
+                if isinstance(t, torch.Tensor) and id(t) not in seen_tensors:
+                    seen_tensors.add(id(t))
+                    count += int(t.numel())
+            for child_name in ("base_dist", "leaf_a", "leaf_b"):
+                child = getattr(node, child_name, None)
+                if isinstance(child, LeafLayer):
+                    count += count_tensors(child)
+            return count
+
+        for node_id in self.topological_sort():
+            node = self.get_node_data(node_id)
+            if isinstance(node, LeafLayer):
+                count = count_tensors(node)
+            else:
+                weights = getattr(node, "log_weights", None)
+                if isinstance(weights, Weights):
+                    count = count_weights(weights)
+                elif isinstance(weights, torch.Tensor):
+                    if id(weights) not in seen_tensors:
+                        seen_tensors.add(id(weights))
+                        count = int(weights.numel())
+                    else:
+                        count = 0
+                else:
+                    count = 0
+            total += count
+            if verbose and count:
+                print(f"  node {node_id}: {type(node).__name__} scope={node.scope} params={count}")
+        return total
+
     def is_product_node(self, node_id: int) -> bool:
         return False
 
@@ -171,8 +236,11 @@ class SymbolicArithmeticCircuit(DirectedAcyclicGraph[int, ArithmeticNode, Any]):
             elif isinstance(node, LeafLayer):
                 label = leaf_label(node)
 
-            if hasattr(node, "unit_count") and node.unit_count > 1:
-                label += f"\n(units={node.unit_count})"
+            if hasattr(node, "num_groups") and node.num_groups > 1:
+                label += f"\n(#groups={node.num_groups})"
+
+            if hasattr(node, "num_nodes") and node.num_nodes > 1:
+                label += f"\n(#nodes={node.num_nodes})"
 
             if show_node_supports and getattr(node, "node_supports", None) is not None:
                 supports_str = "\n".join(str(s) for s in node.node_supports)
@@ -260,15 +328,7 @@ def eval_circuit(
     for node_id in ac.topological_sort(reverse=True):
         node = ac.get_node_data(node_id)
 
-        if (
-            show_weights
-            and isinstance(node, SumLayer)
-            and (
-                2 in node.scope
-                and 3 in node.scope
-                and 1 not in node.scope  # DEBUG: only print nodes that involve Y or Z
-            )
-        ):
+        if show_weights and isinstance(node, SumLayer) and (0 in node.scope and 1 in node.scope):
             w_obj = node.log_weights
             wt = (
                 w_obj.log_weights.detach().cpu()
@@ -290,6 +350,12 @@ def eval_circuit(
                     print(
                         f"DEBUG: Node {node_id:2d} ({type(node).__name__}) (scope: {list(node.scope) if node.scope and not node.scope.is_empty else 'N/A'}) weights for group {g}, node {h}:\n{wt_rounded[g, h]}"
                     )
+                # elementwise product of all group weights over all nodes (ignoring NaNs)
+                prod = np.nansum(wt_rounded[g], axis=0)
+                prod_torch = torch.from_numpy(prod)
+                print(
+                    f"DEBUG: Node {node_id:2d} ({type(node).__name__}) (scope: {list(node.scope) if node.scope and not node.scope.is_empty else 'N/A'}) sum of weights for group {g} over all nodes:\n{prod_torch}"
+                )
 
             # wt_rounded has shape (G, H, G_L * H_L, G_R * H_R)
             wt_np = wt_rounded.detach().cpu().numpy()
@@ -303,14 +369,14 @@ def eval_circuit(
             per_node_stds_over_group = torch.from_numpy(per_node_stds_over_group)
             per_group_stds_over_left_child = torch.from_numpy(per_group_stds_over_left_child)
 
-            print(
-                f"DEBUG: STDs for node {node_id:2d} ({type(node).__name__}) (scope: {list(node.scope) if node.scope and not node.scope.is_empty else 'N/A'}) of nodes (overlapped) over groups:\n{per_node_stds_over_group}\nmean:{per_node_stds_over_group.mean()}"
-            )
+            # print(
+            #     f"DEBUG: STDs for node {node_id:2d} ({type(node).__name__}) (scope: {list(node.scope) if node.scope and not node.scope.is_empty else 'N/A'}) of nodes (overlapped) over groups:\n{per_node_stds_over_group}\nmean:{per_node_stds_over_group.mean()}"
+            # )
 
-            for g in range(G):
-                print(
-                    f"DEBUG: STDs for node {node_id:2d} ({type(node).__name__}) (scope: {list(node.scope) if node.scope and not node.scope.is_empty else 'N/A'}) of group {g} over all nodes over left children:\n{per_group_stds_over_left_child[g]}\nmean:{per_group_stds_over_left_child[g].mean()}"
-                )
+            # for g in range(G):
+            #     print(
+            #         f"DEBUG: STDs for node {node_id:2d} ({type(node).__name__}) (scope: {list(node.scope) if node.scope and not node.scope.is_empty else 'N/A'}) of group {g} over all nodes over left children:\n{per_group_stds_over_left_child[g]}\nmean:{per_group_stds_over_left_child[g].mean()}"
+            #     )
 
         child_ids = ac.get_children(node_id)
         child_outs = [outputs[cid] for cid in child_ids]
@@ -323,11 +389,7 @@ def eval_circuit(
                 if remaining_parents[cid] == 0 and cid not in root_set:
                     outputs.pop(cid, None)
 
-        if verbose and (
-            2 in node.scope
-            and 3 in node.scope
-            and 1 not in node.scope  # DEBUG: only print nodes that involve Y or Z
-        ):
+        if verbose:
             if not show_leaves_only or isinstance(node, LeafLayer):
                 if out.numel() > 0:
                     # Convert to linear domain if requested and remove numerical artifacts

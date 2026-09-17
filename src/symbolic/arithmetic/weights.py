@@ -112,6 +112,20 @@ def _prod(sizes) -> int:
     return out
 
 
+def _batch_chunk_rows(batch: int, per_row_elems: int, is_cuda: bool) -> int:
+    """Largest chunk of batch rows whose [rows, per_row_elems] fp32 transient
+    stays within the element budget (1 GiB on CUDA, 256 MB on CPU).
+
+    ``_blocked_broadcast_lse`` bounds the logsumexp materialization, but the
+    child outer-product that feeds it (``left + right``) is materialized by the
+    caller first — those materializations must be chunked here.
+    """
+    if per_row_elems <= 0:
+        return batch
+    budget = 1 << 28 if is_cuda else 1 << 26
+    return max(1, min(batch, budget // per_row_elems))
+
+
 class Weights(ABC):
     """Abstract base class for lazy weights. Duck-types as a torch.Tensor for basic ops."""
 
@@ -155,6 +169,16 @@ class Weights(ABC):
         """EM update."""
         pass
 
+    def num_parameters(self) -> int:
+        """Number of trainable scalar parameters.
+
+        The default materializes ``log_weights`` (for lazy subclasses such as
+        ``ProductWeights``/``MixingCondWeights`` this realizes the logical
+        tensor) and counts its elements.  ``SparseWeights`` overrides this to
+        count only mask-nonzero entries.
+        """
+        return int(self.log_weights.numel())
+
     def __str__(self) -> str:
         return f"{self.__class__.__name__}(shape={list(self.shape)})"
 
@@ -182,18 +206,7 @@ class DenseWeights(Weights):
         self,
         other_child_axis: Optional[str] = None,
     ) -> "Weights":
-        if other_child_axis is None:
-            return DenseWeights(torch.zeros_like(self.log_weights))
-
-        assert other_child_axis is not None and other_child_axis in ["left", "right"]
-
-        # weights have shape [G, U, G_L, L, G_R, R]
-        total = safe_logsumexp(
-            self.log_weights,
-            dim=(4, 5) if other_child_axis == "right" else (2, 3),
-            keepdim=True,
-        )
-        return DenseWeights(self.log_weights - total)
+        raise NotImplementedError("Dense weights are never uniformized.")
 
     def forward(
         self, left_out: torch.Tensor, right_out: Optional[torch.Tensor] = None
@@ -201,6 +214,20 @@ class DenseWeights(Weights):
         w = self.log_weights
         G, U, G_L, L, G_R, R = w.shape
         B = left_out.shape[0]
+
+        # Chunk the batch so the [B, G_L, L, G_R, R] product materialization
+        # below stays within the memory budget (the follow-up logsumexp is
+        # already chunked inside _blocked_broadcast_lse).
+        rows = _batch_chunk_rows(B, G_L * L * G_R * R, left_out.is_cuda)
+        if rows < B:
+            parts = [
+                self.forward(
+                    left_out[i : i + rows],
+                    right_out[i : i + rows] if right_out is not None else None,
+                )
+                for i in range(0, B, rows)
+            ]
+            return torch.cat(parts, dim=0)
 
         if right_out is None:
             # right_out is absent, effectively 0 in log space since we don't multiply it
@@ -343,6 +370,10 @@ class SparseWeights(Weights):
     def shape(self) -> Tuple[int, ...]:
         return tuple(self.log_weights.shape)
 
+    def num_parameters(self) -> int:
+        """Only mask-nonzero entries are trainable structural parameters."""
+        return int(self.mask.sum().item())
+
     def uniformize(
         self,
         other_child_axis: Optional[str] = None,
@@ -389,6 +420,19 @@ class SparseWeights(Weights):
             child = left_out.view(B, G_L, L, 1, 1)
         else:
             child = left_out.view(B, G_L, L, 1, 1) + right_out.view(B, 1, 1, G_R, R)
+
+        # Chunk the batch: the masked broadcast below materializes
+        # [B, G, U, G_L, L, G_R, R], which is unbounded in B.
+        rows = _batch_chunk_rows(B, G * U * G_L * L * G_R * R, left_out.is_cuda)
+        if rows < B:
+            parts = [
+                self.forward(
+                    left_out[i : i + rows],
+                    right_out[i : i + rows] if right_out is not None else None,
+                )
+                for i in range(0, B, rows)
+            ]
+            return torch.cat(parts, dim=0)
 
         child = child.unsqueeze(1).unsqueeze(2)  # shape: [B, 1, 1, G_L, L, G_R, R]
         w = w.unsqueeze(0)
@@ -544,6 +588,15 @@ class ProductWeights(Weights):
         w_out = w_out.reshape(new_G, new_U, new_G_L, new_L, new_G_R, new_R)
         return w_out
 
+    def num_parameters(self) -> int:
+        """Degrees of freedom of the factors, not the materialized Kronecker product.
+
+        The logical ``log_weights`` of a product is a derived broadcast of
+        ``w1`` and ``w2`` — counting its elements would report the size of the
+        expansion, not trainable parameters.
+        """
+        return self.w1.num_parameters() + self.w2.num_parameters()
+
     def uniformize(self) -> "Weights":
         return ProductWeights(
             self.w1.uniformize(),
@@ -563,6 +616,27 @@ class ProductWeights(Weights):
         G1, U1, G_L1, L1, G_R1, R1 = lw1.shape
         G2, U2, G_L2, L2, G_R2, R2 = lw2.shape
         B = left_in.shape[0]
+
+        # Chunk the batch so the child outer-product materialization below
+        # (child2 = left_p + right_p) stays within the memory budget.
+        if self.expand_L and self.expand_R:
+            per_row = G_L1 * G_R1 * L1 * R1 * G_L2 * L2 * G_R2 * R2
+        elif self.expand_L:
+            per_row = G_L1 * G_R1 * L1 * G_L2 * L2 * G_R2 * R1
+        elif self.expand_R:
+            per_row = G_L1 * G_R1 * R1 * G_L2 * L1 * G_R2 * R2
+        else:
+            per_row = G_L1 * G_R1 * G_L2 * G_R2 * L1 * R1
+        rows = _batch_chunk_rows(B, per_row, left_in.is_cuda)
+        if rows < B:
+            parts = [
+                self.forward(
+                    left_in[i : i + rows],
+                    right_in[i : i + rows] if right_in is not None else None,
+                )
+                for i in range(0, B, rows)
+            ]
+            return torch.cat(parts, dim=0)
 
         if self.expand_L:
             left_r = left_in.view(B, G_L1, G_L2, L1, L2)
@@ -746,6 +820,10 @@ class MixingCondWeights(Weights):
         raise NotImplementedError(
             "MixingCondWeights does not support update_params; update the base weights instead."
         )
+
+    def num_parameters(self) -> int:
+        """The normalized view adds no parameters; delegate to the base weights."""
+        return self.base.num_parameters()
 
     def uniformize(self) -> "Weights":
         return MixingCondWeights(self.base.uniformize(), self.other_child_axis)

@@ -53,7 +53,9 @@ def get_support(scope: BitSet, input_dists: Dict[int, Distribution]) -> Support:
 class LayerType(Enum):
     UNIVERSAL = "UNIVERSAL"
     LEFT_MIXING = "LEFT_MIXING"
+    PS_LEFT_MIXING = "PS_LEFT_MIXING"
     RIGHT_MIXING = "RIGHT_MIXING"
+    PS_RIGHT_MIXING = "PS_RIGHT_MIXING"
     SYNTHESIZING = "SYNTHESIZING"
 
 
@@ -102,9 +104,13 @@ class CircuitBuilder:
         r_vnode = self.vtree.get_node_data(children[1])
 
         if l_vnode.md_set == vnode.md_set:
-            return LayerType.LEFT_MIXING
+            return (
+                LayerType.LEFT_MIXING if r_vnode.md_set.is_universal else LayerType.PS_LEFT_MIXING
+            )
         elif r_vnode.md_set == vnode.md_set:
-            return LayerType.RIGHT_MIXING
+            return (
+                LayerType.RIGHT_MIXING if l_vnode.md_set.is_universal else LayerType.PS_RIGHT_MIXING
+            )
         else:
             return LayerType.SYNTHESIZING
 
@@ -135,8 +141,12 @@ class CircuitBuilder:
             leaf_supports = [Support({var_id: iv}) for iv in dist.split_support(H_b)]
 
         if isinstance(dist, GaussianDistribution) or len(leaf_supports) == 1:
+            base_mean = float(getattr(dist, "base_mean", 0.0))
+            base_stddev = float(getattr(dist, "base_stddev", 1.0))
+            if base_stddev <= 0:
+                base_stddev = 1.0
             leaf_layer = GaussianLeafLayer(
-                GaussianDistribution(var=var_id, base_mean=0, base_stddev=1.0),
+                GaussianDistribution(var=var_id, base_mean=base_mean, base_stddev=base_stddev),
                 num_nodes=H_b,
                 num_groups=G_b,
                 node_supports=leaf_supports if is_constrained else None,
@@ -252,12 +262,12 @@ class CircuitBuilder:
         if layer_type == LayerType.UNIVERSAL:
             # doesn't really matter since the weights are dense over everything anyways
             pass
-        elif layer_type == LayerType.LEFT_MIXING:
-            a = find_closest_factor(n, max_val=math.sqrt(math.sqrt(n)))
+        elif layer_type in [LayerType.LEFT_MIXING, LayerType.PS_LEFT_MIXING]:
+            a = find_closest_factor(n, max_val=math.sqrt(n))
             b = n // a
             G_l, H_l, G_r, H_r = a, b, b, a
-        elif layer_type == LayerType.RIGHT_MIXING:
-            a = find_closest_factor(n, max_val=math.sqrt(math.sqrt(n)))
+        elif layer_type in [LayerType.RIGHT_MIXING, LayerType.PS_RIGHT_MIXING]:
+            a = find_closest_factor(n, max_val=math.sqrt(n))
             b = n // a
             G_l, H_l, G_r, H_r = b, a, a, b
         elif layer_type == LayerType.SYNTHESIZING:
@@ -286,13 +296,13 @@ class CircuitBuilder:
             )
 
             if l_is_synth_like and not r_is_synth_like:
-                favor_left = True
+                favor_right = True
             elif r_is_synth_like and not l_is_synth_like:
-                favor_left = False
+                favor_right = False
             else:
-                favor_left = True
+                favor_right = True
 
-            if favor_left:
+            if favor_right:
                 h_l, G_l = b, a
                 G_r, h_r = b, a
             else:
@@ -377,65 +387,85 @@ class CircuitBuilder:
         if layer_type == LayerType.UNIVERSAL:
             w = torch.exp(torch.randn((G, H, G_L, H_L, G_R, H_R)) * self.weight_softmax_temperature)
 
-        elif layer_type == LayerType.LEFT_MIXING:
-            if is_constrained:
-                h_l_assignments = self._sample_balanced_assignment(H_L, H, fairness_temperature)
-                g_l_assignments = self._sample_balanced_assignment(H_L, G_L, fairness_temperature)
-                for g in range(G):
-                    for h in range(H):
-                        h_ls = h_l_assignments[h]
-                        g_ls = [
-                            [h_l in g_l_assignments[g_t] for g_t in range(G_L)].index(True)
-                            for h_l in h_ls
-                        ]
+        elif layer_type in [LayerType.LEFT_MIXING, LayerType.PS_LEFT_MIXING]:
+            assert is_constrained, "LEFT_MIXING should only occur for constrained nodes"
+            h_l_assignments = self._sample_balanced_assignment(H_L, H, fairness_temperature)
+            g_l_assignments = self._sample_balanced_assignment(H_L, G_L, fairness_temperature)
+            g_r_assignments = self._sample_balanced_assignment(H_R * H_L, G_R, fairness_temperature)
+            g_rs = [
+                [h_r * H_L + h_l in g_r_assignments[g_t] for g_t in range(G_R)].index(True)
+                for h_r in range(H_R)
+                for h_l in range(H_L)
+            ]
+            g_rs = torch.tensor(g_rs).reshape(H_R, H_L)
+            for g in range(G):
+                for h in range(H):
+                    h_ls = h_l_assignments[h]
+                    g_ls = [
+                        [h_l in g_l_assignments[g_t] for g_t in range(G_L)].index(True)
+                        for h_l in h_ls
+                    ]
+                    if layer_type == LayerType.PS_LEFT_MIXING:
+                        for idx, h_l in enumerate(h_ls):
+                            for h_r in range(H_R):
+                                g_r = g_rs[h_r, h_l]
+                                w[g, h, g_ls[idx], h_l, g_r, h_r] = torch.exp(
+                                    torch.randn(1) * self.weight_softmax_temperature
+                                )
+                    else:
                         w[g, h, g_ls, h_ls, :, :] = torch.exp(
                             torch.randn((G_R, H_R)) * self.weight_softmax_temperature
                         )
-            else:
-                raise ValueError("Unconstrained SumLayers are not supported.")
 
-        elif layer_type == LayerType.RIGHT_MIXING:
-            if is_constrained:
-                h_r_assignments = self._sample_balanced_assignment(H_R, H, fairness_temperature)
-                g_r_assignments = self._sample_balanced_assignment(H_R, G_R, fairness_temperature)
-                for g in range(G):
-                    for h in range(H):
-                        h_rs = h_r_assignments[h]
-                        g_rs = [
-                            [h_r in g_r_assignments[g_t] for g_t in range(G_R)].index(True)
-                            for h_r in h_rs
-                        ]
+        elif layer_type in [LayerType.RIGHT_MIXING, LayerType.PS_RIGHT_MIXING]:
+            assert is_constrained, "RIGHT_MIXING should only occur for constrained nodes"
+            h_r_assignments = self._sample_balanced_assignment(H_R, H, fairness_temperature)
+            g_r_assignments = self._sample_balanced_assignment(H_R, G_R, fairness_temperature)
+            g_l_assignments = self._sample_balanced_assignment(H_L * H_R, G_L, fairness_temperature)
+            g_ls = [
+                [h_l * H_R + h_r in g_l_assignments[g_t] for g_t in range(G_L)].index(True)
+                for h_l in range(H_L)
+                for h_r in range(H_R)
+            ]
+            g_ls = torch.tensor(g_ls).reshape(H_L, H_R)
+            for g in range(G):
+                for h in range(H):
+                    h_rs = h_r_assignments[h]
+                    g_rs = [
+                        [h_r in g_r_assignments[g_t] for g_t in range(G_R)].index(True)
+                        for h_r in h_rs
+                    ]
+                    print(f"g={g}, h={h},\nh_rs={h_rs},\ng_rs={g_rs}")
+                    if layer_type == LayerType.PS_RIGHT_MIXING:
+                        for idx, h_r in enumerate(h_rs):
+                            for h_l in range(H_L):
+                                g_l = g_ls[h_l, h_r]
+                                w[g, h, g_l, h_l, g_rs[idx], h_r] = torch.exp(
+                                    torch.randn(1) * self.weight_softmax_temperature
+                                )
+                    else:
                         w[g, h, :, :, g_rs, h_rs] = torch.exp(
                             torch.randn((G_L, H_L)) * self.weight_softmax_temperature
                         )
-            else:
-                raise ValueError("Unconstrained SumLayers are not supported.")
 
         elif layer_type == LayerType.SYNTHESIZING:
-            if is_constrained:
-                # assign each combination of left and right child nodes to a unique sum node
-                flat_assignments = self._sample_balanced_assignment(
-                    H_L * H_R, H, fairness_temperature
-                )
-                assignments = [
-                    [(i // H_R, i % H_R) for i in row] for row in flat_assignments
-                ]  # convert to (left, right) pairs
-                for g in range(G):
-                    for h in range(H):
-                        h_ls = [i for i, _ in assignments[h]]
-                        h_rs = [k for _, k in assignments[h]]
-                        for h_l in h_ls:
-                            for h_r in h_rs:
-                                # If H_R < G_L or H_L < G_R, then some groups will be unused,
-                                # but this only occurs when both leaves are constrained and max_leaf_num_nodes is set (i.e. synthesizing).
-                                # If we know this will happen, we can additionally set max_leaf_num_groups to avoid the wasted leaf groups.
-                                g_l = h_r % G_L
-                                g_r = h_l % G_R
-                                w[g, h, g_l, h_l, g_r, h_r] = torch.exp(
-                                    torch.randn(1) * self.weight_softmax_temperature
-                                )
-            else:
-                raise ValueError("Unconstrained SumLayers are not supported.")
+            assert is_constrained, "SYNTHESIZING should only occur for constrained nodes"
+            # assign each combination of left and right child nodes to a unique sum node
+            flat_assignments = self._sample_balanced_assignment(H_L * H_R, H, fairness_temperature)
+            assignments = [
+                [(i // H_R, i % H_R) for i in row] for row in flat_assignments
+            ]  # convert to (left, right) pairs
+            for g in range(G):
+                for h in range(H):
+                    for h_l, h_r in assignments[h]:
+                        # If H_R < G_L or H_L < G_R, then some groups will be unused,
+                        # but this only occurs when both leaves are constrained and max_leaf_num_nodes is set (i.e. synthesizing).
+                        # If we know this will happen, we can additionally set max_leaf_num_groups to avoid the wasted leaf groups.
+                        g_l = h_r % G_L
+                        g_r = h_l % G_R
+                        w[g, h, g_l, h_l, g_r, h_r] = torch.exp(
+                            torch.randn(1) * self.weight_softmax_temperature
+                        )
         else:
             raise ValueError(f"Unsupported layer type: {layer_type}")
 
@@ -446,8 +476,9 @@ class CircuitBuilder:
 
         for g in range(G):
             for n in range(H):
+                w_to_print = (w > 0).int()
                 logger.debug(
-                    f"LayerType={layer_type}, is_constrained={is_constrained}, g={g}, n={n}, w[g,n,:,:,:, :]=\n{w[g, n, :, :, :, :].view(G_L * H_L, G_R * H_R)}"
+                    f"LayerType={layer_type}, is_constrained={is_constrained}, g={g}, n={n},\nG_L={G_L}, H_L={H_L}, G_R={G_R}, H_R={H_R},\nw[g,n,:,:,:, :]=\n{w_to_print[g, n, :, :, :, :].view(G_L * H_L, G_R * H_R)}"
                 )
 
         return w
@@ -463,15 +494,7 @@ class CircuitBuilder:
             return self.built_nodes[vid]
 
         vnode = self.vtree.get_node_data(vid)
-        parent_vid = self.vtree.get_parent(vid)
-
-        if parent_vid is None:  # root
-            is_constrained = True  # Since H=G=1 for root, this makes no difference.
-        else:
-            parent_vnode = self.vtree.get_node_data(parent_vid)
-            is_constrained = not vnode.md_set.is_universal and vnode.md_set.is_subset(
-                parent_vnode.md_set
-            )
+        is_constrained = not vnode.md_set.is_universal
 
         if self.vtree.is_leaf(vid):
             leaf_layer = self._handle_leaf(
@@ -495,12 +518,8 @@ class CircuitBuilder:
 
         l_vnode = self.vtree.get_node_data(children[0])
         r_vnode = self.vtree.get_node_data(children[1])
-        l_is_constrained = not l_vnode.md_set.is_universal and l_vnode.md_set.is_subset(
-            vnode.md_set
-        )
-        r_is_constrained = not r_vnode.md_set.is_universal and r_vnode.md_set.is_subset(
-            vnode.md_set
-        )
+        l_is_constrained = not l_vnode.md_set.is_universal
+        r_is_constrained = not r_vnode.md_set.is_universal
 
         G_L, H_L, G_R, H_R = self._get_child_dimensions(
             layer_type,
@@ -534,7 +553,7 @@ class CircuitBuilder:
             md_set=vnode.md_set,
         )
 
-        logger.debug(f"Generating weights for node {vid} with scope {vnode.scope}")
+        print(f"Generating weights for node {vid} with scope {vnode.scope}")
         w = self._generate_weights(
             G,
             H,

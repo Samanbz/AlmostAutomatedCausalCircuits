@@ -18,7 +18,9 @@ LOG_FLOOR = float("-inf")
 class LeafLayer(ArithmeticNode):
     """Represents a leaf distribution (e.g., Gaussian) in the SPN."""
 
-    pass
+    def num_parameters(self) -> int:
+        """Number of trainable scalar parameters in this leaf (0 by default)."""
+        return 0
 
 
 class ConstantRegionNode(LeafLayer):
@@ -76,10 +78,8 @@ class ProductLeafLayer(LeafLayer):
             num_groups=leaf_a.num_groups * leaf_b.num_groups,
             md_set=leaf_a.md_set,
         )
-        assert leaf_a.num_groups == leaf_b.num_groups, (
-            "ProductLeafLayer requires both leaves to have the same number of groups."
-        )
-        assert leaf_a.num_nodes == leaf_b.num_nodes, (
+
+        assert expand_leaves or leaf_a.num_nodes == leaf_b.num_nodes, (
             "ProductLeafLayer requires both leaves to have the same number of nodes."
         )
         self.leaf_a = leaf_a
@@ -110,6 +110,9 @@ class ProductLeafLayer(LeafLayer):
 
     def __repr__(self):
         return f"ProductLeafLayer(a={self.leaf_a}, b={self.leaf_b}, expand_leaves={self.expand_leaves})"
+
+    def num_parameters(self) -> int:
+        return self.leaf_a.num_parameters() + self.leaf_b.num_parameters()
 
 
 class IndicatorLeafLayer(LeafLayer):
@@ -430,6 +433,9 @@ class GaussianLeafLayer(LeafLayer):
     def __repr__(self):
         return f"GaussianLeafLayer(var={self.var}, means={self.means.shape}, stddevs={self.stddevs.shape})"
 
+    def num_parameters(self) -> int:
+        return int(self.means.numel() + self._raw_stddevs.numel())
+
 
 class MixtureLeafLayer(LeafLayer):
     """Represents a mixture of Gaussian distributions as a single leaf node.
@@ -463,6 +469,16 @@ class MixtureLeafLayer(LeafLayer):
 
     def split_support(self) -> List[Interval]:
         raise NotImplementedError("Support splitting for MixtureLeafLayer is not implemented.")
+
+    def num_parameters(self) -> int:
+        from src.symbolic.arithmetic.weights import Weights
+
+        total = self.base_dist.num_parameters() if self.base_dist is not None else 0
+        if isinstance(self.log_weights, Weights):
+            total += self.log_weights.num_parameters()
+        elif isinstance(self.log_weights, torch.Tensor):
+            total += int(self.log_weights.numel())
+        return total
 
     def forward(
         self, data: torch.Tensor, children_outputs: list[torch.Tensor] = None
@@ -581,6 +597,9 @@ class CategoricalLeafLayer(LeafLayer):
 
     def __repr__(self):
         return f"CategoricalLeafLayer(var={self.var}, categories={len(self.categories)})"
+
+    def num_parameters(self) -> int:
+        return int(self.logits.numel())
 
 
 class SplineLeafLayer(LeafLayer):
@@ -703,6 +722,9 @@ class SplineLeafLayer(LeafLayer):
                     attr = attr.detach().requires_grad_(attr.requires_grad)
                 setattr(self, attr_name, attr)
         return super().to(device)
+
+    def num_parameters(self) -> int:
+        return int(self._log_heights.numel() + self._b1.numel())
 
 
 class LogLinearSplineLeafLayer(SplineLeafLayer):

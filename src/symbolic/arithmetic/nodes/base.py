@@ -45,4 +45,4 @@ class ArithmeticNode(Node):
 
     def __repr__(self):
         scope_str = self.support.scope if self.support is not None else None
-        return f"{self.__class__.__name__}(scope={scope_str}, unit_count={self.unit_count})"
+        return f"{self.__class__.__name__}(scope={scope_str}, #nodes={self.num_nodes}, #groups={self.num_groups})"
