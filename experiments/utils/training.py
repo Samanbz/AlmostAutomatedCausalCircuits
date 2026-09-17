@@ -1,4 +1,12 @@
-"""Batch-EM training loop with periodic checkpointing."""
+"""Batch-EM training loop with periodic checkpointing.
+
+Follows step 4 of the experiment recipe: every ``checkpoint_every_epochs``
+epochs the loop saves a base-model checkpoint, and every ``decay_every``
+epochs it decays the step size.  No dataset-wide NLL evaluations happen
+during training — those are run post-hoc from the saved checkpoints, which
+is much cheaper than re-evaluating the compiled do-circuit at every
+checkpoint epoch.
+"""
 
 import copy
 import glob
@@ -14,8 +22,6 @@ from src.logger import logger as g_logger
 from src.symbolic.arithmetic.circuit import eval_circuit
 from src.symbolic.arithmetic.nodes.leaf_layer import LogLinearSplineDistribution
 from src.symbolic.arithmetic.train import SymbolicEMTrainer
-
-from .wandb_logging import log_epoch
 
 
 logger = g_logger.getChild("training")
@@ -57,17 +63,17 @@ def compute_nll(circuit, data: torch.Tensor, batch_size: int = EVAL_CHUNK_ROWS) 
         for i in range(0, n, batch_size):
             log_probs = eval_circuit(
                 circuit, data[i : i + batch_size], verbose=False, keep_intermediates=False
-            )
+            ).reshape(-1)
             # Per-chunk float32 sum accumulated in float64 — matches the old
             # host-side accumulation bit-for-bit, without per-chunk host syncs.
             total += -log_probs.sum()
     return (total / n).item()
 
 
-def find_latest_checkpoint(models_dir: str, exp_id: str) -> Optional[Tuple[int, str]]:
-    """Return ``(epoch, path)`` of the newest ``<exp_id>_epoch_XXXX.pt``, if any."""
+def find_latest_checkpoint(models_dir: str, run_prefix: str) -> Optional[Tuple[int, str]]:
+    """Return ``(epoch, path)`` of the newest ``<run_prefix>_epoch_XXXX.pt``, if any."""
     best: Optional[Tuple[int, str]] = None
-    for path in glob.glob(os.path.join(models_dir, f"{exp_id}_epoch_*.pt")):
+    for path in glob.glob(os.path.join(models_dir, f"{run_prefix}_epoch_*.pt")):
         m = re.search(r"_epoch_(\d+)\.pt$", os.path.basename(path))
         if m is None:
             continue
@@ -94,30 +100,24 @@ def train_model(
     cfg: Dict[str, Any],
     device: torch.device,
     models_dir: str,
-    exp_id: str,
-    do_data: Optional[torch.Tensor] = None,
-    q_do_ac=None,
+    run_prefix: str,
     start_epoch: int = 0,
-    wandb_run=None,
-) -> Dict[str, float]:
+) -> None:
     """Batch EM training loop with periodic checkpoints.
 
-    This intentionally mirrors ``SymbolicEMTrainer.train`` exactly (including
-    its ``n_iter + 1`` epoch convention and decay schedule) so results match
-    the original ``test_joint_fit.py`` protocol.
+    Mirrors ``SymbolicEMTrainer.train`` (including its ``n_iter + 1`` epoch
+    convention and decay schedule) so results match the original
+    ``test_joint_fit.py`` protocol.
 
     ``start_epoch`` resumes training as if ``start_epoch`` epochs have already
     been completed (step-size decay schedule included).  Note that the Adam
     moments of the leaf-parameter optimizer are not checkpointed, so a resumed
     run is not bit-identical to an uninterrupted one.
 
-    If ``do_data`` and ``q_do_ac`` are given, every batch is additionally
-    scored on the do-circuit using the interventional rows at the same batch
-    indices, and the epoch-mean interventional NLL is logged alongside the
-    observational one.  This evaluation is read-only and does not affect
-    training.  Note that the compiled do-circuit is ~30x more expensive per
-    evaluation than the base circuit, so ``do_eval_every`` controls how often
-    this pass runs (0 = only the final evaluation after training).
+    No dataset-wide NLL evaluations happen during training — they are run
+    post-hoc from the saved checkpoints, which avoids re-evaluating the
+    compiled do-circuit (orders of magnitude more expensive than one training
+    epoch) at every checkpoint epoch.
     """
     train_cfg = cfg["training"]
     batch_size = train_cfg["batch_size"]
@@ -137,17 +137,6 @@ def train_model(
     trainer = SymbolicEMTrainer(ac, leaf_lr=leaf_lr)
     data = data.to(device)
 
-    do_eval_every = train_cfg.get("do_eval_every", 1)
-    has_do_eval = do_data is not None and q_do_ac is not None and do_eval_every > 0
-    eval_chunk_rows = resolve_eval_chunk_rows(cfg, data.device)
-    if has_do_eval:
-        do_data = do_data.to(device)
-        if do_data.shape[0] != data.shape[0]:
-            raise ValueError(
-                f"Interventional train set has {do_data.shape[0]} rows, "
-                f"expected {data.shape[0]} to match the observational train set."
-            )
-
     N = data.shape[0]
     # Reconstruct the step size as it would stand after ``start_epoch`` epochs,
     # mirroring the decay rule in the loop below.
@@ -161,16 +150,12 @@ def train_model(
     ema_epoch_duration: Optional[float] = None
     ema_alpha = 0.3
 
-    final_metrics: Dict[str, float] = {}
-
     for epoch in range(start_epoch, total_epochs):
         epoch_start = time.perf_counter()
         indices = torch.randperm(N, device=device)
-        run_do_eval = has_do_eval and epoch % do_eval_every == 0
 
         # Accumulate as tensors to avoid a host sync on every step.
         obs_nll_sum = torch.zeros((), device=device)
-        do_nll_sum = torch.zeros((), device=device)
         n_samples = 0
 
         for start in range(0, N, batch_size):
@@ -178,25 +163,9 @@ def train_model(
             nll = trainer.em_step(data[idx], current_step_size)
             step_count += 1
             obs_nll_sum += nll * idx.shape[0]
-
-            if run_do_eval:
-                with torch.no_grad():
-                    batch_do = do_data[idx]
-                    for j in range(0, batch_do.shape[0], eval_chunk_rows):
-                        do_log_probs = eval_circuit(
-                            q_do_ac,
-                            batch_do[j : j + eval_chunk_rows],
-                            verbose=False,
-                            keep_intermediates=False,
-                        ).squeeze()
-                        do_valid = torch.isfinite(do_log_probs)
-                        do_nll_sum += -do_log_probs[do_valid].sum()
-
             n_samples += idx.shape[0]
 
         epoch_obs_nll = float(obs_nll_sum / n_samples)
-        epoch_do_nll = float(do_nll_sum / n_samples) if run_do_eval else float("nan")
-
         epoch_duration = time.perf_counter() - epoch_start
         ema_epoch_duration = (
             epoch_duration
@@ -209,41 +178,30 @@ def train_model(
             remaining = total_epochs - (epoch + 1)
             eta = ema_epoch_duration * remaining if ema_epoch_duration is not None else 0.0
             logger.info(
-                "Epoch %3d | Step %5d | obs NLL %.4f | do NLL %.4f | step_size %.4f | "
+                "Epoch %3d | Step %5d | obs NLL %.4f | step_size %.4f | "
                 "epoch %s | elapsed %s | ETA %s",
                 epoch,
                 step_count,
                 epoch_obs_nll,
-                epoch_do_nll,
                 current_step_size,
                 _format_duration(epoch_duration),
                 _format_duration(elapsed),
                 _format_duration(eta),
-            )
-            log_epoch(
-                wandb_run, epoch, epoch_obs_nll, epoch_do_nll, current_step_size, epoch_duration
             )
 
         if decay_rate < 1.0 and epoch % decay_every == 0:
             current_step_size *= decay_rate
 
         if checkpoint_every > 0 and (epoch + 1) % checkpoint_every == 0:
-            save_checkpoint(ac, epoch + 1, models_dir, exp_id)
+            save_checkpoint(ac, epoch + 1, models_dir, run_prefix)
 
-    final_metrics["train_nll"] = compute_nll(ac, data)
-    logger.info("Training finished. Train NLL: %.4f", final_metrics["train_nll"])
-    return final_metrics
+    logger.info("Training finished (no eval NLLs computed; use checkpoints for post-hoc eval).")
 
 
-def save_checkpoint(
-    ac,
-    epoch: int,
-    models_dir: str,
-    exp_id: str,
-) -> str:
+def save_checkpoint(ac, epoch: int, models_dir: str, run_prefix: str) -> str:
     """Save a CPU-resident copy of the circuit without mutating the trained model."""
     os.makedirs(models_dir, exist_ok=True)
-    path = os.path.join(models_dir, f"{exp_id}_epoch_{epoch:04d}.pt")
+    path = os.path.join(models_dir, f"{run_prefix}_epoch_{epoch:04d}.pt")
     checkpoint_ac = copy.deepcopy(ac)
     checkpoint_ac.to("cpu")
     torch.save(checkpoint_ac, path)
@@ -251,10 +209,10 @@ def save_checkpoint(
     return path
 
 
-def save_final_model(ac, models_dir: str, exp_id: str) -> str:
-    """Save the final trained model as ``<exp_id>_final.pt``."""
+def save_final_model(ac, models_dir: str, run_prefix: str) -> str:
+    """Save the final trained model as ``<run_prefix>_final.pt``."""
     os.makedirs(models_dir, exist_ok=True)
-    path = os.path.join(models_dir, f"{exp_id}_final.pt")
+    path = os.path.join(models_dir, f"{run_prefix}_final.pt")
     final_ac = copy.deepcopy(ac)
     final_ac.to("cpu")
     torch.save(final_ac, path)

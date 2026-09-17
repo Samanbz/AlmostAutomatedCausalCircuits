@@ -79,7 +79,15 @@ def choose_x_values_from_intervals(
         x_min, x_max = float("-inf"), float("inf")
 
     finite_bounds = [b for low, high in intervals for b in (low, high) if math.isfinite(b)]
-    span = max(finite_bounds) - min(finite_bounds) if finite_bounds else 1.0
+    if finite_bounds:
+        span = max(finite_bounds) - min(finite_bounds)
+        if span <= 0:
+            # Degenerate case: e.g. two half-open tails sharing a single finite
+            # split point. Fall back to the observational data range (if given)
+            # so the tail padding stays non-zero.
+            span = (x_max - x_min) if x_min > float("-inf") and x_max < float("inf") else 1.0
+    else:
+        span = 1.0
     pad = pad_fraction * span
 
     values, labels = [], []

@@ -1,4 +1,17 @@
-"""Config loading, seeding, logging and reproducibility metadata."""
+"""Config loading, seeding, artifact paths, logging and reproducibility metadata.
+
+Artifact layout (per experiment ID and seed):
+
+    results/<exp_id>/seed_<S>/{config.json,metadata.json,metrics.json,grids.npz,<exp_id>_seed<S>.log}
+    models/<exp_id>/<exp_id>_seed<S>_epoch_XXXX.pt
+    models/<exp_id>/<exp_id>_seed<S>_final.pt
+
+The experiment ID is the config file name (never its contents), so artifacts
+stay addressable across config edits; a content hash of the
+checkpoint-relevant config sections is stored in the metadata and a config
+change triggers invalidation of the stale artifacts (interactively, or
+non-interactively via ``--yes-invalidate``).
+"""
 
 import glob
 import hashlib
@@ -15,6 +28,7 @@ from typing import Any, Dict, Optional
 import numpy as np
 import torch
 
+from experiments.utils.data import resolve_dataset_paths
 from src.logger import logger as g_logger
 
 
@@ -43,35 +57,82 @@ def config_hash(cfg: Dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()[:12]
 
 
-def read_stored_config_hash(output_dir: str, exp_id: str) -> Optional[str]:
-    """Config hash recorded by the previous run of this experiment, if any."""
-    path = os.path.join(output_dir, f"{exp_id}_metadata.json")
+# Model-section key defaults, mirroring the ``.get(...)`` fallbacks in
+# ``build_circuit`` / ``create_md_circuit``. Keys left at these values produce
+# identical circuits, so they are stripped from the checkpoint hash.
+_MODEL_DEFAULTS = {
+    "fairness_temperature": 1.0,
+}
+
+# Sections that influence the trained model or the training run. Edits confined
+# to the other sections (evaluation, checkpointing, wandb, device/output
+# paths) must not invalidate existing checkpoints.
+_CHECKPOINT_SECTIONS = ("experiment", "dataset", "model", "training")
+
+
+def checkpoint_hash(cfg: Dict[str, Any]) -> str:
+    """Hash of only the checkpoint-relevant parts of the config.
+
+    Covers ``experiment.seed``, ``dataset``, ``model`` (with default-valued
+    keys stripped) and ``training``; evaluation/wandb settings and
+    behavior-neutral model keys are ignored.
+    """
+    relevant = {}
+    for section in _CHECKPOINT_SECTIONS:
+        if section not in cfg:
+            continue
+        if section == "experiment":
+            relevant[section] = {"seed": cfg[section].get("seed")}
+        elif section == "model":
+            relevant[section] = {
+                k: v for k, v in cfg[section].items() if _MODEL_DEFAULTS.get(k) != v
+            }
+        else:
+            relevant[section] = cfg[section]
+    canonical = json.dumps(relevant, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()[:12]
+
+
+# ---------------------------------------------------------------------------
+# Artifact paths
+# ---------------------------------------------------------------------------
+
+
+def run_prefix(exp_id: str, seed: int) -> str:
+    """Checkpoint file prefix for one seed run of an experiment."""
+    return f"{exp_id}_seed{seed}"
+
+
+def seed_dir(output_dir: str, seed: int) -> str:
+    """Per-seed results directory."""
+    return os.path.join(output_dir, f"seed_{seed}")
+
+
+def read_stored_checkpoint_hash(results_seed_dir: str) -> Optional[str]:
+    """Checkpoint-relevant hash recorded by the previous run of this seed, if any.
+
+    ``None`` when no metadata exists yet (first run) or it predates
+    checkpoint-aware hashing.
+    """
+    path = os.path.join(results_seed_dir, "metadata.json")
     if not os.path.exists(path):
         return None
     try:
         with open(path) as f:
-            return json.load(f).get("config_hash")
+            return json.load(f).get("checkpoint_hash")
     except Exception:
         return None
 
 
-def invalidate_artifacts(output_dir: str, models_dir: str, exp_id: str) -> None:
-    """Delete every artifact produced by previous runs of this experiment ID."""
-    for path in glob.glob(os.path.join(models_dir, f"{exp_id}_epoch_*.pt")):
+def invalidate_artifacts(results_seed_dir: str, models_dir: str, prefix: str) -> None:
+    """Delete every artifact produced by previous runs of this seed run."""
+    for path in glob.glob(os.path.join(models_dir, f"{prefix}_epoch_*.pt")):
         os.remove(path)
-    final = os.path.join(models_dir, f"{exp_id}_final.pt")
+    final = os.path.join(models_dir, f"{prefix}_final.pt")
     if os.path.exists(final):
         os.remove(final)
-
-    if not os.path.isdir(output_dir):
-        return
-    # Only remove the whole directory when it is clearly dedicated to this
-    # experiment ID; otherwise delete just the files carrying the ID.
-    if os.path.basename(os.path.normpath(output_dir)) == exp_id:
-        shutil.rmtree(output_dir)
-    else:
-        for path in glob.glob(os.path.join(output_dir, f"*{exp_id}*")):
-            os.remove(path)
+    if os.path.isdir(results_seed_dir):
+        shutil.rmtree(results_seed_dir)
 
 
 def apply_overrides(cfg: Dict[str, Any], overrides: list[str]) -> Dict[str, Any]:
@@ -107,15 +168,15 @@ def get_device(config_device: Optional[str]) -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def setup_logging(output_dir: str, exp_id: str) -> logging.Logger:
-    """Attach a per-experiment file handler to the global project logger.
+def setup_logging(results_seed_dir: str, name: str) -> logging.Logger:
+    """Attach a per-seed file handler to the global project logger.
 
     The global ``mcc`` logger (``src.logger``) already prints to the console;
     all experiment modules log through child loggers that propagate to it, so
     this file handler captures everything.
     """
-    os.makedirs(output_dir, exist_ok=True)
-    log_path = os.path.join(output_dir, f"{exp_id}.log")
+    os.makedirs(results_seed_dir, exist_ok=True)
+    log_path = os.path.join(results_seed_dir, f"{name}.log")
 
     # Replace any file handler left over from a previous run in this process.
     for h in list(g_logger.handlers):
@@ -139,7 +200,32 @@ def _repo_root() -> str:
     return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
-def write_metadata(cfg: Dict[str, Any], output_dir: str, start_time: str, cfg_hash: str) -> None:
+def data_file_hashes(cfg: Dict[str, Any]) -> Dict[str, str]:
+    """SHA-256 of the dataset CSVs the run reads (for reproducibility)."""
+    ds = cfg["dataset"]
+    paths = resolve_dataset_paths(ds["data_dir"], ds["dataset"])
+    hashes = {}
+    for kind in ("observational", "interventional"):
+        path = paths[kind]
+        if not os.path.exists(path):
+            continue
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        hashes[os.path.basename(path)] = h.hexdigest()[:16]
+    return hashes
+
+
+def write_metadata(
+    cfg: Dict[str, Any],
+    results_seed_dir: str,
+    seed: int,
+    start_time: str,
+    end_time: str,
+    cfg_hash: str,
+    device: str,
+) -> None:
     """Write a small JSON with everything needed to reproduce the run."""
     try:
         git_commit = (
@@ -154,22 +240,27 @@ def write_metadata(cfg: Dict[str, Any], output_dir: str, start_time: str, cfg_ha
 
     metadata = {
         "experiment_id": cfg["experiment"]["id"],
+        "seed": seed,
         "config": cfg,
         "config_hash": cfg_hash,
+        "checkpoint_hash": checkpoint_hash(cfg),
         "start_time": start_time,
+        "end_time": end_time,
         "hostname": platform.node(),
+        "device": device,
         "python_version": platform.python_version(),
         "pytorch_version": torch.__version__,
         "git_commit": git_commit,
         "command": " ".join(sys.argv),
+        "data_file_hashes": data_file_hashes(cfg),
     }
-    out_path = os.path.join(output_dir, f"{cfg['experiment']['id']}_metadata.json")
+    out_path = os.path.join(results_seed_dir, "metadata.json")
     with open(out_path, "w") as f:
         json.dump(metadata, f, indent=2)
 
 
-def save_config_copy(cfg: Dict[str, Any], output_dir: str) -> None:
-    """Copy the resolved config into the output directory."""
-    out_path = os.path.join(output_dir, f"{cfg['experiment']['id']}_config.json")
+def save_config_copy(cfg: Dict[str, Any], results_seed_dir: str) -> None:
+    """Copy the resolved config into the seed results directory."""
+    out_path = os.path.join(results_seed_dir, "config.json")
     with open(out_path, "w") as f:
         json.dump(cfg, f, indent=2)

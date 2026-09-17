@@ -7,17 +7,15 @@ Example config block::
       "project": "monarch-causal-circuits",
       "entity": null,
       "mode": "online",
-      "tags": [],
-      "log_plots": true
+      "tags": []
     }
 
 ``mode`` accepts ``"online"``, ``"offline"`` or ``"disabled"`` (passed through
 to ``wandb.init``); use ``"offline"`` on machines without network access and
-sync later with ``wandb sync``.
+sync later with ``wandb sync``.  Each seed run becomes a separate wandb run
+named ``<exp_id>-seed<S>`` grouped under ``<exp_id>``.
 """
 
-import glob
-import os
 from typing import Any, Dict, Optional
 
 from src.logger import logger as g_logger
@@ -26,7 +24,7 @@ from src.logger import logger as g_logger
 logger = g_logger.getChild("wandb")
 
 
-def init_wandb(cfg: Dict[str, Any]) -> Optional[Any]:
+def init_wandb(cfg: Dict[str, Any], seed: int) -> Optional[Any]:
     """Start a wandb run if enabled in the config, else return ``None``."""
     wb_cfg = cfg.get("wandb", {})
     if not wb_cfg.get("enabled", False):
@@ -36,63 +34,47 @@ def init_wandb(cfg: Dict[str, Any]) -> Optional[Any]:
     except ImportError as e:
         raise ImportError(
             "wandb logging is enabled in the config but wandb is not installed. "
-            "Install it with `pip install -e .[wandb]`."
+            "Install it with `pip install wandb`."
         ) from e
 
+    exp_id = cfg["experiment"]["id"]
     run = wandb.init(
         project=wb_cfg.get("project", "monarch-causal-circuits"),
         entity=wb_cfg.get("entity"),
         mode=wb_cfg.get("mode", "online"),
-        name=cfg["experiment"]["id"],
+        name=f"{exp_id}-seed{seed}",
+        group=exp_id,
         tags=wb_cfg.get("tags") or None,
-        config=cfg,
+        config={**cfg, "seed": seed},
     )
     return run
 
 
-def log_epoch(
+def log_eval(
     wandb_run: Optional[Any],
     epoch: int,
-    obs_nll: float,
-    do_nll: float,
+    obs_test_nll: float,
+    do_test_nll: Optional[float],
     step_size: float,
-    epoch_seconds: float,
 ) -> None:
-    """Log per-epoch training metrics."""
+    """Log the periodic checkpoint-epoch evaluations."""
     if wandb_run is None:
         return
-    wandb_run.log(
-        {
-            "train/obs_nll_epoch": obs_nll,
-            "train/do_nll_epoch": do_nll,
-            "train/step_size": step_size,
-            "train/epoch_seconds": epoch_seconds,
-        },
-        step=epoch,
-    )
+    payload = {
+        "eval/obs_test_nll": obs_test_nll,
+        "eval/step_size": step_size,
+        "epoch": epoch,
+    }
+    if do_test_nll is not None:
+        payload["eval/do_test_nll"] = do_test_nll
+    wandb_run.log(payload, step=epoch)
 
 
-def log_summary(wandb_run: Optional[Any], metrics: Dict[str, float]) -> None:
-    """Record the final before/after NLLs on the run summary."""
+def log_summary(wandb_run: Optional[Any], metrics: Dict[str, Any]) -> None:
+    """Record the final metrics on the run summary."""
     if wandb_run is None:
         return
     wandb_run.summary.update(metrics)
-
-
-def log_plots(
-    wandb_run: Optional[Any],
-    output_dir: str,
-    exp_id: str,
-) -> None:
-    """Upload every plot PNG in the results directory to the run."""
-    if wandb_run is None:
-        return
-    import wandb
-
-    for path in sorted(glob.glob(os.path.join(output_dir, "*.png"))):
-        name = os.path.splitext(os.path.basename(path))[0]
-        wandb_run.log({f"plots/{name}": wandb.Image(path)})
-    logger.info("Logged plots to wandb run %s", wandb_run.name or exp_id)
 
 
 def finish_wandb(wandb_run: Optional[Any]) -> None:
