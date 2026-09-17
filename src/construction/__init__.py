@@ -1,5 +1,5 @@
 from .circuit_builder import CircuitBuilder, create_md_circuit
-from .latent_projection import ADMG, latent_projection
+from .latent_projection import latent_projection
 from .learned_vtree import construct_optimal_md_vtree, construct_optimal_vtree
 from .random_mechanisms import randomize_mechanisms, sample_dataset
 from .random_scm import generate_random_scm
@@ -13,7 +13,6 @@ from .skeleton import (
 
 
 __all__ = [
-    "ADMG",
     "CircuitBuilder",
     "SCMSkeleton",
     "VariableSpec",

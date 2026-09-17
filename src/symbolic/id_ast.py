@@ -323,7 +323,7 @@ def get_vars(ast: EstimandAST, node_id: Optional[int] = None) -> set:
     if isinstance(node, PNode):
         return set(node.variables)
     elif isinstance(node, CondNode):
-        return set(node.num_vars)
+        return set(node.num_vars) | set(node.den_vars)
     elif isinstance(node, ConstantNode):
         return set()
     elif isinstance(node, MargNode):

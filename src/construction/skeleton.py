@@ -185,11 +185,15 @@ def frontdoor_skeleton(
     kind: Literal["discrete", "continuous"] = "discrete",
     cardinality: Optional[int] = 2,
     confounder_cardinality: int = 2,
+    confounder_kind: Literal["discrete", "continuous"] = "discrete",
 ) -> SCMSkeleton:
     """Frontdoor structure: X -> M -> Y with hidden confounders U -> X, U -> Y.
 
-    * Confounders ``U_i`` (size ``n_confounders``) are always hidden and always
-      discrete, so the CLG constraint holds for both observed kinds.
+    * Confounders ``U_i`` (size ``n_confounders``) are always hidden; by default
+      discrete (``confounder_kind="discrete"``, so the CLG constraint holds for
+      both observed kinds). ``confounder_kind="continuous"`` makes them
+      hidden continuous roots (linear-GMM) — X/M/Y then carry plain linear
+      mechanisms, which unlocks ``--confounding_strength`` effect engineering.
     * Treatments ``X_j``, mediators ``M_l``, outcomes ``Y_k``: every X_j points
       at every M_l, every M_l at every Y_k, and every U_i at every X_j and Y_k.
     * Bystanders ``W_l``: disconnected nuisance roots.
@@ -202,7 +206,15 @@ def frontdoor_skeleton(
     y_names = _set_names("Y", n_outcomes)
     w_names = _set_names("W", n_bystanders, always_suffix=True)
 
-    variables = [VariableSpec(u, "discrete", confounder_cardinality, hidden=True) for u in u_names]
+    variables = [
+        VariableSpec(
+            u,
+            confounder_kind,
+            confounder_cardinality if confounder_kind == "discrete" else None,
+            hidden=True,
+        )
+        for u in u_names
+    ]
     variables += [VariableSpec(x, kind, cardinality) for x in x_names]
     variables += [VariableSpec(m, kind, cardinality) for m in m_names]
     variables += [VariableSpec(y, kind, cardinality) for y in y_names]

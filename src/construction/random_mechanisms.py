@@ -152,8 +152,15 @@ def _engineer_effect(
     slope over that window (up to the mixture's mild nonlinearity in the tails).
 
     Raises for discrete confounders (bias lives in CPTs/CLG regimes there), multiple
-    treatments (no single slope to target), frontdoor skeletons (no direct edge;
-    effects are mediated) and non-root confounders.
+    treatments (no single slope to target) and non-root confounders.
+
+    Frontdoor note: with continuous confounders (``--u_kind continuous``) the
+    confounding solve works as well. There is no direct X->Y edge; instead the
+    treatment's coefficient in its children on paths to Y (the mediators) is
+    zeroed for the duration of the probe and restored afterwards, so
+    ``confounding_strength S`` still means "observational slope becomes
+    (causal effect) + S", with the causal effect carried by the X -> M -> Y
+    chain.
     """
     x_names = [v.name for v in skeleton.variables if v.name == "X" or v.name.startswith("X_")]
     y_names = [v.name for v in skeleton.variables if v.name == "Y" or v.name.startswith("Y_")]
@@ -164,7 +171,8 @@ def _engineer_effect(
         if not direct_edges:
             raise ValueError(
                 "effect engineering: no treatment->outcome (X*->Y*) edges in this skeleton "
-                "(frontdoor effects are mediated) — --direct_effect does not apply."
+                "(frontdoor effects are mediated) — use --set_coef on the X*->M* / M*->Y* "
+                "edges to pin the causal effect instead of --direct_effect."
             )
         for x, y in direct_edges:
             _linear_gmm(y, scm).coefficients[x] = float(direct_effect)
@@ -202,13 +210,12 @@ def _engineer_effect(
                 "assumes root confounders (as built by the backdoor factory)."
             )
 
-    # Probe: unit confounder->Y coefficients with the direct X->Y path removed,
-    # measure the confounding-only slope through the exact ground truth, rescale
-    # (the slope is affine in c). GroundTruth snapshots mechanism parameters at
-    # construction, so it is rebuilt inside obs_slope after every mutation.
-    # The direct path is only touched when it exists: assigning coefficients[x]
-    # on a mediated outcome (no X->Y edge) would make the mechanism declare a
-    # phantom parent and break GroundTruth's parent consistency check.
+    # Probe: unit confounder->Y coefficients with the causal X-influence on Y
+    # removed, measure the confounding-only slope through the exact ground truth,
+    # rescale (the slope is affine in c). GroundTruth snapshots mechanism
+    # parameters at construction, so it is rebuilt inside obs_slope after every
+    # mutation. The causal influence is the direct X->Y edge when it exists, and
+    # otherwise the treatment's coefficient in its (mediator) children.
     saved_direct = {}
     has_direct = {}
     for y in y_names:
@@ -221,6 +228,15 @@ def _engineer_effect(
             if (z, y) in edge_set:
                 y_mech.coefficients[z] = 1.0
 
+    saved_x_in_children = {}
+    for p, c in edge_set:
+        if p != x_name or c in y_names:
+            continue
+        mech = scm.get_node_data(c)
+        if isinstance(mech, LinearGMMMechanism) and x_name in mech.coefficients:
+            saved_x_in_children[c] = mech.coefficients[x_name]
+            mech.coefficients[x_name] = 0.0
+
     def obs_slope():
         gt = scm.ground_truth()
         gm_x = gt.marginal_density([x_name])
@@ -231,6 +247,10 @@ def _engineer_effect(
         return (g1.mean - g0.mean) / (2.0 * std)
 
     slope_per_unit = obs_slope()
+    # Restore the causal X-influence before applying the solved confounder
+    # coefficients, so the final SCM has both paths active.
+    for c, value in saved_x_in_children.items():
+        scm.get_node_data(c).coefficients[x_name] = value
     for i, y in enumerate(y_names):
         unit = float(slope_per_unit[i])
         if abs(unit) < 1e-8:

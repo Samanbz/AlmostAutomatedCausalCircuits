@@ -1,4 +1,4 @@
-"""Verma's latent projection: project an SCM with hidden variables onto an ADMG.
+"""Verma's latent projection: project an SCM with hidden variables onto a CausalGraph.
 
 Given a :class:`~src.symbolic.scm.graph.StructuralCausalModel` whose endogenous nodes may
 be flagged hidden (``StructuralCausalModel.hidden_variables``), the released/observed
@@ -14,48 +14,10 @@ the ground-truth object (latents are marginalized analytically by the ground-tru
 engine).
 """
 
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, Optional, Set, Tuple
 
+from src.symbolic.causal_graph import CausalGraph, _canonical_pair
 from src.symbolic.scm import StructuralCausalModel
-
-
-def _canonical_pair(a: Any, b: Any) -> Tuple[Any, Any]:
-    """Order an unordered pair canonically (robust to mixed str/int node ids)."""
-    return tuple(sorted((a, b), key=repr))  # type: ignore[return-value]
-
-
-@dataclass
-class ADMG:
-    """Acyclic directed mixed graph over the observed nodes of a latent projection.
-
-    ``nodes`` holds the observed endogenous variables in topological (declaration)
-    order. ``directed_edges`` holds ordered pairs ``(a, b)`` meaning ``a -> b``;
-    ``bidirected_edges`` holds canonically ordered pairs ``(a, b)`` meaning
-    ``a <-> b``.
-    """
-
-    nodes: List[Any]
-    directed_edges: Set[Tuple[Any, Any]] = field(default_factory=set)
-    bidirected_edges: Set[Tuple[Any, Any]] = field(default_factory=set)
-
-    def has_edge(self, a: Any, b: Any) -> bool:
-        """True iff the directed edge ``a -> b`` is present."""
-        return (a, b) in self.directed_edges
-
-    def has_bidirected(self, a: Any, b: Any) -> bool:
-        """True iff the bidirected edge ``a <-> b`` is present (order-insensitive)."""
-        return _canonical_pair(a, b) in self.bidirected_edges
-
-    def __str__(self) -> str:
-        directed = sorted(self.directed_edges, key=repr)
-        bidirected = sorted(self.bidirected_edges, key=repr)
-        lines = [f"ADMG(nodes={list(self.nodes)})"]
-        lines.append("  directed:   " + (", ".join(f"{a} -> {b}" for a, b in directed) or "none"))
-        lines.append(
-            "  bidirected: " + (", ".join(f"{a} <-> {b}" for a, b in bidirected) or "none")
-        )
-        return "\n".join(lines)
 
 
 def _observed_reachable(
@@ -79,7 +41,7 @@ def _observed_reachable(
     return reached
 
 
-def latent_projection(scm: StructuralCausalModel, hidden: Optional[Set[Any]] = None) -> ADMG:
+def latent_projection(scm: StructuralCausalModel, hidden: Optional[Set[Any]] = None) -> CausalGraph:
     """Verma's latent projection of ``scm`` onto its observed nodes.
 
     The observed set V_O is every node that is neither hidden nor exogenous.
@@ -130,4 +92,4 @@ def latent_projection(scm: StructuralCausalModel, hidden: Optional[Set[Any]] = N
             for b in reached_list[i + 1 :]:
                 bidirected_edges.add(_canonical_pair(a, b))
 
-    return ADMG(nodes=nodes, directed_edges=directed_edges, bidirected_edges=bidirected_edges)
+    return CausalGraph(nodes, directed_edges, bidirected_edges)
