@@ -2,7 +2,7 @@ from .arithmetic.circuit import SymbolicArithmeticCircuit, eval_circuit
 from .arithmetic.nodes import (
     ArithmeticNode,
     CategoricalDistribution,
-    ConstantRegionNode,
+    ConstantLayer,
     Distribution,
     GaussianDistribution,
     LeafLayer,
@@ -15,7 +15,7 @@ from .vtree import VNode, VTree
 __all__ = [
     "ArithmeticNode",
     "CategoricalDistribution",
-    "ConstantRegionNode",
+    "ConstantLayer",
     "GaussianDistribution",
     "LeafLayer",
     "Distribution",

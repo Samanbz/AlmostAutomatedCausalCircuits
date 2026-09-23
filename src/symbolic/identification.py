@@ -11,9 +11,11 @@ bidirected edge sets), obtained from an SCM via
 operations are immutable (return new graphs).
 
 Determinisms ``D`` are a set of scopes (frozensets of variables) on which the
-base circuit is marginally deterministic; ``IsDET(D, S)`` holds iff some
-``Q ∈ D`` covers ``S`` (``S ⊆ Q``).  ``K`` is the circuit-size exponent:
-deterministic products take ``max``, non-deterministic products take ``+``.
+base circuit is marginally deterministic; ``IsDET(D, S)`` holds iff ``S`` is an
+exact member of ``D`` (subset coverage is NOT sufficient).  Marginalizing a set
+``X`` wipes every determinism with a non-empty intersection with ``X``.
+``K`` is the circuit-size exponent: deterministic products take ``max``,
+non-deterministic products take ``+``.
 """
 
 from dataclasses import dataclass, field
@@ -25,6 +27,7 @@ from .id_ast import (
     get_vars,
     make_cond,
     make_marg,
+    make_p,
     make_prod,
 )
 
@@ -36,8 +39,10 @@ __all__ = [
     "UncompiledCircuit",
     "CausalGraph",
     "ID",
+    "required_determinisms",
     "simplify_factors",
     "multiply_factors",
+    "prod_determinism",
 ]
 
 
@@ -116,19 +121,29 @@ def _marg(
         factor = None
     return UncompiledCircuit(
         ast=make_marg(remove, p.ast),
-        determinisms={frozenset(set(d) - remove) for d in p.determinisms},
+        # Marginalizing `remove` wipes every determinism that intersects it.
+        determinisms={d for d in p.determinisms if d.isdisjoint(remove)},
         complexity=p.complexity,
         factor=factor,
         is_base=p.is_base,  # a marginal of the base law is still the base law
     )
 
 
-def _cond(p: UncompiledCircuit, factor: Factor) -> UncompiledCircuit:
+def _cond(
+    p: UncompiledCircuit,
+    factor: Factor,
+    required: Optional[Set[frozenset]] = None,
+) -> UncompiledCircuit:
     """Materialize the kernel ``P(factor.num | factor.den)`` from ``p``.
 
     This is the single place where a :class:`Factor` becomes a circuit; the
     result is tagged with ``factor`` so callers can feed it to
     ``simplify_factors`` without inspecting the AST.
+
+    When ``required`` is given (collection mode), the determinism check is
+    skipped and ``factor.den`` is recorded into ``required`` instead — this is
+    how :func:`required_determinisms` derives the determinism family a base
+    circuit must provide.
     """
     marg = p.variables - factor.variables
     if not factor.den:
@@ -140,10 +155,15 @@ def _cond(p: UncompiledCircuit, factor: Factor) -> UncompiledCircuit:
             factor=Factor(factor.num, set()),
         )
     ast = make_cond(factor.num, factor.den, make_marg(marg, p.ast))
-    determinisms = {frozenset(set(d) - marg) for d in p.determinisms}
-    if factor.den not in determinisms:
+    # Marginalizing `marg` wipes every determinism that intersects it; the
+    # conditioning set must then be an exact member of the surviving family.
+    determinisms = {d for d in p.determinisms if d.isdisjoint(marg)}
+    if required is not None:
+        required.add(frozenset(factor.den))
+    elif factor.den not in determinisms:
         raise TractabilityError(
-            f"conditioning on {factor.den} is not tractable; no determinism covers it"
+            f"conditioning on {factor.den} is not tractable; "
+            "it is not a determinism of the marginalized circuit"
         )
     return UncompiledCircuit(
         ast=ast, determinisms=determinisms, complexity=p.complexity, factor=factor
@@ -199,16 +219,33 @@ def simplify_factors(factors: List[Factor], graph: CausalGraph) -> List[Factor]:
     return factors
 
 
+def prod_determinism(q1: Set[Any], q2: Set[Any], shared_vars: Set[Any]) -> Optional[Set[Any]]:
+    """Single-pair product determinism rule (T-ID UpdateMult).
+
+    Returns the determinism scope carried by the product of two circuits with
+    determinism scopes ``q1``/``q2`` whose scopes overlap in ``shared_vars``, or
+    ``None`` when the product makes no determinism claim:
+
+    - identical scopes inside the shared region are kept (``q1 == q2 ⊆ shared``);
+    - a union is claimed only when both operands are deterministic over sets
+      covering the whole shared scope (``q1, q2 ⊇ shared``).
+    """
+    if q1 == q2 and q1 <= shared_vars:
+        return q1
+    if q1 >= shared_vars and q2 >= shared_vars:
+        return q1 | q2
+    return None
+
+
 def _get_prod_determinisms(
     dets1: Set[frozenset], dets2: Set[frozenset], shared_vars: Set[Any]
 ) -> Set[frozenset]:
     prod_determinisms = set()
     for q1 in dets1:
         for q2 in dets2:
-            if q1 == q2 <= shared_vars:
-                prod_determinisms.add(q1)
-            elif q1 >= shared_vars and q2 >= shared_vars:
-                prod_determinisms.add(q1 | q2)
+            q = prod_determinism(q1, q2, shared_vars)
+            if q is not None:
+                prod_determinisms.add(frozenset(q))
     return prod_determinisms
 
 
@@ -228,7 +265,14 @@ def multiply_factors(factors: List[UncompiledCircuit]) -> UncompiledCircuit:
     return UncompiledCircuit(ast=ast, determinisms=curr_dets, complexity=complexity, factor=None)
 
 
-def ID(y: Set[Any], x: Set[Any], p: UncompiledCircuit, g: CausalGraph) -> UncompiledCircuit:
+def ID(
+    y: Set[Any],
+    x: Set[Any],
+    p: UncompiledCircuit,
+    g: CausalGraph,
+    *,
+    required: Optional[Set[frozenset]] = None,
+) -> UncompiledCircuit:
     """Identify P(y | do(x)) from the base circuit P(V).
 
     Line-by-line Shpitser & Pearl (2006) ID over :class:`CausalGraph`, with
@@ -237,6 +281,10 @@ def ID(y: Set[Any], x: Set[Any], p: UncompiledCircuit, g: CausalGraph) -> Uncomp
     structure follows the reference implementation in ``y0``
     (``y0.algorithm.identify.id_std``): ``G \\ x`` removes nodes, the line-5
     check is "``C(G)`` is the single district over all of ``V``".
+
+    With ``required`` given, determinism tractability checks are skipped and
+    every kernel's denominator is recorded instead (collection mode — see
+    :func:`required_determinisms`).
     """
     assert set(g.nodes) <= p.variables, (
         "graph nodes must be a subset of the base circuit's variables"
@@ -259,18 +307,18 @@ def ID(y: Set[Any], x: Set[Any], p: UncompiledCircuit, g: CausalGraph) -> Uncomp
         remove = set(g.nodes) - an_y  # only graph nodes; kernel context stays free
         if remove:
             p = _marg(p, remove=remove)
-        return ID(y, x & an_y, p, g.induced_subgraph(an_y))
+        return ID(y, x & an_y, p, g.induced_subgraph(an_y), required=required)
 
     # Line 3: W = (V \ x) \ An(y)_{G_{\bar{x}}}; intervene on W as well
     an_y_bar_x = g.remove_outgoing(x).ancestors(y)
     w = set(g.nodes) - x - an_y_bar_x
     if w:
-        return ID(y, x | w, p, g)
+        return ID(y, x | w, p, g, required=required)
 
     # Line 4: c-component factorization over G \ x (node removal)
     s_comps = g.remove_nodes(x).districts()
     if len(s_comps) > 1:
-        results = [ID(comp, set(g.nodes) - comp, p, g) for comp in s_comps]
+        results = [ID(comp, set(g.nodes) - comp, p, g, required=required) for comp in s_comps]
         atomic, non_atomic = [], []
         for r in results:
             if r.factor is None:
@@ -280,7 +328,7 @@ def ID(y: Set[Any], x: Set[Any], p: UncompiledCircuit, g: CausalGraph) -> Uncomp
             ctx = r.variables - f.num - f.den
             atomic.append(Factor(f.num, f.den | ctx))
         minimal = simplify_factors(atomic, g)
-        circuits = [_cond(p, f) for f in minimal]
+        circuits = [_cond(p, f, required=required) for f in minimal]
         product = multiply_factors(circuits + non_atomic)
         return _marg(product, remove=set(g.nodes) - (y | x))
 
@@ -305,7 +353,7 @@ def ID(y: Set[Any], x: Set[Any], p: UncompiledCircuit, g: CausalGraph) -> Uncomp
     def build_cond_set(target: Set[Any]) -> UncompiledCircuit:
         factors = [Factor({v}, pi_tilde(v)) for v in order if v in target]
         minimal = simplify_factors(factors, g)
-        return multiply_factors([_cond(p, f) for f in minimal])
+        return multiply_factors([_cond(p, f, required=required) for f in minimal])
 
     # Line 6: if S in C(G), return the product of kernels over S
     if s in c_comps:
@@ -316,6 +364,29 @@ def ID(y: Set[Any], x: Set[Any], p: UncompiledCircuit, g: CausalGraph) -> Uncomp
     for c in c_comps:
         if s < c:
             product = build_cond_set(c)
-            return ID(y, x & c, product, g.induced_subgraph(c))
+            return ID(y, x & c, product, g.induced_subgraph(c), required=required)
 
     raise IdentificationError("The query is not identifiable from the observational distribution.")
+
+
+def required_determinisms(y: Set[Any], x: Set[Any], g: CausalGraph) -> Set[frozenset]:
+    """Determinism family required to identify P(y | do(x)) on ``g``.
+
+    Runs :func:`ID` in collection mode: every kernel denominator encountered
+    along the derivation is recorded instead of being checked against the
+    base circuit's determinisms.  The returned family is the minimal set of
+    exact determinism scopes a base circuit must provide (supersets may of
+    course be offered instead, per the circuit's own MD sets).
+
+    Raises :class:`IdentificationError` when the query is not identifiable
+    from the observational distribution at all (independent of determinisms).
+    """
+    required: Set[frozenset] = set()
+    p = UncompiledCircuit(
+        ast=make_p(set(g.nodes)),
+        determinisms=set(),
+        complexity=1.0,
+        is_base=True,
+    )
+    ID(set(y), set(x), p, g, required=required)
+    return required

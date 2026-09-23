@@ -101,6 +101,26 @@ class EstimandAST(Tree[int, ASTNode, Any]):
     Nodes are uniquely identified by integer IDs.
     """
 
+    def __str__(self):
+        return self.pretty()
+
+    def pretty(self) -> str:
+        """Human-readable tree rendering, e.g. for `print(ast)`."""
+        lines = []
+
+        def _rec(node_id: int, prefix: str, is_last: bool, is_root: bool):
+            node = self.get_node_data(node_id)
+            connector = "" if is_root else ("└── " if is_last else "├── ")
+            lines.append(f"{prefix}{connector}{node}")
+            children = self.get_outgoing_edges(node_id)
+            if not is_root:
+                prefix += "    " if is_last else "│   "
+            for i, (child_id, _) in enumerate(children):
+                _rec(child_id, prefix, i == len(children) - 1, False)
+
+        _rec(self.get_root(), "", True, True)
+        return "\n".join(lines)
+
     def merge(self, other: "EstimandAST") -> int:
         """Merges another EstimandAST into this one, returning the new root ID."""
         return _copy_subtree(other, other.get_root(), self)
