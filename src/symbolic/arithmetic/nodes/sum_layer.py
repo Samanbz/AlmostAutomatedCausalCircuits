@@ -1,10 +1,8 @@
-from typing import List, Optional
-
 import torch
 
 from src.logger import logger as g_logger
 from src.symbolic.arithmetic.weights import Weights
-from src.utils import BitSet, Support
+from src.utils import BitSet
 
 from .base import ArithmeticNode
 
@@ -22,18 +20,16 @@ class SumLayer(ArithmeticNode):
 
     def __init__(
         self,
-        num_nodes: int,
-        num_groups: int,
+        scope: BitSet,
         md_set: BitSet,
-        support: Support = None,
-        node_supports: Optional[List[Support]] = None,
+        num_groups: int,
+        num_nodes: int,
     ):
         super().__init__(
-            support=support,
-            num_nodes=num_nodes,
-            num_groups=num_groups,
-            node_supports=node_supports,
+            scope=scope,
             md_set=md_set,
+            num_groups=num_groups,
+            num_nodes=num_nodes,
         )
         self.log_weights: Weights = None
 
@@ -47,8 +43,7 @@ class SumLayer(ArithmeticNode):
         if getattr(self, "log_weights", None) is not None:
             shape = list(self.log_weights.shape)
             shape_str = f" shape={shape}"
-        scope_str = self.support.scope if self.support is not None else None
-        return f"{self.__class__.__name__}(scope={scope_str}, num_nodes={self.num_nodes}, num_groups={self.num_groups}){shape_str}"
+        return f"{self.__class__.__name__}(scope={self.scope}, num_nodes={self.num_nodes}, num_groups={self.num_groups}){shape_str}"
 
     def forward(
         self, data: torch.Tensor, children_outputs: tuple[torch.Tensor] = None

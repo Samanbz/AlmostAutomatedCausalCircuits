@@ -1,9 +1,9 @@
-from typing import List, Optional
+from typing import Optional
 
 import torch
 
 from src.symbolic.base import Node
-from src.utils import BitSet, Support
+from src.utils import BitSet
 
 
 class ArithmeticNode(Node):
@@ -11,28 +11,15 @@ class ArithmeticNode(Node):
 
     def __init__(
         self,
-        support: Support = None,
-        num_nodes: int = 1,
-        num_groups: int = 1,
-        node_supports: Optional[List[Support]] = None,
+        scope: Optional[BitSet] = None,
         md_set: Optional[BitSet] = None,
+        num_groups: int = 1,
+        num_nodes: int = 1,
     ):
-        self.support = support
+        self.scope = scope
+        self.md_set = md_set
         self.num_groups = num_groups
         self.num_nodes = num_nodes
-        self.node_supports = (
-            node_supports
-            if node_supports is not None
-            else ([support] * num_nodes if support is not None else None)
-        )
-        self.md_set = md_set
-        self.marg_scope = BitSet()
-
-    @property
-    def scope(self) -> BitSet:
-        if self.support is None:
-            return BitSet()
-        return self.support.scope
 
     def forward(
         self, data: torch.Tensor, children_outputs: list[torch.Tensor] = None
@@ -44,5 +31,4 @@ class ArithmeticNode(Node):
         return self
 
     def __repr__(self):
-        scope_str = self.support.scope if self.support is not None else None
-        return f"{self.__class__.__name__}(scope={scope_str}, #nodes={self.num_nodes}, #groups={self.num_groups})"
+        return f"{self.__class__.__name__}(scope={self.scope}, #nodes={self.num_nodes}, #groups={self.num_groups})"

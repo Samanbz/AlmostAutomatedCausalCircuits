@@ -308,12 +308,11 @@ def plot_gaussian_leaf(leaf: GaussianLeafLayer, ax=None):
     x_max = np.max(means + 4 * stds)
     if supports and len(supports) == num_nodes:
         for i in range(num_nodes):
-            interval = supports[i].intervals.get(leaf.var)
-            if interval:
-                if not math.isinf(interval.low):
-                    x_min = min(x_min, interval.low - np.max(stds[:, i]))
-                if not math.isinf(interval.high):
-                    x_max = max(x_max, interval.high + np.max(stds[:, i]))
+            interval = supports[i]
+            if not math.isinf(interval.low):
+                x_min = min(x_min, interval.low - np.max(stds[:, i]))
+            if not math.isinf(interval.high):
+                x_max = max(x_max, interval.high + np.max(stds[:, i]))
     x = np.linspace(x_min, x_max, 2000)
 
     for g in range(num_groups):
@@ -326,7 +325,7 @@ def plot_gaussian_leaf(leaf: GaussianLeafLayer, ax=None):
 
             interval = None
             if supports and len(supports) == num_nodes:
-                interval = supports[i].intervals.get(leaf.var)
+                interval = supports[i]
 
             if interval and (not math.isinf(interval.low) or not math.isinf(interval.high)):
                 low = interval.low if not math.isinf(interval.low) else x_min
@@ -404,7 +403,7 @@ def _gaussian_density_arrays(leaf: GaussianLeafLayer, x: np.ndarray) -> np.ndarr
 
             interval = None
             if supports and len(supports) == num_nodes:
-                interval = supports[i].intervals.get(leaf.var)
+                interval = supports[i]
 
             if interval and (not math.isinf(interval.low) or not math.isinf(interval.high)):
                 low = interval.low if not math.isinf(interval.low) else x.min()
@@ -496,12 +495,11 @@ def plot_mixture_leaf(leaf: MixtureLeafLayer, ax=None, plot_components: bool = F
     supports = getattr(base_dist, "node_supports", None)
     if supports and len(supports) == base_dist.num_nodes:
         for i in range(base_dist.num_nodes):
-            interval = supports[i].intervals.get(base_dist.var)
-            if interval:
-                if not math.isinf(interval.low):
-                    x_min = min(x_min, interval.low - np.max(stds[:, i]))
-                if not math.isinf(interval.high):
-                    x_max = max(x_max, interval.high + np.max(stds[:, i]))
+            interval = supports[i]
+            if not math.isinf(interval.low):
+                x_min = min(x_min, interval.low - np.max(stds[:, i]))
+            if not math.isinf(interval.high):
+                x_max = max(x_max, interval.high + np.max(stds[:, i]))
     x = np.linspace(x_min, x_max, 2000)
 
     base_densities = _gaussian_density_arrays(base_dist, x)

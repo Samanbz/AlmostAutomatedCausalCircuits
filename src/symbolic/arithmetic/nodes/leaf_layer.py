@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from scipy import stats
 
-from src.utils import BitSet, ContinuousInterval, DiscreteInterval, Interval, Support
+from src.utils import BitSet, ContinuousInterval, DiscreteInterval, Interval
 
 from .base import ArithmeticNode
 
@@ -23,43 +23,60 @@ class LeafLayer(ArithmeticNode):
         return 0
 
 
-class ConstantRegionNode(LeafLayer):
+class ConstantLayer(LeafLayer):
     """Leaf that always returns log(1) = 0 for all inputs.
 
     Used to represent a marginalized variable in a compiled estimand circuit.
     The variable is still in scope (so the circuit remains smooth/decomposable)
     but contributes nothing to the density.
+
+    ``unit_values`` stores the exact per-(group, unit) log-values the replaced
+    subtree transmits when all its leaves are marginalized (set to log 1) —
+    computed by direct evaluation in ``_marginalize``, so it stays exact even
+    when the per-unit normalization assumption breaks (e.g. conditional
+    circuits with stripped/renormalized weights). A plain marginalized leaf
+    has all-zero values; a sparse SumLayer has 0 on alive units and -inf on
+    units with an all-zero mask row. Standalone evaluation transmits these
+    values; structural products (``_multiply``) replicate the partner layer's
+    weights over them.
     """
 
     def __init__(
         self,
         scope: BitSet,
-        num_nodes: int = 1,
-        num_groups: int = 1,
         md_set: Optional[BitSet] = None,
+        num_groups: int = 1,
+        num_nodes: int = 1,
+        unit_values: Optional[torch.Tensor] = None,
     ):
-        from src.utils import ContinuousInterval
-
         super().__init__(
-            support=Support(
-                {
-                    var: ContinuousInterval(float("-inf"), float("inf"), False, False)
-                    for var in scope
-                }
-            ),
+            scope=scope,
             num_nodes=num_nodes,
             num_groups=num_groups,
             md_set=md_set,
         )
+        if unit_values is not None and unit_values.shape != (num_groups, num_nodes):
+            raise ValueError(
+                f"unit_values shape {tuple(unit_values.shape)} does not match "
+                f"(num_groups, num_nodes) = ({num_groups}, {num_nodes})"
+            )
+        self.unit_values = unit_values.detach() if unit_values is not None else None
+
+    def to(self, device: torch.device):
+        if self.unit_values is not None:
+            self.unit_values = self.unit_values.to(device)
+        return super().to(device)
 
     def forward(
         self, data: torch.Tensor, children_outputs: list[torch.Tensor] = None
     ) -> torch.Tensor:
         B = data.shape[0]
+        if self.unit_values is not None:
+            return self.unit_values.unsqueeze(0).expand(B, self.num_groups, self.num_nodes)
         return torch.zeros(B, self.num_groups, self.num_nodes, device=data.device)
 
     def __repr__(self):
-        return f"ConstantRegionNode(scope={list(self.scope)}, num_nodes={self.num_nodes}), num_groups={self.num_groups})"
+        return f"ConstantLayer(scope={list(self.scope)}, num_nodes={self.num_nodes}), num_groups={self.num_groups})"
 
 
 class ProductLeafLayer(LeafLayer):
@@ -71,16 +88,18 @@ class ProductLeafLayer(LeafLayer):
 
     def __init__(self, leaf_a: LeafLayer, leaf_b: LeafLayer, expand_leaves: bool = False):
         super().__init__(
-            support=leaf_a.support,
+            scope=leaf_a.scope,
             num_nodes=leaf_a.num_nodes
             if not expand_leaves
             else leaf_a.num_nodes * leaf_b.num_nodes,
             num_groups=leaf_a.num_groups * leaf_b.num_groups,
             md_set=leaf_a.md_set,
         )
-
         assert expand_leaves or leaf_a.num_nodes == leaf_b.num_nodes, (
             "ProductLeafLayer requires both leaves to have the same number of nodes."
+        )
+        assert leaf_a.scope == leaf_b.scope or (leaf_a.scope.is_empty or leaf_b.scope.is_empty), (
+            f"ProductLeafLayer requires both leaves to have the same scope or if not one leaf to be a constant. leaf_a.scope={leaf_a.scope}, leaf_b.scope={leaf_b.scope}"
         )
         self.leaf_a = leaf_a
         self.leaf_b = leaf_b
@@ -111,16 +130,13 @@ class ProductLeafLayer(LeafLayer):
     def __repr__(self):
         return f"ProductLeafLayer(a={self.leaf_a}, b={self.leaf_b}, expand_leaves={self.expand_leaves})"
 
-    def num_parameters(self) -> int:
-        return self.leaf_a.num_parameters() + self.leaf_b.num_parameters()
-
 
 class IndicatorLeafLayer(LeafLayer):
     """Leaf node that returns 1"""
 
     def __init__(self, base_leaf: LeafLayer):
         super().__init__(
-            support=base_leaf.support,
+            scope=base_leaf.scope,
             num_nodes=base_leaf.num_nodes,
             num_groups=base_leaf.num_groups,
             md_set=base_leaf.md_set,
@@ -137,13 +153,38 @@ class IndicatorLeafLayer(LeafLayer):
         )
 
 
+class InstantiatedLeafLayer(LeafLayer):
+    """Placeholder leaf node to represent clamping a variable to a specific value."""
+
+    def __init__(self, base_leaf: LeafLayer, value: Any):
+        super().__init__(
+            scope=base_leaf.scope,
+            num_nodes=base_leaf.num_nodes,
+            num_groups=base_leaf.num_groups,
+            md_set=base_leaf.md_set,
+        )
+        self.base_leaf = base_leaf
+        self.node_supports = getattr(base_leaf, "node_supports", None)
+        self.base_leaf = base_leaf
+        self.value = value
+        if hasattr(base_leaf, "var"):
+            self.var = base_leaf.var
+
+    def forward(self, data: torch.Tensor, children_outputs: list = None) -> torch.Tensor:
+        data_clamped = data.clone()
+        data_clamped[:, self.var] = self.value
+        return self.base_leaf.forward(data_clamped, children_outputs)
+
+    def __repr__(self):
+        return f"InstantiatedLeafLayer(base={self.base_leaf}, val={self.value})"
+
+
 class Distribution(ABC):
     """Base class for probability distributions used as leaves in SPNs."""
 
     def __init__(self, var: int, var_support: Interval):
         self.var = var
         self.var_support = var_support
-        self.support = Support({var: var_support})
 
     @abstractmethod
     def split_support(self, split_count: int, strategy: str = "quantile") -> List[Interval]:
@@ -175,7 +216,7 @@ class GaussianDistribution(Distribution):
         self.base_mean = float(base_mean)
         self.base_stddev = float(base_stddev)
 
-    def split_support(self, split_count: int, strategy: str = "quantile") -> List[Interval]:
+    def split_support(self, split_count: int) -> List[Interval]:
         """For a Gaussian, we can split the real line into intervals.
         Supported strategies: 'quantile', 'perturbed_quantile'.
         """
@@ -221,7 +262,7 @@ class SplineDistribution(Distribution):
         self.base_mean = float(base_mean)
         self.base_stddev = float(base_stddev)
 
-    def split_support(self, split_count: int, strategy: str = "quantile") -> List[Interval]:
+    def split_support(self, split_count: int) -> List[Interval]:
         """Split the real line into ``split_count`` Gaussian-quantile intervals."""
         quantiles = np.linspace(0, 1, split_count + 1)
         boundaries = stats.norm.ppf(quantiles, loc=self.base_mean, scale=self.base_stddev)
@@ -288,9 +329,9 @@ class GaussianLeafLayer(LeafLayer):
         spec: GaussianDistribution,
         num_nodes: int = 1,
         num_groups: int = 1,
-        node_supports: Optional[List[Support]] = None,
+        node_supports: Optional[List[ContinuousInterval]] = None,
     ):
-        super().__init__(spec.support, num_nodes=num_nodes, num_groups=num_groups)
+        super().__init__(BitSet([spec.var]), num_nodes=num_nodes, num_groups=num_groups)
         self.var = spec.var
         self.node_supports = node_supports
 
@@ -303,7 +344,7 @@ class GaussianLeafLayer(LeafLayer):
         if node_supports is not None:
             assert len(node_supports) == num_nodes
             for i in range(num_nodes):
-                iv: ContinuousInterval = node_supports[i].get(self.var)
+                iv = node_supports[i]
                 if iv is not None:
                     if iv.low > float("-inf") and iv.high < float("inf"):
                         for g in range(num_groups):
@@ -387,7 +428,7 @@ class GaussianLeafLayer(LeafLayer):
             )
             sqrt2 = math.sqrt(2)
             for j in range(len(self.node_supports)):
-                iv: ContinuousInterval = self.node_supports[j].get(self.var)
+                iv: ContinuousInterval = self.node_supports[j]
                 if iv is not None and (iv.low > float("-inf") or iv.high < float("inf")):
                     # Strictly check the interval flags!
                     oob_low = (x < iv.low) if getattr(iv, "include_low", True) else (x <= iv.low)
@@ -448,7 +489,7 @@ class MixtureLeafLayer(LeafLayer):
         log_weights=None,
     ):
         super().__init__(
-            support=base_dist.support,
+            scope=base_dist.scope,
             num_nodes=base_dist.num_nodes,
             num_groups=base_dist.num_groups,
             md_set=base_dist.md_set if hasattr(base_dist, "md_set") else None,
@@ -543,8 +584,9 @@ class CategoricalLeafLayer(LeafLayer):
         spec: CategoricalDistribution,
         num_nodes: int = 1,
         num_groups: int = 1,
+        node_supports: Optional[List[DiscreteInterval]] = None,
     ):
-        super().__init__(spec.support, num_nodes=num_nodes, num_groups=num_groups)
+        super().__init__(BitSet([spec.var]), num_nodes=num_nodes, num_groups=num_groups)
         self.var = spec.var
         self.categories = spec.categories
 
@@ -555,6 +597,7 @@ class CategoricalLeafLayer(LeafLayer):
         # Add random perturbation to break symmetry
         logits = logits + torch.randn_like(logits) * 1.5
         self.logits = logits.requires_grad_(True)
+        self.node_supports = node_supports
 
     def to(self, device: torch.device):
         if isinstance(self.logits, torch.Tensor):
@@ -573,7 +616,7 @@ class CategoricalLeafLayer(LeafLayer):
 
         if hasattr(self, "node_supports") and self.node_supports and len(self.node_supports) > 1:
             for j in range(self.num_nodes):
-                iv = self.node_supports[j].get(self.var)
+                iv = self.node_supports[j]
                 if iv is not None:
                     # Mask out unsupported categories before softmax
                     for c in range(len(self.categories)):
@@ -583,10 +626,10 @@ class CategoricalLeafLayer(LeafLayer):
         # Handle rows that are all -inf
         is_all_inf = torch.isinf(logits).all(dim=-1)
         # Temporarily replace all -inf rows with 0s for softmax
-        safe_logits = torch.where(is_all_inf.unsqueeze(1), torch.zeros_like(logits), logits)
+        safe_logits = torch.where(is_all_inf.unsqueeze(-1), torch.zeros_like(logits), logits)
         log_probs = torch.log_softmax(safe_logits, dim=-1)
         # Restore -inf for all-inf rows
-        log_probs = torch.where(is_all_inf.unsqueeze(1), float("-inf"), log_probs)
+        log_probs = torch.where(is_all_inf.unsqueeze(-1), float("-inf"), log_probs)
 
         res = log_probs[:, :, x].permute(2, 0, 1)
         res = torch.where(mask.view(-1, 1, 1), torch.zeros_like(res), res)
@@ -617,18 +660,18 @@ class SplineLeafLayer(LeafLayer):
         spec: SplineDistribution,
         num_nodes: int = 1,
         num_groups: int = 1,
-        node_supports: Optional[List[Support]] = None,
+        node_supports: Optional[List[ContinuousInterval]] = None,
     ):
         if node_supports is None or len(node_supports) <= 1:
             raise ValueError(
                 f"{self.__class__.__name__} requires disjoint node_supports with len > 1"
             )
         super().__init__(
-            spec.support,
+            scope=BitSet([spec.var]),
             num_nodes=num_nodes,
             num_groups=num_groups,
-            node_supports=node_supports,
         )
+        self.node_supports = node_supports
         self.var = spec.var
         self.num_nodes = num_nodes
         self.num_groups = num_groups
@@ -639,7 +682,7 @@ class SplineLeafLayer(LeafLayer):
         # on a node index meaning the same interval in every group.
         init_splits = []
         for i in range(num_nodes - 1):
-            iv = node_supports[i].get(self.var)
+            iv = node_supports[i]
             if iv is None or iv.high >= float("inf"):
                 raise ValueError(
                     f"{self.__class__.__name__} requires a finite right boundary for interval {i}"
@@ -810,14 +853,14 @@ class QuadraticSplineLeafLayer(SplineLeafLayer):
         spec: SplineDistribution,
         num_nodes: int = 1,
         num_groups: int = 1,
-        node_supports: Optional[List[Support]] = None,
+        node_supports: Optional[List[ContinuousInterval]] = None,
     ):
         super().__init__(spec, num_nodes, num_groups, node_supports)
 
         # Initialize free interior widths from the quantile spacing (shared across groups).
         splits = []
         for i in range(num_nodes - 1):
-            splits.append(self.node_supports[i].get(self.var).high)
+            splits.append(self.node_supports[i].high)
         splits_t = torch.tensor(splits, dtype=torch.float32).unsqueeze(0)  # [1, N-1]
         h_init = self._heights().detach()
         cap = 0.999 * 6.0 / (h_init[:, :-1] + h_init[:, 1:]).clamp(min=1e-12)
@@ -890,7 +933,7 @@ class RationalQuadraticSplineLeafLayer(SplineLeafLayer):
         spec: SplineDistribution,
         num_nodes: int = 1,
         num_groups: int = 1,
-        node_supports: Optional[List[Support]] = None,
+        node_supports: Optional[List[ContinuousInterval]] = None,
     ):
         super().__init__(spec, num_nodes, num_groups, node_supports)
 
@@ -899,7 +942,7 @@ class RationalQuadraticSplineLeafLayer(SplineLeafLayer):
             return
 
         # Initialise widths from the quantile spacing (shared across groups).
-        splits = [self.node_supports[i].get(self.var).high for i in range(num_nodes - 1)]
+        splits = [self.node_supports[i].high for i in range(num_nodes - 1)]
         splits_t = torch.tensor(splits, dtype=torch.float32).unsqueeze(0)  # [1, N-1]
         w_init = splits_t[:, 1:] - splits_t[:, :-1]
         w_init = w_init.clamp(min=1e-6)
