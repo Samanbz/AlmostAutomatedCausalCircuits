@@ -1,4 +1,5 @@
-from typing import Any, Dict, List, Type
+import contextlib
+from typing import Any, Dict, List, Optional, Type
 
 import torch
 from wandb.util import np
@@ -9,7 +10,7 @@ from ..base import DirectedAcyclicGraph
 from ..vtree import VTree
 from .nodes import (
     ArithmeticNode,
-    ConstantRegionNode,
+    ConstantLayer,
     LeafLayer,
     SumLayer,
 )
@@ -61,12 +62,12 @@ class SymbolicArithmeticCircuit(DirectedAcyclicGraph[int, ArithmeticNode, Any]):
         )
 
     def num_parameters(self, verbose: bool = False) -> int:
-        """Total number of trainable scalar parameters referenced by the circuit.
+        """Total number of non-zero weights referenced by the circuit.
 
         Sum layers contribute their ``Weights.num_parameters()`` (sparse layers
-        count only mask-nonzero entries; lazy weights such as ``ProductWeights``
-        / ``MixingCondWeights`` count their underlying factors, not the
-        materialized broadcast); leaf layers contribute their parameter tensors.
+        count only mask-nonzero entries; ``ProductWeights`` counts the non-zero
+        entries of its logical broadcast, derived from the factors'
+        zero-patterns); leaf layers contribute their parameter tensors.
         Weight objects and tensors are deduplicated by identity, so query
         circuits that share parameter tensors with the base circuit (or with
         each other) never double-count them.
@@ -251,7 +252,7 @@ class SymbolicArithmeticCircuit(DirectedAcyclicGraph[int, ArithmeticNode, Any]):
         config.update(
             {
                 SumLayer: {"color": "#ccffcc", "label": node_label, "shape": "box"},
-                ConstantRegionNode: {"color": "#ffcccc", "label": node_label, "shape": "ellipse"},
+                ConstantLayer: {"color": "#ffcccc", "label": node_label, "shape": "ellipse"},
                 LeafLayer: {"color": "#ffcccc", "label": node_label, "shape": "ellipse"},
             }
         )
@@ -305,6 +306,7 @@ def eval_circuit(
     log_domain: bool = True,
     debug_check_finite: bool = False,
     keep_intermediates: bool = True,
+    eval_batch_size: Optional[int] = None,
 ) -> torch.Tensor:
     """Evaluates the circuit on the given data.
 
@@ -316,7 +318,79 @@ def eval_circuit(
             its parents have consumed it.  This reduces peak memory for
             inference; backward still works because autograd holds its own
             references.
+        eval_batch_size: Chunk size for the batch dimension. Inputs larger than
+            this are evaluated in row chunks and concatenated — every node op is
+            row-independent, so results are bit-identical to a single big
+            evaluation while per-layer transients stay bounded (this is what
+            makes whole-grid plot evaluations memory-safe). Defaults to 8192
+            rows on CPU / 32768 on CUDA; pass 0 or None-ish <= 0 to disable.
+
+    When gradients are disabled (the usual inference path), the evaluation runs
+    under ``torch.inference_mode()``: no autograd metadata or version counters
+    are recorded, which is measurably faster and lower-memory on both CPU and
+    GPU. Autograd is still supported: with grad enabled each chunk keeps its
+    own graph and the concatenated output backpropagates into all of them.
     """
+    if eval_batch_size is None:
+        eval_batch_size = 1 << 15 if data.is_cuda else 1 << 13
+
+    if eval_batch_size > 0 and data.shape[0] > eval_batch_size:
+        if torch.is_grad_enabled():
+            ctx: Any = contextlib.nullcontext()
+        else:
+            ctx = torch.inference_mode()
+        with ctx:
+            parts = [
+                _eval_circuit_single(
+                    ac,
+                    data[i : i + eval_batch_size],
+                    verbose=verbose,
+                    show_leaves_only=show_leaves_only,
+                    show_weights=show_weights,
+                    log_domain=log_domain,
+                    debug_check_finite=debug_check_finite,
+                    keep_intermediates=keep_intermediates,
+                )
+                for i in range(0, data.shape[0], eval_batch_size)
+            ]
+        return torch.cat(parts, dim=0)
+
+    if not torch.is_grad_enabled():
+        with torch.inference_mode():
+            return _eval_circuit_single(
+                ac,
+                data,
+                verbose=verbose,
+                show_leaves_only=show_leaves_only,
+                show_weights=show_weights,
+                log_domain=log_domain,
+                debug_check_finite=debug_check_finite,
+                keep_intermediates=keep_intermediates,
+            )
+
+    return _eval_circuit_single(
+        ac,
+        data,
+        verbose=verbose,
+        show_leaves_only=show_leaves_only,
+        show_weights=show_weights,
+        log_domain=log_domain,
+        debug_check_finite=debug_check_finite,
+        keep_intermediates=keep_intermediates,
+    )
+
+
+def _eval_circuit_single(
+    ac: SymbolicArithmeticCircuit,
+    data: torch.Tensor,
+    verbose: bool = False,
+    show_leaves_only: bool = False,
+    show_weights: bool = False,
+    log_domain: bool = True,
+    debug_check_finite: bool = False,
+    keep_intermediates: bool = True,
+) -> torch.Tensor:
+    """Single-chunk circuit evaluation (see :func:`eval_circuit`)."""
     outputs = {}
     roots = ac.get_roots()
     root_set = set(roots)
@@ -327,6 +401,8 @@ def eval_circuit(
 
     for node_id in ac.topological_sort(reverse=True):
         node = ac.get_node_data(node_id)
+
+        # print("Evaluating node with scope", node.scope)
 
         if show_weights and isinstance(node, SumLayer) and (0 in node.scope and 1 in node.scope):
             w_obj = node.log_weights
@@ -380,6 +456,7 @@ def eval_circuit(
 
         child_ids = ac.get_children(node_id)
         child_outs = [outputs[cid] for cid in child_ids]
+        # print(f"Evaluating node with scope {node.scope}")
         out = node.forward(data, child_outs)
         outputs[node_id] = out
 

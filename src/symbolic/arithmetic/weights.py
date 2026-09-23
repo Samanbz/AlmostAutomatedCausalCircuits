@@ -114,7 +114,7 @@ def _prod(sizes) -> int:
 
 def _batch_chunk_rows(batch: int, per_row_elems: int, is_cuda: bool) -> int:
     """Largest chunk of batch rows whose [rows, per_row_elems] fp32 transient
-    stays within the element budget (1 GiB on CUDA, 256 MB on CPU).
+    stays within the element budget (1 GiB on CUDA, 4 GiB on CPU).
 
     ``_blocked_broadcast_lse`` bounds the logsumexp materialization, but the
     child outer-product that feeds it (``left + right``) is materialized by the
@@ -122,7 +122,7 @@ def _batch_chunk_rows(batch: int, per_row_elems: int, is_cuda: bool) -> int:
     """
     if per_row_elems <= 0:
         return batch
-    budget = 1 << 28 if is_cuda else 1 << 26
+    budget = 1 << 32 if is_cuda else 1 << 30
     return max(1, min(batch, budget // per_row_elems))
 
 
@@ -170,14 +170,24 @@ class Weights(ABC):
         pass
 
     def num_parameters(self) -> int:
-        """Number of trainable scalar parameters.
+        """Number of non-zero weights in the logical weight tensor.
 
-        The default materializes ``log_weights`` (for lazy subclasses such as
-        ``ProductWeights``/``MixingCondWeights`` this realizes the logical
-        tensor) and counts its elements.  ``SparseWeights`` overrides this to
+        This is a circuit-size measure, not a degrees-of-freedom count: for a
+        derived broadcast (``ProductWeights``) every replicated non-zero entry
+        counts. The default counts every element of ``log_weights`` (dense
+        tensors have no structural zeros). ``SparseWeights`` overrides this to
         count only mask-nonzero entries.
         """
         return int(self.log_weights.numel())
+
+    def _zero_pattern(self) -> Optional[torch.Tensor]:
+        """Bool tensor matching ``self.shape`` with True = structurally zero
+        weight, or None if the logical tensor is fully dense (no zeros).
+
+        Used by ``ProductWeights`` to count the non-zero entries of a derived
+        broadcast without materializing it.
+        """
+        return None
 
     def __str__(self) -> str:
         return f"{self.__class__.__name__}(shape={list(self.shape)})"
@@ -371,8 +381,12 @@ class SparseWeights(Weights):
         return tuple(self.log_weights.shape)
 
     def num_parameters(self) -> int:
-        """Only mask-nonzero entries are trainable structural parameters."""
+        """Only mask-nonzero entries are counted."""
         return int(self.mask.sum().item())
+
+    def _zero_pattern(self) -> Optional[torch.Tensor]:
+        """Structural zeros are exactly the mask-off entries."""
+        return self.mask == 0
 
     def uniformize(
         self,
@@ -438,9 +452,13 @@ class SparseWeights(Weights):
         w = w.unsqueeze(0)
         mask = self.mask.unsqueeze(0)
 
-        val = torch.where(mask > 0, child, torch.tensor(float("-inf"), device=child.device))
+        # Single materialization: add the weights, then mask in place. (The
+        # naive ``where(mask, child, -inf) + w`` would materialize the full
+        # [B, G, U, G_L, L, G_R, R] broadcast twice.)
+        val = child + w
+        val.masked_fill_(mask == 0, float("-inf"))
 
-        out = safe_logsumexp(val + w, dim=(3, 4, 5, 6))
+        out = safe_logsumexp(val, dim=(3, 4, 5, 6))
         return out.view(B, G, U)
 
     def detach(self) -> "SparseWeights":
@@ -513,6 +531,10 @@ class ProductWeights(Weights):
         expand_U: bool,
         expand_L: bool,
         expand_R: bool,
+        expand_GL: Optional[bool] = None,
+        expand_GR: Optional[bool] = None,
+        expand_Lu: Optional[bool] = None,
+        expand_Ru: Optional[bool] = None,
     ):
         self.w1: Weights = w1
         self.w2: Weights = w2
@@ -520,6 +542,13 @@ class ProductWeights(Weights):
         self.expand_U = expand_U
         self.expand_L = expand_L
         self.expand_R = expand_R
+        # Group and unit expansion of the child axes are independent (a child
+        # may enumerate group pairs while sharing units); default both to the
+        # legacy per-side flag.
+        self.expand_GL = expand_L if expand_GL is None else expand_GL
+        self.expand_GR = expand_R if expand_GR is None else expand_GR
+        self.expand_Lu = expand_L if expand_Lu is None else expand_Lu
+        self.expand_Ru = expand_R if expand_R is None else expand_Ru
 
     def to(self, device: torch.device) -> "Weights":
         if hasattr(self.w1, "to"):
@@ -534,68 +563,80 @@ class ProductWeights(Weights):
 
     @property
     def log_weights(self) -> torch.Tensor:
-        lw1: torch.Tensor = self.w1.log_weights
-        lw2: torch.Tensor = self.w2.log_weights
+        return self._combine(self.w1.log_weights, self.w2.log_weights, torch.Tensor.__add__)
 
-        G1, U1, G_L1, L1, G_R1, R1 = lw1.shape
-        G2, U2, G_L2, L2, G_R2, R2 = lw2.shape
+    def _combine(self, a: torch.Tensor, b: torch.Tensor, op) -> torch.Tensor:
+        """Broadcast-combine two aligned weight tensors per the expansion flags.
+
+        ``op`` is addition for log-weights and boolean OR for zero-patterns —
+        the layout is identical for both (a product entry is zero iff any
+        factor entry is zero there).
+        """
+        G1, U1, G_L1, L1, G_R1, R1 = a.shape
+        G2, U2, G_L2, L2, G_R2, R2 = b.shape
 
         new_G = G1 * G2
-        new_G_L = G_L1 * G_L2
-        new_G_R = G_R1 * G_R2
-        new_U = U1 * U2 if self.expand_U else U1
-        new_L = (L1 * L2) if self.expand_L else L1
-        new_R = (R1 * R2) if self.expand_R else R1
+        # Shared (non-expanded) child axes are tied between the operands, so
+        # they occupy a single broadcast slot and do not multiply; a size-1
+        # side broadcasts (max). Expanded axes get two adjacent slots so the
+        # pair index is side-1 major in the merged axis.
+        new_G_L = (G_L1 * G_L2) if self.expand_GL else max(G_L1, G_L2)
+        new_G_R = (G_R1 * G_R2) if self.expand_GR else max(G_R1, G_R2)
+        new_U = (U1 * U2) if self.expand_U else max(U1, U2)
+        new_L = (L1 * L2) if self.expand_Lu else max(L1, L2)
+        new_R = (R1 * R2) if self.expand_Ru else max(R1, R2)
 
-        if self.expand_L and self.expand_R:  # Kronecker
-            # [G, U, G_L, L, G_R, R] -> [G1, G2, U1, U2, G_L1, G_L2, L1, L2, G_R1, G_R2, R1, R2]
-            w1_shape = (G1, 1, U1, 1, G_L1, 1, L1, 1, G_R1, 1, R1, 1)
-            w2_shape = (1, G2, 1, U2, 1, G_L2, 1, L2, 1, G_R2, 1, R2)
+        # Layout: [G1, G2, U1, U2, G_L1, G_L2, L1, L2, G_R1, G_R2, R1, R2].
+        w1_shape = (G1, 1, U1, 1, G_L1, 1, L1, 1, G_R1, 1, R1, 1)
+        w2_shape = (
+            1,
+            G2,
+            U2 if not self.expand_U else 1,
+            U2 if self.expand_U else 1,
+            G_L2 if not self.expand_GL else 1,
+            G_L2 if self.expand_GL else 1,
+            L2 if not self.expand_Lu else 1,
+            L2 if self.expand_Lu else 1,
+            G_R2 if not self.expand_GR else 1,
+            G_R2 if self.expand_GR else 1,
+            R2 if not self.expand_Ru else 1,
+            R2 if self.expand_Ru else 1,
+        )
 
-        elif not self.expand_L and self.expand_R:
-            # [G, U, G_L, L, G_R, R] -> [G1, G2, U1, U2, G_L1, G_L2, L, G_R1, G_R2, R1, R2]
-            w1_shape = (G1, 1, U1, 1, G_L1, 1, L1, G_R1, 1, R1, 1)
-            w2_shape = (1, G2, 1, U2, 1, G_L2, L2, 1, G_R2, 1, R2)
+        w_out = op(a.view(w1_shape), b.view(w2_shape))
 
-        elif self.expand_L and not self.expand_R:
-            # [G, U, G_L, L, G_R, R] -> [G1, G2, U1, U2, G_L1, G_L2, L1, L2, G_R1, G_R2, R]
-            w1_shape = (G1, 1, U1, 1, G_L1, 1, L1, 1, G_R1, 1, R1)
-            w2_shape = (1, G2, 1, U2, 1, G_L2, 1, L2, 1, G_R2, R2)
+        # Shared U already coincides in slot 2 (broadcast); expanded U merges
+        # slots 2,3 as u = u1 * U2 + u2. Reshape handles both.
+        return w_out.reshape(new_G, new_U, new_G_L, new_L, new_G_R, new_R)
 
-        else:  # Hadamard
-            # [G, U, G_L, L, G_R, R] -> [G1, G2, U1, U2, G_L1, G_L2, L, G_R1, G_R2, R]
-            w1_shape = (G1, 1, U1, 1, G_L1, 1, L1, G_R1, 1, R1)
-            w2_shape = (1, G2, 1, U2, 1, G_L2, L2, 1, G_R2, R2)
+    def _zero_pattern(self) -> Optional[torch.Tensor]:
+        """Bool tensor of the logical shape with True = structurally zero weight.
 
-        w_out = lw1.view(w1_shape) + lw2.view(w2_shape)
-
-        if not self.expand_U:
-            if U1 == 1 and U2 == 1:
-                w_out = w_out.squeeze(2)
-                new_U = 1
-            elif U1 == 1:
-                w_out = w_out.squeeze(2)
-                new_U = U2
-            elif U2 == 1:
-                w_out = w_out.squeeze(3)
-                new_U = U1
-            else:
-                w_out = w_out.diagonal(dim1=2, dim2=3).movedim(-1, 2)
-                new_U = min(U1, U2)
-        else:
-            new_U = U1 * U2
-
-        w_out = w_out.reshape(new_G, new_U, new_G_L, new_L, new_G_R, new_R)
-        return w_out
+        A product entry is zero iff any factor entry is zero, so the factors'
+        zero-patterns are combined with OR, following the same expansion
+        layout. None means the logical tensor is fully dense (no zeros).
+        """
+        z1 = self.w1._zero_pattern() if hasattr(self.w1, "_zero_pattern") else None
+        z2 = self.w2._zero_pattern() if hasattr(self.w2, "_zero_pattern") else None
+        if z1 is None and z2 is None:
+            return None
+        if z1 is None:
+            z1 = torch.zeros(self.w1.shape, dtype=torch.bool)
+        if z2 is None:
+            z2 = torch.zeros(self.w2.shape, dtype=torch.bool)
+        return self._combine(z1, z2, torch.Tensor.__or__)
 
     def num_parameters(self) -> int:
-        """Degrees of freedom of the factors, not the materialized Kronecker product.
+        """Number of non-zero weights in the logical (materialized) weight tensor.
 
-        The logical ``log_weights`` of a product is a derived broadcast of
-        ``w1`` and ``w2`` — counting its elements would report the size of the
-        expansion, not trainable parameters.
+        The logical tensor of a product is a derived broadcast of the factors,
+        so its non-zero entries are counted from the factors' zero-patterns
+        without materializing the broadcast.
         """
-        return self.w1.num_parameters() + self.w2.num_parameters()
+        z = self._zero_pattern()
+        if z is None:
+            return int(_prod(self.shape))
+        return int((~z).sum())
 
     def uniformize(self) -> "Weights":
         return ProductWeights(
@@ -609,25 +650,19 @@ class ProductWeights(Weights):
     def forward(
         self, left_in: torch.Tensor, right_in: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        # Instead of realizing the full Kronecker product of weights, we contract sequentially.
-        lw1: torch.Tensor = getattr(self.w1, "log_weights", self.w1)
-        lw2: torch.Tensor = getattr(self.w2, "log_weights", self.w2)
-
-        G1, U1, G_L1, L1, G_R1, R1 = lw1.shape
-        G2, U2, G_L2, L2, G_R2, R2 = lw2.shape
+        # Unified contraction through the materialized combined weight: the
+        # combined tensor encodes the expand/shared layout (see ``_combine``),
+        # and the child outputs must match its child axes. Batch-chunked to
+        # bound the [B, G, U, G_L, L, G_R, R] materialization.
+        w = self._combine(
+            getattr(self.w1, "log_weights", self.w1),
+            getattr(self.w2, "log_weights", self.w2),
+            torch.Tensor.__add__,
+        )
+        G, U, G_L, L, G_R, R = w.shape
         B = left_in.shape[0]
 
-        # Chunk the batch so the child outer-product materialization below
-        # (child2 = left_p + right_p) stays within the memory budget.
-        if self.expand_L and self.expand_R:
-            per_row = G_L1 * G_R1 * L1 * R1 * G_L2 * L2 * G_R2 * R2
-        elif self.expand_L:
-            per_row = G_L1 * G_R1 * L1 * G_L2 * L2 * G_R2 * R1
-        elif self.expand_R:
-            per_row = G_L1 * G_R1 * R1 * G_L2 * L1 * G_R2 * R2
-        else:
-            per_row = G_L1 * G_R1 * G_L2 * G_R2 * L1 * R1
-        rows = _batch_chunk_rows(B, per_row, left_in.is_cuda)
+        rows = _batch_chunk_rows(B, G_L * L * G_R * R, left_in.is_cuda)
         if rows < B:
             parts = [
                 self.forward(
@@ -638,103 +673,13 @@ class ProductWeights(Weights):
             ]
             return torch.cat(parts, dim=0)
 
-        if self.expand_L:
-            left_r = left_in.view(B, G_L1, G_L2, L1, L2)
-        else:
-            left_r = left_in.view(B, G_L1, G_L2, L1)
-
+        left_r = left_in.reshape(B, G_L, L)
         if right_in is not None:
-            if self.expand_R:
-                right_r = right_in.view(B, G_R1, G_R2, R1, R2)
-            else:
-                right_r = right_in.view(B, G_R1, G_R2, R1)
+            right_r = right_in.reshape(B, G_R, R)
         else:
-            if self.expand_R:
-                right_r = torch.zeros(B, G_R1, G_R2, R1, R2, device=left_in.device)
-            else:
-                right_r = torch.zeros(B, G_R1, G_R2, R1, device=left_in.device)
-
-        if self.expand_L and self.expand_R:
-            left_p = left_r.permute(0, 1, 3, 2, 4).reshape(B, G_L1, 1, L1, 1, G_L2, L2, 1, 1)
-            right_p = right_r.permute(0, 1, 3, 2, 4).reshape(B, 1, G_R1, 1, R1, 1, 1, G_R2, R2)
-            child2 = left_p + right_p
-            temp = _blocked_broadcast_lse(
-                child2.unsqueeze(5).unsqueeze(6),
-                lw2.view(1, 1, 1, 1, 1, G2, U2, G_L2, L2, G_R2, R2),
-                dim=(7, 8, 9, 10),
-            )
-            temp = temp.permute(0, 5, 6, 1, 3, 2, 4)
-            out = _blocked_broadcast_lse(
-                temp.unsqueeze(3).unsqueeze(4),
-                lw1.view(1, 1, 1, G1, U1, G_L1, L1, G_R1, R1),
-                dim=(5, 6, 7, 8),
-            )
-            out = out.permute(0, 3, 1, 4, 2)
-
-        elif self.expand_L and not self.expand_R:
-            left_p = left_r.permute(0, 1, 3, 2, 4).reshape(B, G_L1, 1, L1, G_L2, L2, 1, 1)
-            right_p = right_r.reshape(B, 1, G_R1, 1, 1, 1, G_R2, R1)
-            child2 = left_p + right_p
-            temp = _blocked_broadcast_lse(
-                child2.unsqueeze(4).unsqueeze(5),
-                lw2.view(1, 1, 1, 1, G2, U2, G_L2, L2, G_R2, R1),
-                dim=(6, 7, 8),
-            )
-            temp = temp.permute(0, 4, 5, 1, 3, 2, 6)
-            out = _blocked_broadcast_lse(
-                temp.unsqueeze(3).unsqueeze(4),
-                lw1.view(1, 1, 1, G1, U1, G_L1, L1, G_R1, R1),
-                dim=(5, 6, 7, 8),
-            )
-            out = out.permute(0, 3, 1, 4, 2)
-
-        elif not self.expand_L and self.expand_R:
-            left_p = left_r.reshape(B, G_L1, 1, 1, G_L2, 1, 1, L1)
-            right_p = right_r.permute(0, 1, 3, 2, 4).reshape(B, 1, G_R1, R1, 1, G_R2, R2, 1)
-            child2 = left_p + right_p
-            temp = _blocked_broadcast_lse(
-                child2.unsqueeze(4).unsqueeze(5),
-                lw2.permute(0, 1, 2, 4, 5, 3).reshape(1, 1, 1, 1, G2, U2, G_L2, G_R2, R2, L1),
-                dim=(6, 7, 8),
-            )
-            temp = temp.permute(0, 4, 5, 1, 6, 2, 3)
-            out = _blocked_broadcast_lse(
-                temp.unsqueeze(3).unsqueeze(4),
-                lw1.view(1, 1, 1, G1, U1, G_L1, L1, G_R1, R1),
-                dim=(5, 6, 7, 8),
-            )
-            out = out.permute(0, 3, 1, 4, 2)
-
-        else:
-            left_p = left_r.reshape(B, G_L1, 1, G_L2, 1, L1, 1)
-            right_p = right_r.reshape(B, 1, G_R1, 1, G_R2, 1, R1)
-            child2 = left_p + right_p
-            temp = _blocked_broadcast_lse(
-                child2.unsqueeze(3).unsqueeze(4),
-                lw2.permute(0, 1, 2, 4, 3, 5).reshape(1, 1, 1, G2, U2, G_L2, G_R2, L1, R1),
-                dim=(5, 6),
-            )
-            temp = temp.permute(0, 3, 4, 1, 5, 2, 6)
-            out = _blocked_broadcast_lse(
-                temp.unsqueeze(3).unsqueeze(4),
-                lw1.view(1, 1, 1, G1, U1, G_L1, L1, G_R1, R1),
-                dim=(5, 6, 7, 8),
-            )
-            out = out.permute(0, 3, 1, 4, 2)
-
-        if self.expand_U:
-            out = out.reshape(B, G1 * G2, U1 * U2)
-        elif U1 == 1 and U2 == 1:
-            out = out.reshape(B, G1 * G2, 1)
-        elif U1 == 1:
-            out = out.reshape(B, G1 * G2, U2)
-        elif U2 == 1:
-            out = out.reshape(B, G1 * G2, U1)
-        else:
-            out = out.diagonal(dim1=3, dim2=4)
-            out = out.reshape(B, G1 * G2, min(U1, U2))
-
-        return out
+            right_r = torch.zeros(B, G_R, R, device=left_in.device, dtype=left_in.dtype)
+        child = left_r[:, None, None, :, :, None, None] + right_r[:, None, None, None, None, :, :]
+        return (w.unsqueeze(0) + child).logsumexp(dim=(3, 4, 5, 6))
 
     def detach(self) -> "ProductWeights":
         return ProductWeights(
@@ -756,7 +701,7 @@ class ProductWeights(Weights):
         )
 
     def __str__(self) -> str:
-        return f"ProductWeights(expand_U={self.expand_U}, L={self.expand_L}, R={self.expand_R}\n{self.w1.__str__()},\n{self.w2.__str__()})"
+        return f"ProductWeights(expand_U={self.expand_U}, G_L={self.expand_G_L}, L={self.expand_L}, G_R={self.expand_G_R}, R={self.expand_R}\n{self.w1.__str__()},\n{self.w2.__str__()})"
 
 
 class MixingCondWeights(Weights):
@@ -824,6 +769,10 @@ class MixingCondWeights(Weights):
     def num_parameters(self) -> int:
         """The normalized view adds no parameters; delegate to the base weights."""
         return self.base.num_parameters()
+
+    def _zero_pattern(self) -> Optional[torch.Tensor]:
+        """The normalization preserves the base factor's zero set."""
+        return self.base._zero_pattern()
 
     def uniformize(self) -> "Weights":
         return MixingCondWeights(self.base.uniformize(), self.other_child_axis)
