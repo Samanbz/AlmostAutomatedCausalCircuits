@@ -36,13 +36,10 @@ def get_x_split_points(ac, x_id: int) -> List[float]:
             if supports is None:
                 continue
             for supp in supports:
-                interval = supp.intervals.get(x_id)
-                if interval is None:
-                    continue
-                if not math.isinf(interval.low):
-                    split_points.add(float(interval.low))
-                if not math.isinf(interval.high):
-                    split_points.add(float(interval.high))
+                if not math.isinf(supp.low):
+                    split_points.add(float(supp.low))
+                if not math.isinf(supp.high):
+                    split_points.add(float(supp.high))
     return sorted(split_points)
 
 
@@ -55,12 +52,7 @@ def get_x_leaf_support_intervals(ac, x_id: int) -> List[Tuple[float, float]]:
         node_supports = getattr(leaf, "node_supports", None)
         if not node_supports:
             continue
-        intervals = []
-        for supp in node_supports:
-            iv = supp.intervals.get(x_id)
-            if iv is None:
-                continue
-            intervals.append((float(iv.low), float(iv.high)))
+        intervals = [(float(supp.low), float(supp.high)) for supp in node_supports]
         return intervals
     return []
 

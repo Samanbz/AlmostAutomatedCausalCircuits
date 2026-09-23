@@ -265,18 +265,12 @@ def build_circuit(
     """Build the MD circuit and move it to the target device."""
     model_cfg = cfg["model"]
     num_nodes = model_cfg["num_nodes"]
-    prioritize = "hardware" if model_cfg["prioritize"] == "H" else "expressivity"
 
     x_id = data_info["x_id"]
     y_id = data_info["y_id"]
 
     md_sets = data_info["md_sets"]
-    md_vtree = construct_optimal_md_vtree(
-        data,
-        md_sets,
-        prioritize=prioritize,
-        keep_together=[(x_id, y_id)],
-    )
+    md_vtree = construct_optimal_md_vtree(data, md_sets, keep_together=[(x_id, y_id)])
 
     leaf_cfg = model_cfg.get("leaf", {})
     dists = {}

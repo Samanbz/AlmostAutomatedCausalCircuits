@@ -256,7 +256,7 @@ def plot_conditional_densities(
     out_file = os.path.join(
         output_dir,
         f"{exp_id}_tree_backdoor_{cfg['dataset']['dataset']}_"
-        f"N{cfg['model']['num_nodes']}_{cfg['model']['md_sets']}_{cfg['model']['prioritize']}.png",
+        f"N{cfg['model']['num_nodes']}_{cfg['model']['md_sets']}.png",
     )
     plt.tight_layout()
     plt.savefig(out_file, dpi=150)
@@ -381,7 +381,7 @@ def plot_2d_heatmaps(
     out_file = os.path.join(
         output_dir,
         f"{exp_id}_heatmap_do_{cfg['dataset']['dataset']}_"
-        f"N{cfg['model']['num_nodes']}_{cfg['model']['md_sets']}_{cfg['model']['prioritize']}.png",
+        f"N{cfg['model']['num_nodes']}_{cfg['model']['md_sets']}.png",
     )
     plt.savefig(out_file, dpi=150)
     plt.close()

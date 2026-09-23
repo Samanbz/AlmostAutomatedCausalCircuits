@@ -74,7 +74,6 @@ def compile_component_queries(ac, data_info: Dict[str, Any]) -> Dict[str, Any]:
     V_names = data_info["V_names"]
     z_names = data_info["z_names"]
     var_to_id = data_info["var_to_id"]
-    base_root_id = ac.get_roots()[0]
 
     p_all = make_p(V_names)
     joint_ast = make_marg(V_names - {"X", "Y"} - set(z_names), p_all)
@@ -84,8 +83,8 @@ def compile_component_queries(ac, data_info: Dict[str, Any]) -> Dict[str, Any]:
     do_ast = make_marg(set(z_names), prod_ast)
 
     logger.info("Compiling query circuits...")
-    q_prod_ac, _ = compile_query(prod_ast, ac, base_root_id, var_to_id)
-    q_do_ac, _ = compile_query(do_ast, ac, base_root_id, var_to_id)
+    q_prod_ac = compile_query(prod_ast, ac, var_to_id)
+    q_do_ac = compile_query(do_ast, ac, var_to_id)
     logger.info("Query circuits compiled.")
     return {"q_prod_ac": q_prod_ac, "q_do_ac": q_do_ac}
 
