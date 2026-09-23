@@ -1,45 +1,19 @@
-import networkx as nx
 import pytest
 import torch
 
 from src.construction.learned_vtree import (
-    LearnedVTreeBuilder,
-    apply_md_constraints,
-    build_skeleton,
     construct_optimal_md_vtree,
     construct_optimal_vtree,
+    learn_liang_ps_md_vtree,
 )
 from src.utils.bitset import BitSet
 
 
-# 1.1 Structural Validations
-
-
-def test_full_connectedness():
-    """1.1.1 Full Connectedness: Verify that a vtree built without a provided DAG has a complete skeleton graph."""
-    num_vars = 4
-    skeleton = build_skeleton(None, num_vars)
-    assert skeleton.number_of_nodes() == num_vars
-    assert skeleton.number_of_edges() == (num_vars * (num_vars - 1)) // 2
-    for i in range(num_vars):
-        for j in range(i + 1, num_vars):
-            assert skeleton.has_edge(i, j)
-
-
-def test_moralized_skeleton():
-    """1.1.2 Moralized Skeleton: Verify that if a DAG is provided, the skeleton graph adds an undirected edge between parents."""
-    dag = nx.DiGraph()
-    dag.add_edges_from([(0, 2), (1, 2)])
-    skeleton = build_skeleton(dag, 3)
-
-    assert skeleton.has_edge(0, 2)
-    assert skeleton.has_edge(1, 2)
-    # Check for moralized edge
-    assert skeleton.has_edge(0, 1)
+# 1.1 Structural validations
 
 
 def test_base_case_execution():
-    """1.1.3 Base Case Execution: Test construct_optimal_vtree and construct_optimal_md_vtree on trivial inputs (1 variable, 2 variables)."""
+    """Base case: 1-variable and 2-variable vtrees."""
     # 1 Variable
     data_1v = torch.randn(10, 1)
     vt_1 = construct_optimal_vtree(data_1v)
@@ -58,7 +32,7 @@ def test_base_case_execution():
 
 
 def test_root_identification(complex_vtree):
-    """1.1.4 Root Identification: Verify that md_vtree.get_root() correctly identifies the single node with no incoming edges."""
+    """Root: single node with no incoming edges spanning all variables."""
     root_id = complex_vtree.get_root()
     parents = complex_vtree.get_parents(root_id)
     assert len(parents) == 0
@@ -66,9 +40,8 @@ def test_root_identification(complex_vtree):
 
 
 def test_md_set_universality(synthetic_data):
-    """1.1.5 MD-Set Universality: Check that MD sets properly propagate to ancestors.
-    If a parent is not universal, its MD-set must be either the union of its children's MD-sets
-    or equal to the MD-set of its left/right child."""
+    """MD labels propagate to ancestors: a non-universal node's md-set must be
+    either the union of its children's md-sets or equal to one child's."""
     md_vt = construct_optimal_md_vtree(synthetic_data, md_sets=[{0}, {0, 1}])
 
     for vid in md_vt.topological_sort():
@@ -91,74 +64,107 @@ def test_md_set_universality(synthetic_data):
         ), f"Invalid MD-Set propagation at node {vid}"
 
 
-# 1.2 MD Constraints mapping
-
-
-def test_md_set_uncuttable_edges():
-    """1.2.1 MD-Set Uncuttable Edges: Verify that edges in the skeleton receive the designated md_weight."""
-    skeleton = build_skeleton(None, 3)
-    apply_md_constraints(skeleton, md_sets=[{0, 1}], md_weight=1e9)
-
-    assert skeleton[0][1]["weight"] == 1e9
-    # The edge (1, 2) should not have the high weight constraint initially
-    assert "weight" not in skeleton[1][2] or skeleton[1][2]["weight"] != 1e9
-
-
-def test_joint_constraint_satisfaction(synthetic_data):
-    """1.2.2 Joint Constraint Satisfaction: Verify that variables in a joint MD-set are never partitioned
-    into separate sub-trees until they are explicitly resolved as a joint MD-set at a specific node."""
-    md_vt = construct_optimal_md_vtree(synthetic_data, md_sets=[{0, 1}])
-
-    # Trace the tree from the root. If a node contains {0, 1} in its scope, it should not split 0 and 1
-    # into different children, EXCEPT when that node itself is evaluating exactly the md-set.
-    # In practice, the high weight guarantees they stay together in the VTree until the very end.
-
-    for vid in md_vt.topological_sort():
-        node = md_vt.get_node_data(vid)
-        children = md_vt.get_children_pair(vid)
-        if children is None:
-            continue
-
-        l_vid, r_vid = children
-        l_child = md_vt.get_node_data(l_vid)
-        r_child = md_vt.get_node_data(r_vid)
-
-        # If both variables are in the parent scope, check how they split
-        if 0 in node.scope and 1 in node.scope:
-            l_has_one = (0 in l_child.scope) ^ (1 in l_child.scope)
-            r_has_one = (0 in r_child.scope) ^ (1 in r_child.scope)
-
-            # They should only be split if this node is resolving the {0, 1} group.
-            # But wait, any split of {0, 1} means they are separated.
-            # Since their mutual edge weight is 1e9, they should be the VERY LAST things split.
-            if l_has_one or r_has_one:
-                # This must be the node where their scope is exactly {0, 1}
-                assert node.scope == BitSet({0, 1})
-
-
-# 1.3 Edge Cases
+# 1.2 Edge cases
 
 
 def test_disjoint_md_sets_validation(synthetic_data):
-    """1.3.1 Disjoint MD Sets Validation: Test md_sets=[{0}, {1}, {2}].
-    The builder should explicitly raise a ValueError because MD sets must be
-    closed under union."""
+    """MD sets must be closed under intersection."""
     with pytest.raises(ValueError, match="closed under intersection"):
         construct_optimal_md_vtree(synthetic_data, md_sets=[{0}, {1}, {2}])
 
 
-def test_bisection_fallback():
-    """1.3.3 Bisection Fallback: Test behavior when a graph partitioning algorithm fails to find a split."""
-    builder = LearnedVTreeBuilder()
-    G = nx.Graph()
-    G.add_nodes_from([0, 1, 2])
-    # Fully connected with 1e9 weight
-    G.add_edge(0, 1, weight=1e9)
-    G.add_edge(1, 2, weight=1e9)
-    G.add_edge(0, 2, weight=1e9)
+# 1.3 PS-root MD vtree learner (learn_liang_ps_md_vtree)
 
-    # Bisection should fallback to arbitrary split
-    l_vars, r_vars = builder._bisect_graph(G, [0, 1, 2])
-    assert len(l_vars) > 0 and len(r_vars) > 0
-    assert set(l_vars).union(set(r_vars)) == {0, 1, 2}
-    assert set(l_vars).intersection(set(r_vars)) == set()
+
+def _frontdoor_like_data(n=2000, seed=0):
+    """Columns (X, M, Y): X -> M -> Y with confounding on (X, Y)."""
+    g = torch.Generator().manual_seed(seed)
+    u = torch.randn(n, generator=g)
+    x = u + torch.randn(n, generator=g)
+    m = 1.5 * x + torch.randn(n, generator=g)
+    y = m + 2.0 * u + torch.randn(n, generator=g)
+    return torch.stack([x, m, y], dim=1)
+
+
+def _layer_type(vt, vid):
+    from src.construction.circuit_builder import LayerType
+
+    children = vt.get_children_pair(vid)
+    if children is None:
+        return None
+    node = vt.get_node_data(vid)
+    l_vid, r_vid = children
+    return LayerType.from_md_sets(
+        node.md_set, vt.get_node_data(l_vid).md_set, vt.get_node_data(r_vid).md_set
+    )
+
+
+def _ps_layers(vt):
+    from src.construction.circuit_builder import LayerType
+
+    return [
+        vid
+        for vid in vt.topological_sort()
+        if _layer_type(vt, vid) in (LayerType.PS_LEFT_MIXING, LayerType.PS_RIGHT_MIXING)
+    ]
+
+
+def test_ps_md_vtree_root_ps_and_y_on_density_side():
+    """Frontdoor family [{M,X},{X}]: root must be a left pseudo-mixing layer with
+    X on the selector side and Y on the density (right) side; a single PS layer."""
+    data = _frontdoor_like_data()
+    vt = learn_liang_ps_md_vtree(data, md_sets=[{0, 1}, {0}], y_vars={2})
+
+    root_id = vt.get_root()
+    l_vid, r_vid = vt.get_children_pair(root_id)
+    assert set(vt.get_node_data(l_vid).scope) == {0}  # selector side = {X}
+    assert 2 in set(vt.get_node_data(r_vid).scope)  # Y on the density side
+
+    ps = _ps_layers(vt)
+    assert ps == [root_id], f"expected only the root PS layer, got {ps}"
+
+
+def test_ps_md_vtree_warns_on_second_ps_layer(caplog):
+    """An inclusion chain of determinisms ({M,Z,X} > {M,X} > {X}) forces PS
+    layers below the root — a warning must be logged."""
+    import logging
+
+    g = torch.Generator().manual_seed(0)
+    x = torch.randn(2000, generator=g)
+    z = x + torch.randn(2000, generator=g)
+    m = z + x + torch.randn(2000, generator=g)
+    y = m + z + torch.randn(2000, generator=g)
+    data = torch.stack([x, m, z, y], dim=1)
+
+    with caplog.at_level(logging.WARNING, logger="mcc.learned_vtree"):
+        vt = learn_liang_ps_md_vtree(data, md_sets=[{0, 1, 2}, {0, 1}, {0}], y_vars={3})
+
+    assert len(_ps_layers(vt)) >= 2
+    assert any(
+        "pseudo-mixing" in r.message and "will not be normalized" in r.message
+        for r in caplog.records
+    )
+
+
+def test_ps_md_vtree_singleton_family_is_classical_at_root(caplog):
+    """A single-determinism family yields a classical disjoint mixing layer at
+    the root (no pseudo-mixing needed) — logged at info, no warning."""
+    import logging
+
+    data = _frontdoor_like_data()
+    with caplog.at_level(logging.INFO, logger="mcc.learned_vtree"):
+        vt = learn_liang_ps_md_vtree(data, md_sets=[{0}], y_vars={2})
+    assert not _ps_layers(vt)
+    assert any("classical disjoint mixing layer" in r.message for r in caplog.records)
+
+
+def test_ps_md_vtree_rejects_outcomes_in_md_set():
+    data = _frontdoor_like_data()
+    with pytest.raises(ValueError, match="outcome"):
+        learn_liang_ps_md_vtree(data, md_sets=[{0, 2}, {0}], y_vars={2})
+
+
+def test_ps_md_vtree_rejects_non_closed_family():
+    data = _frontdoor_like_data()
+    with pytest.raises(ValueError, match="closed under intersection"):
+        learn_liang_ps_md_vtree(data, md_sets=[{0}, {1}], y_vars={2})

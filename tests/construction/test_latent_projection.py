@@ -1,6 +1,7 @@
 """Tests for Verma's latent projection (``src/construction/latent_projection.py``)."""
 
-from src.construction.latent_projection import ADMG, latent_projection
+from src.construction.latent_projection import latent_projection
+from src.symbolic.causal_graph import CausalGraph
 from src.symbolic.scm import ConstantMechanism, StructuralCausalModel
 
 
@@ -30,10 +31,10 @@ def test_confounder_gives_bidirected_edge():
     admg = latent_projection(scm)
 
     assert set(admg.nodes) == {"X", "Y"}
-    assert admg.directed_edges == set()
+    assert admg.directed == set()
     assert admg.has_bidirected("X", "Y")
     assert admg.has_bidirected("Y", "X")  # order-insensitive
-    assert len(admg.bidirected_edges) == 1
+    assert len(admg.bidirected) == 1
 
 
 def test_latent_chain_gives_directed_edge():
@@ -41,10 +42,10 @@ def test_latent_chain_gives_directed_edge():
     scm = _scm(["A", "H", "B"], [("A", "H"), ("H", "B")], hidden={"H"})
     admg = latent_projection(scm)
 
-    assert admg.directed_edges == {("A", "B")}
+    assert admg.directed == {("A", "B")}
     assert admg.has_edge("A", "B")
     assert not admg.has_edge("B", "A")
-    assert admg.bidirected_edges == set()
+    assert admg.bidirected == set()
 
 
 def test_instrument_gives_no_bidirected_edge():
@@ -53,8 +54,8 @@ def test_instrument_gives_no_bidirected_edge():
     scm = _scm(["U", "X", "Y"], [("U", "X"), ("X", "Y")], hidden={"U"})
     admg = latent_projection(scm)
 
-    assert admg.directed_edges == {("X", "Y")}
-    assert admg.bidirected_edges == set()
+    assert admg.directed == {("X", "Y")}
+    assert admg.bidirected == set()
 
 
 def test_napkin_shape():
@@ -75,12 +76,12 @@ def test_napkin_shape():
 
     # Direct observed-observed edges are preserved as-is; W -> X via the observed
     # intermediate Z is NOT a projection edge.
-    assert admg.directed_edges == {("W", "Z"), ("Z", "X"), ("X", "Y")}
+    assert admg.directed == {("W", "Z"), ("Z", "X"), ("X", "Y")}
     assert not admg.has_edge("W", "X")
 
     assert admg.has_bidirected("X", "Y")  # trek via U1
     assert admg.has_bidirected("Z", "Y")  # trek via U2
-    assert len(admg.bidirected_edges) == 2
+    assert len(admg.bidirected) == 2
 
 
 def test_default_hidden_picks_up_scm_hidden_variables():
@@ -90,8 +91,8 @@ def test_default_hidden_picks_up_scm_hidden_variables():
     admg_explicit = latent_projection(scm, hidden={"U"})
 
     assert admg_default.nodes == admg_explicit.nodes
-    assert admg_default.directed_edges == admg_explicit.directed_edges
-    assert admg_default.bidirected_edges == admg_explicit.bidirected_edges
+    assert admg_default.directed == admg_explicit.directed
+    assert admg_default.bidirected == admg_explicit.bidirected
     assert admg_default.has_bidirected("X", "Y")
 
 
@@ -102,7 +103,7 @@ def test_shared_exogenous_parent_gives_bidirected_edge():
     admg = latent_projection(scm)
 
     assert set(admg.nodes) == {"X", "Y"}  # exogenous node excluded from V_O
-    assert admg.directed_edges == set()
+    assert admg.directed == set()
     assert admg.has_bidirected("X", "Y")
 
 
@@ -111,15 +112,15 @@ def test_no_hidden_returns_observed_subgraph():
     scm = _scm(["A", "B", "C"], [("A", "B"), ("B", "C")])
     admg = latent_projection(scm)
 
-    assert admg.directed_edges == {("A", "B"), ("B", "C")}
-    assert admg.bidirected_edges == set()
+    assert admg.directed == {("A", "B"), ("B", "C")}
+    assert admg.bidirected == set()
 
 
-def test_bidirected_edges_stored_canonically_and_str():
+def test_bidirected_stored_canonically_and_str():
     scm = _scm(["U", "X", "Y"], [("U", "X"), ("U", "Y")], hidden={"U"})
     admg = latent_projection(scm)
 
-    (pair,) = admg.bidirected_edges
+    (pair,) = admg.bidirected
     assert pair == tuple(sorted(("X", "Y")))
     assert "X <-> Y" in str(admg)
-    assert isinstance(admg, ADMG)
+    assert isinstance(admg, CausalGraph)

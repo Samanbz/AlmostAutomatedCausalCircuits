@@ -13,15 +13,17 @@ and verify the fixes:
    ``exp``.
 """
 
+import numpy as np
 import torch
 
 from src.construction.circuit_builder import create_md_circuit
+from src.construction.random_mechanisms import randomize_mechanisms
+from src.construction.skeleton import backdoor_skeleton
 from src.symbolic.arithmetic.circuit import SymbolicArithmeticCircuit
 from src.symbolic.arithmetic.nodes import GaussianDistribution
 from src.symbolic.arithmetic.nodes.leaf_layer import GaussianLeafLayer
 from src.symbolic.arithmetic.train import SymbolicEMTrainer
 from src.symbolic.arithmetic.weights import safe_logsumexp
-from src.symbolic.scm import build_synthetic_continuous_scm
 from src.symbolic.vtree import VNode, VTree
 from src.utils import BitSet
 
@@ -119,7 +121,26 @@ def _find_first_nan_node(ac: SymbolicArithmeticCircuit, data: torch.Tensor):
 
 def test_n16_training_stays_finite():
     """N=16 MD-circuit training stays finite with safe_logsumexp and positive stddevs."""
-    scm = build_synthetic_continuous_scm(2)
+    np.random.seed(0)
+    torch.manual_seed(0)
+    # Reproduce the retired legacy builder's default
+    # build_synthetic_continuous_scm(2): Z_i ~ N(0,1),
+    # X = Z0 + Z1 + N(0,1),  Y = X + 1.5*(Z0 + Z1) + N(0,1).
+    scm = randomize_mechanisms(
+        backdoor_skeleton(n_confounders=2, kind="continuous", cardinality=None),
+        rng=0,
+        gmm_components=(1,),
+        gmm_mean_range=(0.0, 0.0),
+        intercept_range=(0.0, 0.0),
+        sigma2_range=(1.0, 1.0),
+        edge_coefs={
+            "Z_0->X": 1.0,
+            "Z_1->X": 1.0,
+            "X->Y": 1.0,
+            "Z_0->Y": 1.5,
+            "Z_1->Y": 1.5,
+        },
+    )
     df_train = scm.sample(10000)
     vtree = _make_vtree_xz()
     ac = _build_ac_from_data(vtree, df_train, num_nodes=16)
