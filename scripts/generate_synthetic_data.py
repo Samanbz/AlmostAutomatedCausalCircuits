@@ -247,11 +247,19 @@ def _custom_skeleton_from_args(args) -> SCMSkeleton:
         variables += [spec(w, "W") for w in w_names]
         edges = [(z, t) for z in confounder_names for t in x_names + y_names]
         edges += [(x, y) for x in x_names for y in y_names]
-    else:  # frontdoor — confounders are always hidden and always discrete
+    else:  # frontdoor — confounders are always hidden
         m_names = _role_names("M", args.n_mediators)
-        variables = [
-            VariableSpec(u, "discrete", draw_cardinality(), hidden=True) for u in confounder_names
-        ]
+        variables = []
+        for u in confounder_names:
+            u_kind = role_kind("U", args.u_kind)
+            variables.append(
+                VariableSpec(
+                    u,
+                    u_kind,
+                    draw_cardinality() if u_kind == "discrete" else None,
+                    hidden=True,
+                )
+            )
         variables += [spec(x, "X") for x in x_names]
         variables += [spec(m, "M") for m in m_names]
         variables += [spec(y, "Y") for y in y_names]
@@ -270,7 +278,7 @@ def build_skeleton_from_args(args) -> SCMSkeleton:
             f"--max_categories ({args.max_categories}) must be >= "
             f"--min_categories ({args.min_categories})."
         )
-    role_overrides = (args.z_kind, args.x_kind, args.y_kind, args.m_kind, args.w_kind)
+    role_overrides = (args.z_kind, args.u_kind, args.x_kind, args.y_kind, args.m_kind, args.w_kind)
     if args.kind in ("discrete", "mixed") or any(role_overrides):
         # Discrete variables get individual cardinalities drawn from
         # [--min_categories, --max_categories] (seeded), so build via the
@@ -296,6 +304,7 @@ def build_skeleton_from_args(args) -> SCMSkeleton:
             n_bystanders=args.n_bystanders,
             kind=args.kind,
             cardinality=cardinality,
+            confounder_kind=args.u_kind or "discrete",
         )
     raise ValueError(f"Unknown skeleton '{args.skeleton}'.")
 
@@ -364,15 +373,21 @@ ENGINEERING THE EFFECT GAP  (difference between P(Y|do(X)) and P(Y|X))
     * negative S flips the bias direction (observational understates/reverses
       the effect)
   REQUIREMENTS: continuous linear mechanisms on the involved variables (use
-  --kind continuous, or --z_kind continuous under --kind mixed); exactly one
-  treatment; backdoor-style skeleton (frontdoor effects are mediated; discrete
-  confounders carry bias in CPTs/CLG regimes and cannot be dialed this way).
+  --kind continuous; backdoor: --z_kind continuous under --kind mixed;
+  frontdoor: --u_kind continuous, which makes the hidden confounders
+  continuous linear-GMM roots). Exactly one treatment. The backdoor factories
+  take --direct_effect directly; frontdoor effects are mediated — pin the
+  X*->M* / M*->Y* coefficients with --set_coef and dial the bias with
+  --confounding_strength (the solve zeroes the treatment's coefficient in its
+  mediator children during probing, so S is purely the bias on top of the
+  mediated effect).
   Everything else (noise shapes, other coefficients, intercepts) stays random —
   the seed still matters. --set_coef is applied first and is overridden by these
   dials on the treatment/confounder->outcome edges. Verify with
   explore_synthetic_data.py (effect-gap printout + slice plots).
 
-OUTPUT (in --output_dir, suffixed by a name encoding structure + mechanism knobs)
+OUTPUT (in --output_dir, suffixed by a name encoding structure + mechanism knobs;
+everything goes under <output_dir>/<dataset_name>/ when --dataset_name is set)
   observational_<name>.csv    full SCM sample, hidden columns dropped
   interventional_<name>.csv   row i drawn from do(T = t_i) with fresh noise,
                               T = treatments (default X / X_0..X_k; override --treatments)
@@ -459,14 +474,17 @@ def add_generation_arguments(parser: argparse.ArgumentParser) -> None:
         "--min_categories). Set equal to --min_categories to give every discrete "
         "variable the same cardinality.",
     )
-    for role in ("z", "x", "y", "m", "w"):
+    for role in ("z", "u", "x", "y", "m", "w"):
         structure.add_argument(
             f"--{role}_kind",
             choices=["discrete", "continuous"],
             default=None,
             help=f"override the kind of the {role.upper()} role (default: follows "
             "--kind). CLG constraint: a discrete variable may only have discrete "
-            "parents — e.g. --y_kind discrete requires discrete X and confounders.",
+            "parents — e.g. --y_kind discrete requires discrete X and confounders. "
+            "Frontdoor confounders U are discrete by default; --u_kind continuous "
+            "makes them hidden continuous roots (linear-GMM), which unlocks "
+            "--confounding_strength effect engineering.",
         )
     structure.add_argument(
         "--n_confounders",
@@ -609,8 +627,10 @@ def add_generation_arguments(parser: argparse.ArgumentParser) -> None:
         "slope of Y on X becomes direct_effect + S while P(Y|do(X)) keeps slope "
         "direct_effect. S may be negative (bias opposes the effect); S = 0 makes "
         "P(Y|X) coincide with P(Y|do(X)). Requires continuous confounders (--kind "
-        "continuous, or --z_kind continuous under --kind mixed) and a single "
-        "treatment.",
+        "continuous, --z_kind continuous for backdoor, or --u_kind continuous for "
+        "frontdoor) and a single treatment. Frontdoor: no direct edge exists, so "
+        "the causal effect is the mediated X->M->Y slope (pin it with --set_coef); "
+        "S biases the observational slope on top of it.",
     )
 
     # Generation.
@@ -624,6 +644,13 @@ def add_generation_arguments(parser: argparse.ArgumentParser) -> None:
         "seed -> identical SCM; different seed -> different mechanisms on the same DAG",
     )
     generation.add_argument("--output_dir", type=str, default="data", help="output directory")
+    generation.add_argument(
+        "--dataset_name",
+        type=str,
+        default=None,
+        help="if set, all artifacts are saved under <output_dir>/<dataset_name>/ "
+        "(datasets, SCM pickle, metadata, plots)",
+    )
     generation.add_argument("--n_workers", type=int, default=None, help="worker processes (CPUs-1)")
     generation.add_argument(
         "--chunk_size", type=int, default=256, help="samples per parallel chunk"
@@ -683,14 +710,17 @@ def save_datasets(df_obs, df_do, scm, skeleton, args, mechanism_kwargs) -> dict:
 
     Returns a dict with ``base_name`` and the four output paths.
     """
-    os.makedirs(args.output_dir, exist_ok=True)
+    output_dir = (
+        os.path.join(args.output_dir, args.dataset_name) if args.dataset_name else args.output_dir
+    )
+    os.makedirs(output_dir, exist_ok=True)
 
     suffix = _mechanism_suffix(mechanism_kwargs)
     if suffix:
         suffix = "_" + suffix
     hidden = "_H" if any(v.hidden for v in skeleton.variables) else ""
 
-    role_overrides = (args.z_kind, args.x_kind, args.y_kind, args.m_kind, args.w_kind)
+    role_overrides = (args.z_kind, args.u_kind, args.x_kind, args.y_kind, args.m_kind, args.w_kind)
     if args.kind == "mixed" or any(role_overrides):
         # Per-role layout code, e.g. "Zd_Xd_Yc" (roles in declaration order).
         layout = "_".join(
@@ -711,10 +741,11 @@ def save_datasets(df_obs, df_do, scm, skeleton, args, mechanism_kwargs) -> dict:
     )
     paths = {
         "base_name": base_name,
-        "observational": os.path.join(args.output_dir, f"observational_{base_name}{suffix}.csv"),
-        "interventional": os.path.join(args.output_dir, f"interventional_{base_name}{suffix}.csv"),
-        "scm": os.path.join(args.output_dir, f"scm_{base_name}{suffix}.pkl"),
-        "meta": os.path.join(args.output_dir, f"meta_{base_name}{suffix}.json"),
+        "output_dir": output_dir,
+        "observational": os.path.join(output_dir, f"observational_{base_name}{suffix}.csv"),
+        "interventional": os.path.join(output_dir, f"interventional_{base_name}{suffix}.csv"),
+        "scm": os.path.join(output_dir, f"scm_{base_name}{suffix}.pkl"),
+        "meta": os.path.join(output_dir, f"meta_{base_name}{suffix}.json"),
     }
 
     df_obs.to_csv(paths["observational"], index=False)
@@ -734,6 +765,7 @@ def save_datasets(df_obs, df_do, scm, skeleton, args, mechanism_kwargs) -> dict:
                 },
                 "n_samples": args.n_samples,
                 "seed": args.seed,
+                "dataset_name": args.dataset_name,
             },
             f,
             indent=2,

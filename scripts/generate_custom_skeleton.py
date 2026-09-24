@@ -17,8 +17,8 @@ Example:
 import argparse
 import os
 
-from explore_synthetic_data import plot_heatmaps, plot_slices
-from generate_synthetic_data import (
+from scripts.explore_synthetic_data import plot_heatmaps, plot_slices
+from scripts.generate_synthetic_data import (
     CASE_GUIDE,
     add_generation_arguments,
     generate_paired_datasets,

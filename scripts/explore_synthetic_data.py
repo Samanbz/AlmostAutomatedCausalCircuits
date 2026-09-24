@@ -34,7 +34,7 @@ import numpy as np
 from matplotlib.colors import LogNorm
 from scipy.stats import gaussian_kde
 
-from generate_synthetic_data import (
+from scripts.generate_synthetic_data import (
     CASE_GUIDE,
     add_generation_arguments,
     build_skeleton_from_args,
@@ -119,8 +119,11 @@ def plot_heatmaps(df_obs, df_do, gt, t, y, spec_t, spec_y, bins, title, path):
     cmap.set_bad("lightgray")
     for ax, (matrix, panel_title) in zip(axes.flat, panels):
         finite = matrix[np.isfinite(matrix) & (matrix > 0)]
-        vmin = float(finite.min()) if len(finite) else 1e-8
-        norm = LogNorm(vmin=max(vmin, 1e-8), vmax=max(float(np.nanmax(matrix)), 1e-8))
+        vmin = max(float(finite.min()) if len(finite) else 1e-8, 1e-8)
+        vmax = float(np.nanmax(matrix))
+        if not np.isfinite(vmax) or vmax <= vmin:
+            vmax = vmin * 100
+        norm = LogNorm(vmin=vmin, vmax=vmax)
         im = ax.imshow(
             matrix,
             origin="lower",
@@ -248,7 +251,7 @@ def main():
     )
     paths = save_datasets(df_obs, df_do, scm, skeleton, args, mechanism_kwargs)
 
-    plots_dir = args.plots_dir or os.path.join(args.output_dir, f"plots_{paths['base_name']}")
+    plots_dir = args.plots_dir or os.path.join(paths["output_dir"], f"plots_{paths['base_name']}")
     os.makedirs(plots_dir, exist_ok=True)
 
     gt = scm.ground_truth()
