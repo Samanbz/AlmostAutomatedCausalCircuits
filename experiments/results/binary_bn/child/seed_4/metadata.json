@@ -1,0 +1,77 @@
+{
+  "experiment_id": "child",
+  "seed": 4,
+  "config": {
+    "experiment": {
+      "seed": 0,
+      "output_dir": "experiments/results/binary_bn/child",
+      "models_dir": "experiments/models/binary_bn/child",
+      "device": null,
+      "id": "child"
+    },
+    "dataset": {
+      "name": "child",
+      "path": "data/child.pkl",
+      "data_dir": "data",
+      "x": [
+        "Sick"
+      ],
+      "y": [
+        "XrayReport"
+      ],
+      "z": [
+        "BirthAsphyxia",
+        "Disease",
+        "DuctFlow",
+        "CardiacMixing",
+        "HypDistrib",
+        "LungParench",
+        "HypoxiaInO2",
+        "LowerBodyO2",
+        "RUQO2",
+        "CO2",
+        "CO2Report",
+        "LungFlow",
+        "ChestXray"
+      ],
+      "x_val": 0,
+      "y_val": 0,
+      "target": 0.3164,
+      "dataset": "child"
+    },
+    "model": {
+      "num_nodes": 10,
+      "fairness_temperature": 10.0,
+      "weight_softmax_temperature": 0.5,
+      "max_leaf_num_nodes": 2
+    },
+    "training": {
+      "total_iters": 50,
+      "batch_size": 256,
+      "step_size": 1.0,
+      "decay_rate": 1.0,
+      "decay_every": 1,
+      "log_interval": 25,
+      "leaf_lr": 0.05
+    },
+    "checkpointing": {
+      "checkpoint_every_epochs": 0,
+      "save_initial": false,
+      "save_final": true
+    },
+    "evaluation": {
+      "eval_batch_size": 512
+    }
+  },
+  "config_hash": "f7bb87277591",
+  "checkpoint_hash": "7a54616dd825",
+  "start_time": "2026-09-24T13:55:28.180872+00:00",
+  "end_time": "2026-09-24T13:55:34.870187+00:00",
+  "hostname": "Samans-MacBook-Air-2.local",
+  "device": "cpu",
+  "python_version": "3.12.9",
+  "pytorch_version": "2.11.0",
+  "git_commit": "309257eb28eb6d9c50cc1dde39c0b0ea68dde3b2",
+  "command": "/Users/samanb/uni/Thesis/MonarchCausalCircuits/experiments/run_binary_bn_experiment.py --config configs/binary_bn/child.json --seed 4",
+  "data_file_hashes": {}
+}

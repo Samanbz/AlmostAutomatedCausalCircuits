@@ -1,0 +1,123 @@
+{
+  "experiment_id": "win95pts",
+  "seed": 0,
+  "config": {
+    "experiment": {
+      "seed": 0,
+      "output_dir": "experiments/results/binary_bn/win95pts",
+      "models_dir": "experiments/models/binary_bn/win95pts",
+      "device": null,
+      "id": "win95pts"
+    },
+    "dataset": {
+      "name": "win95pts",
+      "path": "data/win95pts.pkl",
+      "data_dir": "data",
+      "x": [
+        "REPEAT"
+      ],
+      "y": [
+        "Problem2"
+      ],
+      "z": [
+        "AppOK",
+        "DataFile",
+        "AppData",
+        "DskLocal",
+        "PrtThread",
+        "EMFOK",
+        "PrtSpool",
+        "GDIIN",
+        "PrtDriver",
+        "DrvSet",
+        "DrvOK",
+        "GDIOUT",
+        "PrtSel",
+        "PrtDataOut",
+        "PrtPath",
+        "NtwrkCnfg",
+        "PTROFFLINE",
+        "NetOK",
+        "PrtCbl",
+        "PrtPort",
+        "CblPrtHrdwrOK",
+        "LclOK",
+        "PrtMpTPth",
+        "DS_NTOK",
+        "DS_LCLOK",
+        "NetPrint",
+        "DSApplctn",
+        "PC2PRT",
+        "PrtOn",
+        "PrtPaper",
+        "PrtMem",
+        "PrtTimeOut",
+        "FllCrrptdBffr",
+        "TnrSpply",
+        "PrtData",
+        "Problem1",
+        "AppDtGnTm",
+        "PrntPrcssTm",
+        "DeskPrntSpd",
+        "PgOrnttnOK",
+        "PrntngArOK",
+        "CmpltPgPrntd",
+        "GrphcsRltdDrvrSttngs",
+        "EPSGrphc",
+        "NnPSGrphc",
+        "PSGRAPHIC",
+        "PrtPScript",
+        "Problem4",
+        "FntInstlltn",
+        "PrntrAccptsTrtyp",
+        "TTOK",
+        "ScrnFntNtPrntrFnt",
+        "NnTTOK",
+        "TrTypFnts",
+        "Problem5",
+        "LclGrbld",
+        "NtGrbld",
+        "GrbldOtpt",
+        "HrglssDrtnAftrPrnt"
+      ],
+      "x_val": 1,
+      "y_val": 1,
+      "target": 0.0521,
+      "dataset": "win95pts"
+    },
+    "model": {
+      "num_nodes": 10,
+      "fairness_temperature": 10.0,
+      "weight_softmax_temperature": 0.5,
+      "max_leaf_num_nodes": 2
+    },
+    "training": {
+      "total_iters": 50,
+      "batch_size": 256,
+      "step_size": 1.0,
+      "decay_rate": 1.0,
+      "decay_every": 1,
+      "log_interval": 25,
+      "leaf_lr": 0.05
+    },
+    "checkpointing": {
+      "checkpoint_every_epochs": 0,
+      "save_initial": false,
+      "save_final": true
+    },
+    "evaluation": {
+      "eval_batch_size": 512
+    }
+  },
+  "config_hash": "84e1395351ae",
+  "checkpoint_hash": "d480c78ea713",
+  "start_time": "2026-09-24T13:55:40.424320+00:00",
+  "end_time": "2026-09-24T13:55:55.891769+00:00",
+  "hostname": "Samans-MacBook-Air-2.local",
+  "device": "cpu",
+  "python_version": "3.12.9",
+  "pytorch_version": "2.11.0",
+  "git_commit": "309257eb28eb6d9c50cc1dde39c0b0ea68dde3b2",
+  "command": "/Users/samanb/uni/Thesis/MonarchCausalCircuits/experiments/run_binary_bn_experiment.py --config configs/binary_bn/win95pts.json --seed 0",
+  "data_file_hashes": {}
+}

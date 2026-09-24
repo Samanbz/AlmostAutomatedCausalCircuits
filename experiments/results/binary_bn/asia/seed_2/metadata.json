@@ -1,0 +1,68 @@
+{
+  "experiment_id": "asia",
+  "seed": 2,
+  "config": {
+    "experiment": {
+      "seed": 0,
+      "output_dir": "experiments/results/binary_bn/asia",
+      "models_dir": "experiments/models/binary_bn/asia",
+      "device": null,
+      "id": "asia"
+    },
+    "dataset": {
+      "name": "asia",
+      "path": "data/asia.pkl",
+      "data_dir": "data",
+      "x": [
+        "bronc"
+      ],
+      "y": [
+        "dysp"
+      ],
+      "z": [
+        "smoke",
+        "lung",
+        "asia",
+        "tub"
+      ],
+      "x_val": 0,
+      "y_val": 0,
+      "target": 0.8065,
+      "dataset": "asia"
+    },
+    "model": {
+      "num_nodes": 10,
+      "fairness_temperature": 10.0,
+      "weight_softmax_temperature": 0.5,
+      "max_leaf_num_nodes": 2
+    },
+    "training": {
+      "total_iters": 50,
+      "batch_size": 256,
+      "step_size": 1.0,
+      "decay_rate": 1.0,
+      "decay_every": 1,
+      "log_interval": 25,
+      "leaf_lr": 0.05
+    },
+    "checkpointing": {
+      "checkpoint_every_epochs": 0,
+      "save_initial": false,
+      "save_final": true
+    },
+    "evaluation": {
+      "eval_batch_size": 512
+    }
+  },
+  "config_hash": "71a122ae8d87",
+  "checkpoint_hash": "b9dc1342d107",
+  "start_time": "2026-09-24T13:55:20.889196+00:00",
+  "end_time": "2026-09-24T13:55:23.072480+00:00",
+  "hostname": "Samans-MacBook-Air-2.local",
+  "device": "cpu",
+  "python_version": "3.12.9",
+  "pytorch_version": "2.11.0",
+  "git_commit": "309257eb28eb6d9c50cc1dde39c0b0ea68dde3b2",
+  "command": "/Users/samanb/uni/Thesis/MonarchCausalCircuits/experiments/run_binary_bn_experiment.py --config configs/binary_bn/asia.json --seed 2",
+  "data_file_hashes": {}
+}
