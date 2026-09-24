@@ -645,6 +645,23 @@ class CategoricalLeafLayer(LeafLayer):
         return int(self.logits.numel())
 
 
+def boundary_heights_from_splits(init_splits: np.ndarray, num_nodes: int) -> np.ndarray:
+    """Boundary heights matching a quantile spacing: local density at each split.
+
+    Each component integrates to 1 over its interval while the interval carries
+    mixture mass 1/K, so the component density is ~K*q and the boundary height
+    is h_k = 2 / (w_left + w_right) (w = adjacent interval widths).  Combined
+    with the width identity this reproduces (approximately) the quantile
+    spacing, i.e. the model's initial splits land on ``init_splits``.
+    """
+    widths = np.diff(init_splits)
+    if widths.size == 0:
+        widths = np.array([1.0])
+    left = np.concatenate([[widths[0]], widths])[: num_nodes - 1]
+    right = np.concatenate([widths, [widths[-1]]])[-(num_nodes - 1) :]
+    return 2.0 / (left + right)
+
+
 class SplineLeafLayer(LeafLayer):
     """Base class for learnable continuous disjoint-support spline leaves.
 
@@ -661,6 +678,7 @@ class SplineLeafLayer(LeafLayer):
         num_nodes: int = 1,
         num_groups: int = 1,
         node_supports: Optional[List[ContinuousInterval]] = None,
+        init_split_points: Optional[np.ndarray] = None,
     ):
         if node_supports is None or len(node_supports) <= 1:
             raise ValueError(
@@ -676,26 +694,51 @@ class SplineLeafLayer(LeafLayer):
         self.num_nodes = num_nodes
         self.num_groups = num_groups
 
-        # Extract finite split points from node_supports (right boundaries of
-        # the first N-1 intervals).  These are shared across all leaf groups so
-        # that every group has the same node supports; the parent MD layers rely
-        # on a node index meaning the same interval in every group.
-        init_splits = []
-        for i in range(num_nodes - 1):
-            iv = node_supports[i]
-            if iv is None or iv.high >= float("inf"):
+        # Initial split points.  Default: the finite right boundaries of the
+        # first N-1 node supports.  ``init_split_points`` (empirical quantiles)
+        # overrides both the splits and the boundary-height initialization so
+        # the two stay consistent with the width identity.  Splits are shared
+        # across all leaf groups so that every group has the same node supports;
+        # the parent MD layers rely on a node index meaning the same interval
+        # in every group.
+        if init_split_points is not None:
+            init_splits = np.asarray(init_split_points, dtype=np.float64).reshape(-1)
+            if init_splits.shape != (num_nodes - 1,) or not np.all(np.isfinite(init_splits)):
                 raise ValueError(
-                    f"{self.__class__.__name__} requires a finite right boundary for interval {i}"
+                    f"{self.__class__.__name__}: init_split_points must be finite with "
+                    f"shape ({num_nodes - 1},), got {init_splits.shape}"
                 )
-            init_splits.append(float(iv.high))
+            if np.any(np.diff(init_splits) <= 0):
+                raise ValueError(
+                    f"{self.__class__.__name__}: init_split_points must be strictly increasing"
+                )
+        else:
+            init_splits = []
+            for i in range(num_nodes - 1):
+                iv = node_supports[i]
+                if iv is None or iv.high >= float("inf"):
+                    raise ValueError(
+                        f"{self.__class__.__name__} requires a finite right boundary "
+                        f"for interval {i}"
+                    )
+                init_splits.append(float(iv.high))
+            init_splits = np.array(init_splits, dtype=np.float64)
         init_splits_t = torch.tensor(init_splits, dtype=torch.float32).unsqueeze(0)  # [1, N-1]
 
-        # Initialize boundary heights as N * Gaussian pdf at the split points.
-        h_np = num_nodes * stats.norm.pdf(
-            init_splits_t.numpy(), loc=spec.base_mean, scale=spec.base_stddev
-        )
-        h_init = torch.tensor(h_np, dtype=torch.float32)
-        h_init = h_init * torch.exp(torch.randn_like(h_init) * 0.05)
+        # Initialize boundary heights.  Default: N * Gaussian pdf at the split
+        # points, with a small random perturbation to break symmetry.  With
+        # empirical-quantile splits the local-density formula is both cheaper
+        # and exactly consistent with the quantile widths, so it is applied
+        # unperturbed (the point of the init is the equal-mass configuration).
+        if init_split_points is not None:
+            h_np = boundary_heights_from_splits(init_splits, num_nodes)
+            h_init = torch.tensor(h_np, dtype=torch.float32).reshape(1, -1)
+        else:
+            h_np = num_nodes * stats.norm.pdf(
+                init_splits_t.numpy(), loc=spec.base_mean, scale=spec.base_stddev
+            )
+            h_init = torch.tensor(h_np, dtype=torch.float32).reshape(1, -1)
+            h_init = h_init * torch.exp(torch.randn_like(h_init) * 0.05)
         h_init = h_init.clamp(min=1e-6)
 
         self._log_heights = torch.log(h_init).requires_grad_(True)  # [1, N-1]
@@ -854,8 +897,9 @@ class QuadraticSplineLeafLayer(SplineLeafLayer):
         num_nodes: int = 1,
         num_groups: int = 1,
         node_supports: Optional[List[ContinuousInterval]] = None,
+        init_split_points: Optional[np.ndarray] = None,
     ):
-        super().__init__(spec, num_nodes, num_groups, node_supports)
+        super().__init__(spec, num_nodes, num_groups, node_supports, init_split_points)
 
         # Initialize free interior widths from the quantile spacing (shared across groups).
         splits = []
@@ -934,8 +978,9 @@ class RationalQuadraticSplineLeafLayer(SplineLeafLayer):
         num_nodes: int = 1,
         num_groups: int = 1,
         node_supports: Optional[List[ContinuousInterval]] = None,
+        init_split_points: Optional[np.ndarray] = None,
     ):
-        super().__init__(spec, num_nodes, num_groups, node_supports)
+        super().__init__(spec, num_nodes, num_groups, node_supports, init_split_points)
 
         if num_nodes <= 2:
             self._log_widths = None

@@ -1,8 +1,9 @@
 import math
 import random
 from enum import Enum
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
+import numpy as np
 import torch
 
 from src.logger import logger as g_logger
@@ -26,12 +27,12 @@ from src.symbolic.arithmetic.nodes.leaf_layer import (
 from src.symbolic.arithmetic.nodes.sum_layer import SumLayer
 from src.symbolic.arithmetic.weights import DenseWeights, SparseWeights
 from src.symbolic.vtree import VNode, VTree
-from src.utils import BitSet
+from src.utils import BitSet, ContinuousInterval
 from src.utils.node_allocator import IncrementalNodeAllocator
 
 
 logger = g_logger.getChild("CircuitBuilder")
-logger.setLevel("WARNING")
+logger.setLevel("ERROR")
 
 
 def find_closest_factor(n: int, max_val: int = None) -> int:
@@ -95,6 +96,7 @@ class CircuitBuilder:
         leaf_mixture_num_nodes: Optional[int] = None,
         leaf_mixture_num_groups: Optional[int] = None,
         fairness_temperature: float = 1.0,
+        leaf_quantile_data: Optional[Dict[int, np.ndarray]] = None,
     ):
         self.vtree = vtree
         self.num_nodes = num_nodes
@@ -110,8 +112,46 @@ class CircuitBuilder:
         self.max_sum_num_groups = max_sum_num_groups
         self.leaf_mixture_num_nodes = leaf_mixture_num_nodes
         self.leaf_mixture_num_groups = leaf_mixture_num_groups
+        # Per-variable sample arrays used to initialize spline leaf splits at
+        # the empirical 1/H-quantiles (with matching boundary heights).  None
+        # falls back to the Gaussian-quantile split_support of the spec.
+        self.leaf_quantile_data = leaf_quantile_data or {}
 
         self.built_nodes = {}
+
+    def _spline_quantile_splits(self, var_id: int, num_intervals: int) -> Optional[np.ndarray]:
+        """Empirical 1/num_intervals-quantile split points for a spline leaf.
+
+        Returns None (caller falls back to ``dist.split_support``) when no data
+        is available or the quantiles are degenerate (too few samples, or tied
+        quantiles from near-discrete data).
+        """
+        samples = self.leaf_quantile_data.get(var_id)
+        if samples is None:
+            return None
+        samples = np.asarray(samples, dtype=np.float64).reshape(-1)
+        samples = samples[np.isfinite(samples)]
+        if samples.size < 10:
+            return None
+        b = np.quantile(samples, np.linspace(0.0, 1.0, num_intervals + 1)[1:-1])
+        b = np.unique(b)
+        if b.size != num_intervals - 1:
+            return None
+        return b
+
+    @staticmethod
+    def _spline_supports_from_splits(
+        splits: np.ndarray, num_intervals: int
+    ) -> List[ContinuousInterval]:
+        return [
+            ContinuousInterval(
+                splits[i - 1] if i > 0 else float("-inf"),
+                splits[i] if i < num_intervals - 1 else float("inf"),
+                include_low=True,
+                include_high=(i == num_intervals - 1),
+            )
+            for i in range(num_intervals)
+        ]
 
     def _handle_leaf(
         self,
@@ -134,12 +174,24 @@ class CircuitBuilder:
             else self.leaf_mixture_num_nodes
         )
 
-        if not is_constrained and vnode.md_set.is_universal:
+        _SPLINE_DISTS = (
+            LogLinearSplineDistribution,
+            LinearSplineDistribution,
+            QuadraticSplineDistribution,
+            RationalQuadraticSplineDistribution,
+        )
+        is_spline = isinstance(dist, _SPLINE_DISTS)
+        quantile_splits = self._spline_quantile_splits(var_id, H_b) if is_spline else None
+        if quantile_splits is not None:
+            leaf_supports = self._spline_supports_from_splits(quantile_splits, H_b)
+        elif not is_constrained and vnode.md_set.is_universal and not is_spline:
             leaf_supports = [dist.var_support] * H_b
         else:
             leaf_supports = dist.split_support(H_b)
 
-        if isinstance(dist, GaussianDistribution) or len(leaf_supports) == 1:
+        if isinstance(dist, GaussianDistribution) or (
+            len(leaf_supports) == 1 and not isinstance(dist, CategoricalDistribution)
+        ):
             base_mean = float(getattr(dist, "base_mean", 0.0))
             base_stddev = float(getattr(dist, "base_stddev", 1.0))
             if base_stddev <= 0:
@@ -152,21 +204,37 @@ class CircuitBuilder:
             )
         elif isinstance(dist, CategoricalDistribution):
             leaf_layer = CategoricalLeafLayer(dist, num_nodes=H, num_groups=G)
-        elif is_constrained and isinstance(dist, LogLinearSplineDistribution):
+        elif isinstance(dist, LogLinearSplineDistribution):
             leaf_layer = LogLinearSplineLeafLayer(
-                dist, num_nodes=H_b, num_groups=G_b, node_supports=leaf_supports
+                dist,
+                num_nodes=H_b,
+                num_groups=G_b,
+                node_supports=leaf_supports,
+                init_split_points=quantile_splits,
             )
-        elif is_constrained and isinstance(dist, LinearSplineDistribution):
+        elif isinstance(dist, LinearSplineDistribution):
             leaf_layer = LinearSplineLeafLayer(
-                dist, num_nodes=H_b, num_groups=G_b, node_supports=leaf_supports
+                dist,
+                num_nodes=H_b,
+                num_groups=G_b,
+                node_supports=leaf_supports,
+                init_split_points=quantile_splits,
             )
-        elif is_constrained and isinstance(dist, QuadraticSplineDistribution):
+        elif isinstance(dist, QuadraticSplineDistribution):
             leaf_layer = QuadraticSplineLeafLayer(
-                dist, num_nodes=H_b, num_groups=G_b, node_supports=leaf_supports
+                dist,
+                num_nodes=H_b,
+                num_groups=G_b,
+                node_supports=leaf_supports,
+                init_split_points=quantile_splits,
             )
-        elif is_constrained and isinstance(dist, RationalQuadraticSplineDistribution):
+        elif isinstance(dist, RationalQuadraticSplineDistribution):
             leaf_layer = RationalQuadraticSplineLeafLayer(
-                dist, num_nodes=H_b, num_groups=G_b, node_supports=leaf_supports
+                dist,
+                num_nodes=H_b,
+                num_groups=G_b,
+                node_supports=leaf_supports,
+                init_split_points=quantile_splits,
             )
         else:
             raise NotImplementedError(f"Unsupported distribution type: {type(dist)}")
@@ -295,15 +363,24 @@ class CircuitBuilder:
         return G_l, H_l, G_r, H_r
 
     def _cap_dead_parents(self, vid: int, G: int, H: int, n: int):
-        """Cap a node's (G, H) so that no sum unit is born dead.
+        """Cap a constrained node's units-per-group H so no sum unit is born dead.
 
-        A constrained parent unit is dead unless it recruits at least one
-        allowed child combination: in (pseudo-)left-mixing layers each parent
-        needs a distinct left child unit (so at most H_L parents), right-mixing
-        symmetrically (H_R), and synthesizing layers recruit unique
-        (h_l, h_r) combinations (so at most H_L * H_R parents). Training cannot
-        revive a structurally dead unit, so the construction must not create
-        any in the first place.
+        Three invariants, and nothing more:
+
+        1. Constrained leaves: at most one unit per category in each group
+           (``_cap_constrained_leaf_units``); groups are unconstrained replicas.
+        2. Constrained parents: units per group are bounded by the number of
+           disjoint children available to each unit — H_L for left-mixing,
+           H_R for right-mixing, H_L * H_R for synthesizing and
+           pseudo-mixing layers. Groups are unconstrained replicas, so only H
+           is capped, never G. (Capping G * H jointly would crush replica
+           groups into single units, collapsing pseudo-mixing parents to one
+           product and factorizing the joint.)
+        3. Every parent unit receives at least one child combination
+           (dimensional guarantee: units-per-group <= disjoint children, and
+           ``_sample_balanced_assignment_filled`` retries until no bin is
+           empty). Training cannot revive a structurally dead unit, so the
+           construction must not create any in the first place.
         """
         if self.vtree.is_leaf(vid):
             return G, H
@@ -320,9 +397,6 @@ class CircuitBuilder:
         if layer_type == LayerType.LEFT_MIXING:
             slots = H_L
         elif layer_type == LayerType.PS_LEFT_MIXING:
-            # PS parents share left indices by design; the construction assigns
-            # (h_l, h_r) pairs to parents, so the only deadness risk is an empty
-            # parent (H <= H_L * H_R), not a shared left unit.
             slots = H_L * H_R
         elif layer_type == LayerType.RIGHT_MIXING:
             slots = H_R
@@ -332,11 +406,7 @@ class CircuitBuilder:
             slots = H_L * H_R
         else:
             return G, H
-        if G * H > slots:
-            H = max(1, slots // G)
-            if G * H > slots:
-                G = max(1, slots // H)
-        return G, H
+        return G, min(H, slots)
 
     def _child_dimensions_raw(
         self,
@@ -500,7 +570,6 @@ class CircuitBuilder:
                 [(i // H_R, i % H_R) for i in row] for row in flat_assignments
             ]  # convert to (left, right) pairs
 
-            print(f"flat_assignments: {assignments}")
             g_l_assignments = self._sample_balanced_assignment(H_L, G_L, fairness_temperature)
             g_ls = [
                 [h_l in g_l_assignments[g_t] for g_t in range(G_L)].index(True)
@@ -536,8 +605,6 @@ class CircuitBuilder:
             flat_assignments = self._sample_balanced_assignment_filled(
                 H_R * H_L, H, fairness_temperature
             )
-            print(f"flat_assignments: {assignments}")
-
             assignments = [
                 [(i // H_R, i % H_R) for i in row] for row in flat_assignments
             ]  # convert to (left, right) pairs
@@ -647,8 +714,7 @@ class CircuitBuilder:
             num_groups=G,
         )
 
-        logger.debug(
-            f"Generating weights for node {vid} with scope {vnode.scope}")
+        logger.debug(f"Generating weights for node {vid} with scope {vnode.scope}")
         # print(f"Generating weights for node {vid} with scope {vnode.scope}")
         w = self._generate_weights(
             G,
@@ -700,8 +766,14 @@ def create_md_circuit(
     max_sum_num_groups: Optional[int] = None,
     leaf_mixture_num_nodes: Optional[int] = None,
     leaf_mixture_num_groups: Optional[int] = None,
+    leaf_quantile_data: Optional[Dict[int, np.ndarray]] = None,
 ) -> SymbolicArithmeticCircuit:
-    """Creates an MD-Circuit end-to-end."""
+    """Creates an MD-Circuit end-to-end.
+
+    ``leaf_quantile_data`` maps variable id to a sample array; spline leaves
+    then initialize their split points at the empirical 1/H-quantiles (with
+    matching boundary heights) instead of the spec's Gaussian quantiles.
+    """
 
     c_builder = CircuitBuilder(
         vtree=md_var_decomp,
@@ -715,5 +787,6 @@ def create_md_circuit(
         max_sum_num_groups=max_sum_num_groups,
         leaf_mixture_num_nodes=leaf_mixture_num_nodes,
         leaf_mixture_num_groups=leaf_mixture_num_groups,
+        leaf_quantile_data=leaf_quantile_data,
     )
     return c_builder.build()
