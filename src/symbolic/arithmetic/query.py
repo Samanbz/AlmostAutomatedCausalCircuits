@@ -67,6 +67,7 @@ def _depth_traced(fn):
 class CircuitCompilationError(Exception):
     pass
 
+
 CoordMap = Tuple[Tuple[Tuple[int, int], ...], Tuple[Tuple[int, int], ...]]
 
 _SHARED, _SIDE1, _SIDE2 = 0, 1, 2
@@ -854,8 +855,8 @@ def _multiply(
             H_L1, H_L2 = l1_node.num_nodes, l2_node.num_nodes
             H_R1, H_R2 = r1_node.num_nodes, r2_node.num_nodes
 
-            l_new_id, l_new_v_id, _ = recurse(*res[0])
-            r_new_id, r_new_v_id, _ = recurse(*res[1])
+            l_new_id, l_new_v_id, l_cmap = recurse(*res[0])
+            r_new_id, r_new_v_id, r_cmap = recurse(*res[1])
 
             l_new_node = new_ac.get_node_data(l_new_id)
             r_new_node = new_ac.get_node_data(r_new_id)
@@ -926,19 +927,94 @@ def _multiply(
                 expand_Ru=e_ru,
             )
 
+            def _raw_weights(w):
+                return w.log_weights if hasattr(w, "log_weights") else w
+
+            def _side_axis_maps(factors, size, side1_dim, side2_dim):
+                """(side1_coords, side2_coords) index tensors for one child axis.
+
+                Returns None when the axis is not in a clean operand-tagged
+                form or does not cover the operand's child dims exactly.
+                """
+                if len(factors) == 2 and {f[0] for f in factors} == {_SIDE1, _SIDE2}:
+                    i1 = 0 if factors[0][0] == _SIDE1 else 1
+                    c1 = _factor_coord(size, factors, i1)
+                    c2 = _factor_coord(size, factors, 1 - i1)
+                elif len(factors) == 1:
+                    (s, _n) = factors[0]
+                    if s == _SHARED:
+                        c1 = c2 = _factor_coord(size, factors, 0)
+                    elif s == _SIDE1:
+                        c1 = _factor_coord(size, factors, 0)
+                        c2 = torch.zeros(size, dtype=torch.long)
+                    else:
+                        c1 = torch.zeros(size, dtype=torch.long)
+                        c2 = _factor_coord(size, factors, 0)
+                else:
+                    return None
+                if size == 0 or int(c1.max()) + 1 != side1_dim or int(c2.max()) + 1 != side2_dim:
+                    return None
+                return c1, c2
+
+            l_cmap_g, l_cmap_u = l_cmap
+            r_cmap_g, r_cmap_u = r_cmap
+            u_shared = (
+                len(l_cmap_u) == 1
+                and len(r_cmap_u) == 1
+                and l_cmap_u[0][0] == _SHARED
+                and r_cmap_u[0][0] == _SHARED
+            )
+            exactly_one_shared_u = (len(l_cmap_u) == 1 and l_cmap_u[0][0] == _SHARED) != (
+                len(r_cmap_u) == 1 and r_cmap_u[0][0] == _SHARED
+            )
+
+            composed_w = None
+            if not exactly_one_shared_u:
+                lm_g = _side_axis_maps(l_cmap_g, l_new_node.num_groups, G_L1, G_L2)
+                lm_u = _side_axis_maps(l_cmap_u, l_new_node.num_nodes, H_L1, H_L2)
+                rm_g = _side_axis_maps(r_cmap_g, r_new_node.num_groups, G_R1, G_R2)
+                rm_u = _side_axis_maps(r_cmap_u, r_new_node.num_nodes, H_R1, H_R2)
+                if None not in (lm_g, lm_u, rm_g, rm_u):
+                    t1 = _raw_weights(s1_node.log_weights)
+                    t2 = _raw_weights(s2_node.log_weights)
+                    dev = t1.device
+                    W1 = (
+                        t1.index_select(2, lm_g[0].to(dev))
+                        .index_select(3, lm_u[0].to(dev))
+                        .index_select(4, rm_g[0].to(dev))
+                        .index_select(5, rm_u[0].to(dev))
+                    )
+                    W2 = (
+                        t2.index_select(2, lm_g[1].to(dev))
+                        .index_select(3, lm_u[1].to(dev))
+                        .index_select(4, rm_g[1].to(dev))
+                        .index_select(5, rm_u[1].to(dev))
+                    )
+                    if u_shared:
+                        composed_w = (W1[:, None] + W2[None, :]).reshape(
+                            G_1 * G_2, H_1, *W1.shape[2:]
+                        )
+                    else:
+                        composed_w = (W1[:, None, :, None] + W2[None, :, None, :]).reshape(
+                            G_1 * G_2, H_1 * H_2, *W1.shape[2:]
+                        )
+
+            expand_U = not u_shared if composed_w is not None else pw.expand_U
+
             G_new = G_1 * G_2
-            H_new = (H_1 * H_2) if pw.expand_U else H_1
+            H_new = (H_1 * H_2) if expand_U else H_1
             G_L_new = G_L1 * G_L2
             H_L_new = (H_L1 * H_L2) if pw.expand_L else H_L1
             G_R_new = G_R1 * G_R2
             H_R_new = (H_R1 * H_R2) if pw.expand_R else H_R1
 
             _mlog(
-                "-> Case 4 weights: U_disjoint=%s, L_disjoint=%s, R_disjoint=%s -> "
-                "G=%d, H=%d, G_L=%d, H_L=%d, G_R=%d, H_R=%d",
+                "-> Case 4 weights: U_disjoint=%s, L_disjoint=%s, R_disjoint=%s, "
+                "composed=%s -> G=%d, H=%d, G_L=%d, H_L=%d, G_R=%d, H_R=%d",
                 U_disjoint,
                 L_disjoint,
                 R_disjoint,
+                composed_w is not None,
                 G_new,
                 H_new,
                 G_L_new,
@@ -953,7 +1029,7 @@ def _multiply(
                 num_groups=G_new,
                 num_nodes=H_new,
             )
-            new_node.log_weights = pw
+            new_node.log_weights = SparseWeights(composed_w) if composed_w is not None else pw
             new_id = new_ac.add_node(new_node)
             new_v_node = VNode(
                 scope=v1_node.scope.union(v2_node.scope),
@@ -965,9 +1041,9 @@ def _multiply(
             new_ac.vtree.add_children(new_v_id, l_new_v_id, r_new_v_id)
             new_ac.sum_to_vtree[new_id] = new_v_id
             new_ac.vtree_to_sum[new_v_id] = new_id
-            # ProductWeights: G side-1 major (g = g1 * G2 + g2); U shared on overlay
-            # (diagonal), side-tagged when one side's unit axis broadcasts.
-            if pw.expand_U:
+            # G side-1 major (g = g1 * G2 + g2); U shared on overlay (diagonal),
+            # side-tagged when one side's unit axis broadcasts.
+            if expand_U:
                 u_factors = ((_SIDE1, H_1), (_SIDE2, H_2))
             elif H_1 == 1 and H_2 == 1:
                 u_factors = ((_SHARED, 1),)
