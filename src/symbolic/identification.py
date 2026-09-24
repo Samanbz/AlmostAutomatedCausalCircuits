@@ -256,12 +256,19 @@ def multiply_factors(factors: List[UncompiledCircuit]) -> UncompiledCircuit:
         return factors[0]
     ast = make_prod([f.ast for f in factors])
 
+    # Complexity K: support-compatible factors (the product retains a
+    # determinism over the shared scope, per the UpdateMult rule) tie
+    # unit-wise, so composing them multiplies no sizes and K folds to the
+    # max; support-incompatible factors multiply sizes and K adds.
     curr_scope, curr_dets = factors[0].variables, factors[0].determinisms
+    complexity = factors[0].complexity
     for f in factors[1:]:
-        curr_dets = _get_prod_determinisms(curr_dets, f.determinisms, curr_scope & f.variables)
+        shared = curr_scope & f.variables
+        compatible = bool(_get_prod_determinisms(curr_dets, f.determinisms, shared))
+        complexity = max(complexity, f.complexity) if compatible else complexity + f.complexity
+        curr_dets = _get_prod_determinisms(curr_dets, f.determinisms, shared)
         curr_scope |= f.variables
 
-    complexity = sum(f.complexity for f in factors)
     return UncompiledCircuit(ast=ast, determinisms=curr_dets, complexity=complexity, factor=None)
 
 
