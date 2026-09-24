@@ -1,0 +1,230 @@
+[
+ {
+  "n": 4,
+  "base": 76,
+  "compiled": 220
+ },
+ {
+  "n": 5,
+  "base": 94,
+  "compiled": 242
+ },
+ {
+  "n": 6,
+  "base": 134,
+  "compiled": 510
+ },
+ {
+  "n": 7,
+  "base": 174,
+  "compiled": 664
+ },
+ {
+  "n": 8,
+  "base": 208,
+  "compiled": 984
+ },
+ {
+  "n": 10,
+  "base": 296,
+  "compiled": 1584
+ },
+ {
+  "n": 11,
+  "base": 406,
+  "compiled": 2600
+ },
+ {
+  "n": 13,
+  "base": 558,
+  "compiled": 4306
+ },
+ {
+  "n": 16,
+  "base": 536,
+  "compiled": 3624
+ },
+ {
+  "n": 19,
+  "base": 1158,
+  "compiled": 13528
+ },
+ {
+  "n": 23,
+  "base": 1678,
+  "compiled": 24056
+ },
+ {
+  "n": 27,
+  "base": 1372,
+  "compiled": 11812
+ },
+ {
+  "n": 32,
+  "base": 1816,
+  "compiled": 14664
+ },
+ {
+  "n": 38,
+  "base": 3208,
+  "compiled": 59544
+ },
+ {
+  "n": 45,
+  "base": null,
+  "compiled": null,
+  "error": "killed (OOM)"
+ },
+ {
+  "n": 9,
+  "base": 194,
+  "compiled": 998
+ },
+ {
+  "n": 12,
+  "base": 356,
+  "compiled": 2000
+ },
+ {
+  "n": 14,
+  "base": 520,
+  "compiled": 3624
+ },
+ {
+  "n": 15,
+  "base": 468,
+  "compiled": 2844
+ },
+ {
+  "n": 17,
+  "base": 934,
+  "compiled": 9674
+ },
+ {
+  "n": 18,
+  "base": 704,
+  "compiled": 4556
+ },
+ {
+  "n": 20,
+  "base": 784,
+  "compiled": 5328
+ },
+ {
+  "n": 21,
+  "base": 860,
+  "compiled": 6192
+ },
+ {
+  "n": 22,
+  "base": 1160,
+  "compiled": 12408
+ },
+ {
+  "n": 24,
+  "base": 1080,
+  "compiled": 7672
+ },
+ {
+  "n": 25,
+  "base": 1036,
+  "compiled": 8232
+ },
+ {
+  "n": 26,
+  "base": 1576,
+  "compiled": 19920
+ },
+ {
+  "n": 28,
+  "base": 1424,
+  "compiled": 10752
+ },
+ {
+  "n": 29,
+  "base": 2638,
+  "compiled": 48338
+ },
+ {
+  "n": 30,
+  "base": null,
+  "compiled": null,
+  "error": "killed (OOM)"
+ },
+ {
+  "n": 31,
+  "base": 3006,
+  "compiled": 59080
+ },
+ {
+  "n": 33,
+  "base": 2004,
+  "compiled": 20280
+ },
+ {
+  "n": 34,
+  "base": 2600,
+  "compiled": 43104
+ },
+ {
+  "n": 35,
+  "base": null,
+  "compiled": null,
+  "error": "killed (OOM)"
+ },
+ {
+  "n": 36,
+  "base": null,
+  "compiled": null,
+  "error": "killed (OOM)"
+ },
+ {
+  "n": 37,
+  "base": 4254,
+  "compiled": 100594
+ },
+ {
+  "n": 39,
+  "base": 2756,
+  "compiled": 32172
+ },
+ {
+  "n": 40,
+  "base": null,
+  "compiled": null,
+  "error": "killed (OOM)"
+ },
+ {
+  "n": 41,
+  "base": 5206,
+  "compiled": 136970
+ },
+ {
+  "n": 42,
+  "base": null,
+  "compiled": null,
+  "error": "killed (OOM)"
+ },
+ {
+  "n": 43,
+  "base": 5718,
+  "compiled": 158056
+ },
+ {
+  "n": 44,
+  "base": null,
+  "compiled": null,
+  "error": "killed (OOM)"
+ },
+ {
+  "n": 46,
+  "base": null,
+  "compiled": null,
+  "error": "killed (OOM)"
+ },
+ {
+  "n": 47,
+  "base": 6814,
+  "compiled": 206504
+ }
+]
