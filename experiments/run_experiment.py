@@ -1,20 +1,18 @@
-"""Run a reproducible causal-circuit experiment: training + evaluation.
+"""Run a reproducible causal-circuit experiment: training only.
 
 Follows the general experiment recipe, per seed run:
 
     1. Construct the MD circuit from the dataset and config.
-    2. Identify the target estimand with T-ID (``experiments/utils/identification.py``)
-       and build the estimand AST — before any training, so unidentifiable or
-       non-tractable queries abort early.
-    3. Compile the interventional query circuit — sharing parameter tensors
-       with the (trained) base circuit.
-    4. Train on the observational data; every ``checkpoint_every_epochs``
+    2. Train on the observational data; every ``checkpoint_every_epochs``
        epochs save a checkpoint and decay the step size.  No dataset-wide
        NLL evaluations happen here — they are run post-hoc from the saved
        checkpoints.
-    5. Store everything the (separate) plotting step needs: 2-D grid
-       evaluations of P(Y|do(X)) and P(Y|X), 1-D slice contexts of X, and
-       reproducibility metadata.  No plots here.
+    3. Save the final model.
+
+Identification, query compilation, evaluation and plotting are deliberately
+NOT part of this script: a later step loads each checkpoint and evaluates it
+on the test data (e.g. comparing how N=8/16/32/64/128 converge with
+training), then plotting is a separate post-processing step.
 
 Multi-seed runs for the cluster: pass ``--seeds 27 28 29`` to run each seed
 in its own subprocess, pinned round-robin to ``--gpus`` (default: all visible
@@ -23,9 +21,9 @@ runs in-process.  Averaging across seeds happens in post-processing.
 
 Artifacts::
 
-    results/<exp_id>/seed_<S>/{config.json,metadata.json,metrics.json,grids.npz,<exp_id>_seed<S>.log}
-    models/<exp_id>/<exp_id>_seed<S>_epoch_XXXX.pt
-    models/<exp_id>/<exp_id>_seed<S>_final.pt
+    results/<exp_id>/seed_<S>/{config.json,metadata.json,metrics.json,<exp_id>_seed<S>.log}
+    models/<exp_id>/seed_<S>/<exp_id>_epoch_XXXX.pt
+    models/<exp_id>/seed_<S>/<exp_id>_final.pt
 
 Runs are resumable (an existing final model or checkpoint is reused instead
 of retrained).  A content hash of the checkpoint-relevant config sections is
@@ -57,6 +55,7 @@ from experiments.utils.config import (
     get_device,
     invalidate_artifacts,
     load_config,
+    models_seed_dir,
     read_stored_checkpoint_hash,
     run_prefix,
     save_config_copy,
@@ -66,9 +65,7 @@ from experiments.utils.config import (
     write_metadata,
 )
 from experiments.utils.data import build_circuit, load_data
-from experiments.utils.evaluation import evaluate_and_store, write_metrics
-from experiments.utils.identification import identify_estimands
-from experiments.utils.queries import compile_queries
+from experiments.utils.evaluation import write_metrics
 from experiments.utils.training import (
     find_latest_checkpoint,
     load_circuit,
@@ -76,7 +73,6 @@ from experiments.utils.training import (
     save_final_model,
     train_model,
 )
-from experiments.utils.wandb_logging import finish_wandb, init_wandb
 from src.logger import logger as g_logger
 
 
@@ -89,8 +85,8 @@ def _handle_stale_config(
     """Ask to invalidate artifacts when the checkpoint-relevant config changed.
 
     Only ``dataset`` / ``model`` / ``training`` / ``experiment.seed`` changes
-    (see ``checkpoint_hash``) trigger invalidation; evaluation or wandb edits
-    never do. Metadata written before checkpoint-aware hashing has no
+    (see ``checkpoint_hash``) trigger invalidation; evaluation edits never do.
+    Metadata written before checkpoint-aware hashing has no
     ``checkpoint_hash`` and only gets a soft warning, not a prompt.
     """
     stored = read_stored_checkpoint_hash(results_seed_dir)
@@ -130,8 +126,10 @@ def run_single(cfg: dict, config_path: str, cfg_hash: str, seed: int, yes_invali
 
     exp_id = cfg["experiment"]["id"]
     output_dir = cfg["experiment"]["output_dir"]
-    models_dir = cfg["experiment"]["models_dir"]
-    prefix = run_prefix(exp_id, seed)
+    # Per-seed models directory: models/<exp_id>/seed_<S>/ with <exp_id>_*.pt
+    # files inside.  The log file keeps the seed-qualified name.
+    models_dir = models_seed_dir(cfg["experiment"]["models_dir"], exp_id, seed)
+    prefix = exp_id
     results_seed_dir = seed_dir(output_dir, seed)
     # Hash the *effective* config (after CLI overrides) — this is what the
     # stored metadata is compared against on the next run.
@@ -142,26 +140,20 @@ def run_single(cfg: dict, config_path: str, cfg_hash: str, seed: int, yes_invali
     os.makedirs(results_seed_dir, exist_ok=True)
     os.makedirs(models_dir, exist_ok=True)
 
-    setup_logging(results_seed_dir, prefix)
+    setup_logging(results_seed_dir, run_prefix(exp_id, seed))
     logger.info("Starting experiment %s (seed %d)", exp_id, seed)
     logger.info("Config path: %s (hash %s)", os.path.abspath(config_path), cfg_hash)
 
     save_config_copy(cfg, results_seed_dir)
-    wandb_run = init_wandb(cfg, seed)
 
     set_seed(seed)
     device = get_device(cfg["experiment"].get("device"))
     logger.info("Using device: %s", device)
 
     # ------------------------------------------------------------------
-    # Data + model (recipe steps 1-3)
+    # Data + model (recipe step 1)
     # ------------------------------------------------------------------
     data_info = load_data(cfg)
-
-    # Recipe step 2 — identification runs *before* training: an unidentifiable
-    # query or an uncovered conditioning scope (TractabilityError) must abort
-    # the run before any compute is spent on training.
-    estimands = identify_estimands(cfg, data_info)
 
     ac, dists = build_circuit(cfg, data_info["data"], data_info, device)
 
@@ -217,31 +209,23 @@ def run_single(cfg: dict, config_path: str, cfg_hash: str, seed: int, yes_invali
     )
 
     # ------------------------------------------------------------------
-    # Post-training artifacts (recipe step 5)
+    # Post-training artifacts (recipe step 3): final model only.
+    # Identification / query compilation / evaluation are post-hoc steps.
     # ------------------------------------------------------------------
-    # Query circuits are compiled only after training: no do-evaluations are
-    # needed during training anymore, and they share parameter tensors with
-    # the trained base circuit (recipe steps 2-3).
-    query_acs = compile_queries(ac, estimands, data_info)
-
     metrics = {
         "seed": seed,
         "epochs_total": total_epochs,
         "history": [],
-        "note": "NLLs are evaluated post-hoc from the saved checkpoints.",
+        "note": "NLLs and query evaluations are run post-hoc from the saved checkpoints.",
     }
     write_metrics(metrics, results_seed_dir)
 
     if cfg["checkpointing"].get("save_final", True):
         save_final_model(ac, models_dir, prefix)
 
-    # 2-D grid and 1-D slice evaluations for the plotting step.
-    evaluate_and_store(query_acs, data_info, cfg, device, results_seed_dir)
-
     end_time = datetime.now(timezone.utc).isoformat()
     write_metadata(cfg, results_seed_dir, seed, start_time, end_time, cfg_hash, str(device))
 
-    finish_wandb(wandb_run)
     logger.info("Experiment %s (seed %d) finished.", exp_id, seed)
 
 

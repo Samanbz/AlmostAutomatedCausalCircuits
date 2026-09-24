@@ -134,8 +134,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--output-dir",
-        default="scratch/plots/leaves",
-        help="Directory where leaf figures are saved.",
+        default=None,
+        help="Directory where leaf figures are saved (default: the results seed directory).",
     )
     parser.add_argument(
         "--bins",
@@ -157,7 +157,7 @@ def main() -> None:
 
     plot_all_leaves(
         args.results_dir,
-        output_dir=args.output_dir,
+        output_dir=args.output_dir or args.results_dir,
         bins=args.bins,
         plot_components=args.plot_components,
         no_empirical=args.no_empirical,

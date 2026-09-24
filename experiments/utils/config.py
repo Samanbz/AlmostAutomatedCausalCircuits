@@ -3,8 +3,11 @@
 Artifact layout (per experiment ID and seed):
 
     results/<exp_id>/seed_<S>/{config.json,metadata.json,metrics.json,grids.npz,<exp_id>_seed<S>.log}
-    models/<exp_id>/<exp_id>_seed<S>_epoch_XXXX.pt
-    models/<exp_id>/<exp_id>_seed<S>_final.pt
+    models/<exp_id>/seed_<S>/<exp_id>_epoch_XXXX.pt
+    models/<exp_id>/seed_<S>/<exp_id>_final.pt
+
+Plotting / evaluation scripts save their outputs into the seed's results
+directory (``results/<exp_id>/seed_<S>/``) by default.
 
 The experiment ID is the config file name (never its contents), so artifacts
 stay addressable across config edits; a content hash of the
@@ -65,8 +68,8 @@ _MODEL_DEFAULTS = {
 }
 
 # Sections that influence the trained model or the training run. Edits confined
-# to the other sections (evaluation, checkpointing, wandb, device/output
-# paths) must not invalidate existing checkpoints.
+# to the other sections (evaluation, checkpointing, device/output paths) must
+# not invalidate existing checkpoints.
 _CHECKPOINT_SECTIONS = ("experiment", "dataset", "model", "training")
 
 
@@ -74,8 +77,8 @@ def checkpoint_hash(cfg: Dict[str, Any]) -> str:
     """Hash of only the checkpoint-relevant parts of the config.
 
     Covers ``experiment.seed``, ``dataset``, ``model`` (with default-valued
-    keys stripped) and ``training``; evaluation/wandb settings and
-    behavior-neutral model keys are ignored.
+    keys stripped) and ``training``; evaluation settings and behavior-neutral
+    model keys are ignored.
     """
     relevant = {}
     for section in _CHECKPOINT_SECTIONS:
@@ -108,6 +111,17 @@ def seed_dir(output_dir: str, seed: int) -> str:
     return os.path.join(output_dir, f"seed_{seed}")
 
 
+def models_seed_dir(models_dir: str, exp_id: str, seed: int) -> str:
+    """Per-seed models directory: ``models/<exp_id>/seed_<S>/``.
+
+    Checkpoint file names inside it carry the experiment id only (the seed is
+    already in the path); the pre-seed-dir layout
+    (``models/<exp_id>/<exp_id>_seed<S>_*.pt``) is handled as a legacy
+    fallback by the loaders, not produced anymore.
+    """
+    return os.path.join(models_dir, exp_id, f"seed_{seed}")
+
+
 def read_stored_checkpoint_hash(results_seed_dir: str) -> Optional[str]:
     """Checkpoint-relevant hash recorded by the previous run of this seed, if any.
 
@@ -125,7 +139,11 @@ def read_stored_checkpoint_hash(results_seed_dir: str) -> Optional[str]:
 
 
 def invalidate_artifacts(results_seed_dir: str, models_dir: str, prefix: str) -> None:
-    """Delete every artifact produced by previous runs of this seed run."""
+    """Delete every artifact produced by previous runs of this seed run.
+
+    ``models_dir`` is the per-seed models directory and ``prefix`` the
+    checkpoint file prefix inside it.
+    """
     for path in glob.glob(os.path.join(models_dir, f"{prefix}_epoch_*.pt")):
         os.remove(path)
     final = os.path.join(models_dir, f"{prefix}_final.pt")
@@ -133,6 +151,11 @@ def invalidate_artifacts(results_seed_dir: str, models_dir: str, prefix: str) ->
         os.remove(final)
     if os.path.isdir(results_seed_dir):
         shutil.rmtree(results_seed_dir)
+    # Remove the (now possibly empty) per-seed models directory and its
+    # experiment-level parent.
+    for d in (models_dir, os.path.dirname(models_dir)):
+        if os.path.isdir(d) and not os.listdir(d):
+            os.rmdir(d)
 
 
 def apply_overrides(cfg: Dict[str, Any], overrides: list[str]) -> Dict[str, Any]:

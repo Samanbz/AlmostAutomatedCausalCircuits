@@ -2,7 +2,7 @@
 
 import os
 from glob import glob
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Optional, Set
 
 import numpy as np
 import pandas as pd
@@ -10,8 +10,9 @@ import torch
 
 from src.construction.circuit_builder import create_md_circuit
 from src.construction.learned_vtree import construct_optimal_md_vtree
+from src.construction.vtree_spec import build_vtree_from_spec
 from src.logger import logger as g_logger
-from src.symbolic.arithmetic.nodes import GaussianDistribution
+from src.symbolic.arithmetic.nodes import CategoricalDistribution, GaussianDistribution
 from src.symbolic.arithmetic.nodes.leaf_layer import LogLinearSplineDistribution
 
 
@@ -236,24 +237,51 @@ def _make_leaf_distribution(
     dist_cfg: Dict[str, Any],
     data_mean: np.ndarray,
     data_std: np.ndarray,
+    categories: List[Any] = None,
 ) -> Any:
     """Instantiate a leaf distribution from the config block."""
     dist_type = dist_cfg.get("distribution", "log_linear_spline").lower()
-    scale = dist_cfg.get("base_stddev_scale", 2.0)
 
     if dist_type == "gaussian":
         return GaussianDistribution(
             var=var,
             base_mean=float(data_mean[var]),
-            base_stddev=float(data_std[var]) * scale,
+            base_stddev=float(data_std[var]),
+        )
+    if dist_type == "categorical":
+        if categories is None:
+            raise ValueError(
+                "Categorical leaf requires discrete observed values; "
+                "got a continuous column (or no categories passed)."
+            )
+        return CategoricalDistribution(
+            var=var,
+            categories=list(categories),
+            probabilities=[1.0 / len(categories)] * len(categories),
         )
     if dist_type in {"log_linear_spline", "spline"}:
         return LogLinearSplineDistribution(
             var=var,
             base_mean=float(data_mean[var]),
-            base_stddev=float(data_std[var]) * scale,
+            base_stddev=float(data_std[var]),
         )
     raise ValueError(f"Unsupported leaf distribution: {dist_type}")
+
+
+def discrete_categories(
+    cfg: Dict[str, Any], data_info: Dict[str, Any], var_name: str
+) -> Optional[List[float]]:
+    """Sorted observed category values if ``var_name`` uses a categorical leaf.
+
+    Returns None for continuous variables (spline/Gaussian leaves).  Plotting
+    uses this to pick category grids / bar rendering instead of quantile
+    grids / density curves.
+    """
+    leaf_cfg = cfg.get("model", {}).get("leaf", {})
+    block = leaf_cfg.get(var_name, leaf_cfg.get("default", {}))
+    if block.get("distribution", "log_linear_spline").lower() != "categorical":
+        return None
+    return sorted(float(v) for v in data_info["df_obs_full"][var_name].unique())
 
 
 def build_circuit(
@@ -270,17 +298,41 @@ def build_circuit(
     y_id = data_info["y_id"]
 
     md_sets = data_info["md_sets"]
-    md_vtree = construct_optimal_md_vtree(data, md_sets, keep_together=[(x_id, y_id)])
+    vtree_spec = model_cfg.get("vtree")
+    if vtree_spec:
+        # Config-pinned shape (Newick-style, e.g. "((Z,X),(M,Y))"); the MD
+        # labeling is still computed from md_sets. Use for structures whose
+        # COAST kernels require a specific decomposition that learning does
+        # not reliably find (e.g. colliderdoor).
+        md_vtree = build_vtree_from_spec(vtree_spec, data_info["var_to_id"])
+        md_vtree.compute_md_labeling(md_sets)
+        logger.info("Using config-pinned vtree: %s", vtree_spec)
+    else:
+        md_vtree = construct_optimal_md_vtree(data, md_sets, keep_together=[(x_id, y_id)])
 
     leaf_cfg = model_cfg.get("leaf", {})
     dists = {}
+    df_obs = data_info["df_obs"]
     for name, vid in data_info["var_to_id"].items():
         dists[vid] = _make_leaf_distribution(
             vid,
             leaf_cfg.get(name, leaf_cfg.get("default", {"distribution": "log_linear_spline"})),
             data_info["data_mean"],
             data_info["data_std"],
+            categories=sorted(int(v) for v in df_obs[name].unique())
+            if leaf_cfg.get(name, leaf_cfg.get("default", {}))
+            .get("distribution", "log_linear_spline")
+            .lower()
+            == "categorical"
+            else None,
         )
+
+    # Empirical per-variable samples so spline leaves initialize their splits
+    # at the empirical 1/H-quantiles (matching boundary heights) instead of the
+    # spec's Gaussian quantiles.
+    leaf_quantile_data = {
+        vid: data[:, vid].detach().cpu().numpy() for vid in data_info["var_to_id"].values()
+    }
 
     ac = create_md_circuit(
         dists,
@@ -294,6 +346,7 @@ def build_circuit(
         max_sum_num_groups=model_cfg.get("max_sum_num_groups"),
         leaf_mixture_num_nodes=model_cfg.get("leaf_mixture_num_nodes"),
         leaf_mixture_num_groups=model_cfg.get("leaf_mixture_num_groups"),
+        leaf_quantile_data=leaf_quantile_data,
     )
     ac.to(device)
 

@@ -7,7 +7,7 @@ from typing import Any, Dict, Tuple
 
 import torch
 
-from experiments.utils.config import get_device
+from experiments.utils.config import get_device, models_seed_dir
 from experiments.utils.data import load_data
 from experiments.utils.identification import identify_estimands
 from experiments.utils.queries import compile_queries
@@ -28,7 +28,7 @@ def _run_prefix(cfg: Dict[str, Any], seed: int) -> str:
 
 def _seed_from_dir(results_seed_dir: str) -> int:
     """Infer the seed from a results directory named ``.../seed_<S>``."""
-    match = re.search(r"seed_(\d+)", os.path.basename(results_seed_dir))
+    match = re.search(r"seed_(\d+)", os.path.basename(os.path.normpath(results_seed_dir)))
     if match is None:
         raise ValueError(f"Could not infer seed from results dir: {results_seed_dir}")
     return int(match.group(1))
@@ -38,6 +38,10 @@ def load_trained_artifacts(
     results_seed_dir: str, device: torch.device = None
 ) -> Tuple[Dict[str, Any], Any, Dict[str, Any], Dict[str, Any], torch.device]:
     """Load config, trained circuit, data_info, compiled query circuits, and device.
+
+    Looks for checkpoints in the per-seed models directory
+    (``models/<exp_id>/seed_<S>/``), falling back to the legacy flat layout
+    (``models/<exp_id>/<exp_id>_seed<S>_*.pt``) for runs that predate it.
 
     Returns:
         (cfg, ac, data_info, query_acs, device)
@@ -49,8 +53,13 @@ def load_trained_artifacts(
     data_info = load_data(cfg)
 
     seed = _seed_from_dir(results_seed_dir)
-    models_dir = cfg["experiment"]["models_dir"]
-    prefix = _run_prefix(cfg, seed)
+    exp_id = cfg["experiment"]["id"]
+    models_dir = models_seed_dir(cfg["experiment"]["models_dir"], exp_id, seed)
+    prefix = exp_id
+    if not os.path.isdir(models_dir):
+        # Legacy flat layout: models/<exp_id>/<exp_id>_seed<S>_*.pt
+        models_dir = cfg["experiment"]["models_dir"]
+        prefix = _run_prefix(cfg, seed)
     final_path = os.path.join(models_dir, f"{prefix}_final.pt")
     if os.path.exists(final_path):
         model_path = final_path

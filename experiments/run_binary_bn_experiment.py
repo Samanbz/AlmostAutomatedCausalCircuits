@@ -45,6 +45,7 @@ from experiments.utils.config import (
     config_hash,
     get_device,
     load_config,
+    models_seed_dir,
     run_prefix,
     save_config_copy,
     seed_dir,
@@ -169,8 +170,10 @@ def run_single(cfg: dict, config_path: str, cfg_hash: str, seed: int, yes_invali
 
     exp_id = cfg["experiment"]["id"]
     output_dir = cfg["experiment"]["output_dir"]
-    models_dir = cfg["experiment"]["models_dir"]
-    prefix = run_prefix(exp_id, seed)
+    # Per-seed models directory: models/<exp_id>/seed_<S>/ with <exp_id>_*.pt
+    # files inside.  The log file keeps the seed-qualified name.
+    models_dir = models_seed_dir(cfg["experiment"]["models_dir"], exp_id, seed)
+    prefix = exp_id
     results_seed_dir = seed_dir(output_dir, seed)
     ckpt_hash = checkpoint_hash(cfg)
 
@@ -179,7 +182,7 @@ def run_single(cfg: dict, config_path: str, cfg_hash: str, seed: int, yes_invali
     os.makedirs(results_seed_dir, exist_ok=True)
     os.makedirs(models_dir, exist_ok=True)
 
-    setup_logging(results_seed_dir, prefix)
+    setup_logging(results_seed_dir, run_prefix(exp_id, seed))
     logger.info("Starting experiment %s (seed %d)", exp_id, seed)
     logger.info("Config path: %s (hash %s)", os.path.abspath(config_path), cfg_hash)
     save_config_copy(cfg, results_seed_dir)
