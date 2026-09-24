@@ -1,0 +1,79 @@
+{
+  "skeleton": {
+    "variables": [
+      {
+        "name": "U1",
+        "kind": "discrete",
+        "cardinality": 2,
+        "hidden": true
+      },
+      {
+        "name": "U2",
+        "kind": "discrete",
+        "cardinality": 2,
+        "hidden": true
+      },
+      {
+        "name": "Z",
+        "kind": "discrete",
+        "cardinality": 2,
+        "hidden": false
+      },
+      {
+        "name": "X",
+        "kind": "discrete",
+        "cardinality": 2,
+        "hidden": false
+      },
+      {
+        "name": "M",
+        "kind": "discrete",
+        "cardinality": 2,
+        "hidden": false
+      },
+      {
+        "name": "Y",
+        "kind": "continuous",
+        "cardinality": null,
+        "hidden": false
+      }
+    ],
+    "edges": [
+      [
+        "U1",
+        "Z"
+      ],
+      [
+        "U1",
+        "Y"
+      ],
+      [
+        "U2",
+        "X"
+      ],
+      [
+        "U2",
+        "Y"
+      ],
+      [
+        "Z",
+        "M"
+      ],
+      [
+        "X",
+        "M"
+      ],
+      [
+        "M",
+        "Y"
+      ]
+    ]
+  },
+  "treatments": [
+    "X"
+  ],
+  "mechanism_kwargs": {},
+  "n_samples": 100000,
+  "seed": 47,
+  "dataset_name": "colliderdoor_mix_ZXMd_Yc_100K"
+}

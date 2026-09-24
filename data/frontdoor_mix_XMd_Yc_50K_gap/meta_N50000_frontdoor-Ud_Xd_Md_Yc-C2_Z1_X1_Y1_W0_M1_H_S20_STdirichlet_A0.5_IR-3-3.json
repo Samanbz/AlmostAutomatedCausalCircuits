@@ -1,0 +1,76 @@
+{
+  "skeleton": {
+    "variables": [
+      {
+        "name": "U",
+        "kind": "discrete",
+        "cardinality": 2,
+        "hidden": true
+      },
+      {
+        "name": "X",
+        "kind": "discrete",
+        "cardinality": 2,
+        "hidden": false
+      },
+      {
+        "name": "M",
+        "kind": "discrete",
+        "cardinality": 2,
+        "hidden": false
+      },
+      {
+        "name": "Y",
+        "kind": "continuous",
+        "cardinality": null,
+        "hidden": false
+      }
+    ],
+    "edges": [
+      [
+        "X",
+        "M"
+      ],
+      [
+        "M",
+        "Y"
+      ],
+      [
+        "U",
+        "X"
+      ],
+      [
+        "U",
+        "Y"
+      ]
+    ]
+  },
+  "treatments": [
+    "X"
+  ],
+  "mechanism_kwargs": {
+    "discrete_strategy": "dirichlet",
+    "regions": 2,
+    "dirichlet_alpha": 0.5,
+    "gmm_components": [
+      2,
+      3,
+      4
+    ],
+    "coef_range": [
+      0.5,
+      2.0
+    ],
+    "sigma2_range": [
+      0.25,
+      2.0
+    ],
+    "intercept_range": [
+      -3.0,
+      3.0
+    ]
+  },
+  "n_samples": 50000,
+  "seed": 20,
+  "dataset_name": "frontdoor_mix_XMd_Yc_50K_gap"
+}

@@ -1,0 +1,109 @@
+{
+  "skeleton": {
+    "variables": [
+      {
+        "name": "U1",
+        "kind": "continuous",
+        "cardinality": null,
+        "hidden": true
+      },
+      {
+        "name": "U2",
+        "kind": "continuous",
+        "cardinality": null,
+        "hidden": true
+      },
+      {
+        "name": "Z",
+        "kind": "continuous",
+        "cardinality": null,
+        "hidden": false
+      },
+      {
+        "name": "X",
+        "kind": "continuous",
+        "cardinality": null,
+        "hidden": false
+      },
+      {
+        "name": "M",
+        "kind": "continuous",
+        "cardinality": null,
+        "hidden": false
+      },
+      {
+        "name": "Y",
+        "kind": "continuous",
+        "cardinality": null,
+        "hidden": false
+      }
+    ],
+    "edges": [
+      [
+        "U1",
+        "Z"
+      ],
+      [
+        "U1",
+        "Y"
+      ],
+      [
+        "U2",
+        "X"
+      ],
+      [
+        "U2",
+        "Y"
+      ],
+      [
+        "Z",
+        "M"
+      ],
+      [
+        "X",
+        "M"
+      ],
+      [
+        "M",
+        "Y"
+      ]
+    ]
+  },
+  "treatments": [
+    "X"
+  ],
+  "mechanism_kwargs": {
+    "discrete_strategy": "regional",
+    "regions": 2,
+    "dirichlet_alpha": 1.0,
+    "gmm_components": [
+      2,
+      3,
+      4
+    ],
+    "coef_range": [
+      0.5,
+      2.0
+    ],
+    "sigma2_range": [
+      0.25,
+      2.0
+    ],
+    "intercept_range": [
+      -1.0,
+      1.0
+    ],
+    "edge_coefs": {
+      "U1->Z": 1.0,
+      "U1->Y": 1.0,
+      "U2->X": 2.5,
+      "U2->Y": 2.0,
+      "Z->M": 1.5,
+      "X->M": 1.0,
+      "M->Y": 1.0
+    }
+  },
+  "n_samples": 100000,
+  "seed": 47,
+  "dataset_name": "colliderdoor_cont_100K"
+}

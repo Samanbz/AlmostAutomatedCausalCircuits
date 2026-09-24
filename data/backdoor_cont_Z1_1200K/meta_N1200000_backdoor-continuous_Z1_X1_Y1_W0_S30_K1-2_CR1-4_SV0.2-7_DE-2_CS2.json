@@ -1,0 +1,67 @@
+{
+  "skeleton": {
+    "variables": [
+      {
+        "name": "Z_0",
+        "kind": "continuous",
+        "cardinality": null,
+        "hidden": false
+      },
+      {
+        "name": "X",
+        "kind": "continuous",
+        "cardinality": null,
+        "hidden": false
+      },
+      {
+        "name": "Y",
+        "kind": "continuous",
+        "cardinality": null,
+        "hidden": false
+      }
+    ],
+    "edges": [
+      [
+        "Z_0",
+        "X"
+      ],
+      [
+        "Z_0",
+        "Y"
+      ],
+      [
+        "X",
+        "Y"
+      ]
+    ]
+  },
+  "treatments": [
+    "X"
+  ],
+  "mechanism_kwargs": {
+    "discrete_strategy": "regional",
+    "regions": 2,
+    "dirichlet_alpha": 1.0,
+    "gmm_components": [
+      1,
+      2
+    ],
+    "coef_range": [
+      1.0,
+      4.0
+    ],
+    "sigma2_range": [
+      0.2,
+      7.0
+    ],
+    "intercept_range": [
+      -1.0,
+      1.0
+    ],
+    "direct_effect": -2.0,
+    "confounding_strength": 2.0
+  },
+  "n_samples": 1200000,
+  "seed": 30,
+  "dataset_name": "backdoor_cont_Z1_1200K"
+}
