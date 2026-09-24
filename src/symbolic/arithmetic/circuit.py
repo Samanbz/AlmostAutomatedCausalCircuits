@@ -1,8 +1,8 @@
 import contextlib
 from typing import Any, Dict, List, Optional, Type
 
+import numpy as np
 import torch
-from wandb.util import np
 
 from src.utils import BitSet, NodeAllocator
 
