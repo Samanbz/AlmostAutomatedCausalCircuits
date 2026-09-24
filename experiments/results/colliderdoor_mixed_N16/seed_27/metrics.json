@@ -1,0 +1,6 @@
+{
+  "seed": 27,
+  "epochs_total": 201,
+  "history": [],
+  "note": "NLLs and query evaluations are run post-hoc from the saved checkpoints."
+}
