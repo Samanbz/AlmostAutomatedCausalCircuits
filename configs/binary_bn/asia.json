@@ -1,0 +1,52 @@
+{
+  "experiment": {
+    "seed": 0,
+    "output_dir": "experiments/results/binary_bn/asia",
+    "models_dir": "experiments/models/binary_bn/asia",
+    "device": null
+  },
+  "dataset": {
+    "name": "asia",
+    "path": "data/asia.pkl",
+    "data_dir": "data",
+    "x": [
+      "bronc"
+    ],
+    "y": [
+      "dysp"
+    ],
+    "z": [
+      "smoke",
+      "lung",
+      "asia",
+      "tub"
+    ],
+    "x_val": 0,
+    "y_val": 0,
+    "target": 0.8065,
+    "dataset": "asia"
+  },
+  "model": {
+    "num_nodes": 10,
+    "fairness_temperature": 10.0,
+    "weight_softmax_temperature": 0.5,
+    "max_leaf_num_nodes": 2
+  },
+  "training": {
+    "total_iters": 50,
+    "batch_size": 256,
+    "step_size": 1.0,
+    "decay_rate": 1.0,
+    "decay_every": 1,
+    "log_interval": 25,
+    "leaf_lr": 0.05
+  },
+  "checkpointing": {
+    "checkpoint_every_epochs": 0,
+    "save_initial": false,
+    "save_final": true
+  },
+  "evaluation": {
+    "eval_batch_size": 512
+  }
+}

@@ -1,0 +1,61 @@
+{
+  "experiment": {
+    "seed": 27,
+    "device": null,
+    "output_dir": "experiments/results/frontdoor_mixed_N16",
+    "models_dir": "experiments/models/frontdoor_mixed_N16"
+  },
+  "dataset": {
+    "data_dir": "data",
+    "dataset": "frontdoor_mix_XMd_Yc_50K_gap",
+    "train_size": 0.9
+  },
+  "model": {
+    "n_confounders": 0,
+    "num_nodes": 16,
+    "vtree": "(X,(Y,M))",
+    "md_sets": [
+      "X",
+      "XM"
+    ],
+    "fairness_temperature": 3.0,
+    "max_leaf_num_nodes": 2,
+    "leaf": {
+      "X": {
+        "distribution": "categorical"
+      },
+      "M": {
+        "distribution": "categorical"
+      },
+      "Y": {
+        "distribution": "log_linear_spline"
+      },
+      "default": {
+        "distribution": "log_linear_spline"
+      }
+    }
+  },
+  "training": {
+    "batch_size": 4096,
+    "total_iters": 300,
+    "step_size": 0.1,
+    "decay_rate": 0.98,
+    "decay_every": 5,
+    "log_interval": 20,
+    "leaf_lr": null
+  },
+  "checkpointing": {
+    "checkpoint_every_epochs": 50,
+    "save_initial": true,
+    "save_final": true
+  },
+  "evaluation": {
+    "grid_x_points": 100,
+    "grid_y_points": 200,
+    "grid_x_quantile_range": [
+      0.005,
+      0.995
+    ],
+    "slice_contexts": 16
+  }
+}

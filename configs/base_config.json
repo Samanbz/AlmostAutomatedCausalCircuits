@@ -1,0 +1,56 @@
+{
+  "experiment": {
+    "seed": 27,
+    "device": null,
+    "output_dir": "experiments/results/...",
+    "models_dir": "models"
+  },
+  "dataset": {
+    "data_dir": "data",
+    "dataset": "...",
+    "train_size": 0.8
+  },
+  "model": {
+    "n_confounders": 2,
+    "num_nodes": 4,
+    "md_sets": "XZ",
+    "fairness_temperature": 1.0,
+    "leaf": {
+      "Y": {
+        "distribution": "gaussian"
+      },
+      "default": {
+        "distribution": "log_linear_spline"
+      }
+    },
+    "weight_softmax_temperature": 0.5,
+    "max_leaf_num_nodes": null,
+    "max_leaf_num_groups": null,
+    "max_sum_num_groups": null,
+    "leaf_mixture_num_nodes": null,
+    "leaf_mixture_num_groups": null
+  },
+  "training": {
+    "batch_size": 4096,
+    "total_iters": 50,
+    "step_size": 0.1,
+    "decay_rate": 0.98,
+    "decay_every": 5,
+    "log_interval": 5,
+    "leaf_lr": null
+  },
+  "checkpointing": {
+    "checkpoint_every_epochs": 10,
+    "save_initial": true,
+    "save_final": true
+  },
+  "evaluation": {
+    "grid_x_points": 100,
+    "grid_y_points": 200,
+    "grid_x_quantile_range": [
+      0.005,
+      0.995
+    ],
+    "slice_contexts": 16
+  }
+}

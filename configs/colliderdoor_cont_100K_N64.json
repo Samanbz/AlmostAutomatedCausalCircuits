@@ -1,0 +1,54 @@
+{
+  "experiment": {
+    "seed": 27,
+    "device": null,
+    "output_dir": "experiments/results/colliderdoor_cont_100K_N64",
+    "models_dir": "experiments/models/colliderdoor_cont_100K_N64"
+  },
+  "dataset": {
+    "data_dir": "data",
+    "dataset": "colliderdoor_cont_100K",
+    "train_size": 0.9
+  },
+  "model": {
+    "n_confounders": 1,
+    "num_nodes": 64,
+    "md_sets": [
+      "ZX",
+      "ZMX"
+    ],
+    "vtree": "((Z,X),(M,Y))",
+    "fairness_temperature": 3.0,
+    "leaf": {
+      "Y": {
+        "distribution": "gaussian"
+      },
+      "default": {
+        "distribution": "log_linear_spline"
+      }
+    }
+  },
+  "training": {
+    "batch_size": 4096,
+    "total_iters": 300,
+    "step_size": 0.1,
+    "decay_rate": 0.98,
+    "decay_every": 5,
+    "log_interval": 20,
+    "leaf_lr": null
+  },
+  "checkpointing": {
+    "checkpoint_every_epochs": 50,
+    "save_initial": true,
+    "save_final": true
+  },
+  "evaluation": {
+    "grid_x_points": 100,
+    "grid_y_points": 200,
+    "grid_x_quantile_range": [
+      0.005,
+      0.995
+    ],
+    "slice_contexts": 16
+  }
+}
