@@ -1,0 +1,48 @@
+{
+  "experiment_id": "backdoor_cont_25K_N16_soft",
+  "seed": 27,
+  "n_obs_test": 2500,
+  "n_interventional": 25000,
+  "checkpoints": [
+    {
+      "epoch": 0,
+      "obs_test_nll": 7.554686,
+      "do_nll": 4.009281
+    },
+    {
+      "epoch": 50,
+      "obs_test_nll": 6.624765,
+      "do_nll": 4.267266
+    },
+    {
+      "epoch": 100,
+      "obs_test_nll": 6.394524,
+      "do_nll": 4.192435
+    },
+    {
+      "epoch": 150,
+      "obs_test_nll": 6.403147,
+      "do_nll": 4.243629
+    },
+    {
+      "epoch": 200,
+      "obs_test_nll": 6.416446,
+      "do_nll": 4.250146
+    },
+    {
+      "epoch": 250,
+      "obs_test_nll": 6.425281,
+      "do_nll": 4.245115
+    },
+    {
+      "epoch": 300,
+      "obs_test_nll": 6.44645,
+      "do_nll": 4.237577
+    },
+    {
+      "epoch": 301,
+      "obs_test_nll": 6.447117,
+      "do_nll": 4.240975
+    }
+  ]
+}

@@ -1,0 +1,69 @@
+{
+  "experiment_id": "backdoor_cont_100K_N64",
+  "seed": 1,
+  "config": {
+    "experiment": {
+      "seed": 27,
+      "device": null,
+      "output_dir": "experiments/results/backdoor_cont_100K_N64",
+      "models_dir": "experiments/models/backdoor_cont_100K_N64",
+      "id": "backdoor_cont_100K_N64"
+    },
+    "dataset": {
+      "data_dir": "data",
+      "dataset": "backdoor_cont_Z1_100K",
+      "train_size": 0.9
+    },
+    "model": {
+      "n_confounders": 1,
+      "num_nodes": 64,
+      "md_sets": "XZ",
+      "fairness_temperature": 3.0,
+      "leaf": {
+        "Y": {
+          "distribution": "gaussian"
+        },
+        "default": {
+          "distribution": "log_linear_spline"
+        }
+      }
+    },
+    "training": {
+      "batch_size": 8192,
+      "total_iters": 300,
+      "step_size": 0.1,
+      "decay_rate": 0.98,
+      "decay_every": 5,
+      "log_interval": 20,
+      "leaf_lr": null
+    },
+    "checkpointing": {
+      "checkpoint_every_epochs": 50,
+      "save_initial": true,
+      "save_final": true
+    },
+    "evaluation": {
+      "grid_x_points": 100,
+      "grid_y_points": 200,
+      "grid_x_quantile_range": [
+        0.005,
+        0.995
+      ],
+      "slice_contexts": 16
+    }
+  },
+  "config_hash": "96bf0a1ad144",
+  "checkpoint_hash": "015322c3b4cb",
+  "start_time": "2026-09-24T18:40:17.742281+00:00",
+  "end_time": "2026-09-24T19:10:08.506640+00:00",
+  "hostname": "dgx2buteo",
+  "device": "cuda",
+  "python_version": "3.12.13",
+  "pytorch_version": "2.5.1+cu121",
+  "git_commit": "e4ad319781199132d43bef0774e2e1daba3a8616",
+  "command": "/home/abozorgvar/dev/MonarchCausalCircuits/experiments/run_experiment.py --config configs/backdoor_cont_100K_N64.json --seed 1 --yes-invalidate",
+  "data_file_hashes": {
+    "observational_N100000_backdoor-continuous_Z1_X1_Y1_W0_S30_K1-2_CR1-4_SV0.2-7_DE-2_CS2.csv": "2cb187a0b5d591d5",
+    "interventional_N100000_backdoor-continuous_Z1_X1_Y1_W0_S30_K1-2_CR1-4_SV0.2-7_DE-2_CS2.csv": "44da0f14fbb2533d"
+  }
+}

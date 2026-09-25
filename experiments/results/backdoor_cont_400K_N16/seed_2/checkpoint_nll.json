@@ -1,0 +1,48 @@
+{
+  "experiment_id": "backdoor_cont_400K_N16",
+  "seed": 2,
+  "n_obs_test": 40000,
+  "n_interventional": 400000,
+  "checkpoints": [
+    {
+      "epoch": 0,
+      "obs_test_nll": 7.531156,
+      "do_nll": 4.177037
+    },
+    {
+      "epoch": 50,
+      "obs_test_nll": 6.268982,
+      "do_nll": 3.930856
+    },
+    {
+      "epoch": 100,
+      "obs_test_nll": 6.265064,
+      "do_nll": 3.901603
+    },
+    {
+      "epoch": 150,
+      "obs_test_nll": 6.263043,
+      "do_nll": 3.901872
+    },
+    {
+      "epoch": 200,
+      "obs_test_nll": 6.261252,
+      "do_nll": 3.944219
+    },
+    {
+      "epoch": 250,
+      "obs_test_nll": 6.261685,
+      "do_nll": 3.917822
+    },
+    {
+      "epoch": 300,
+      "obs_test_nll": 6.260995,
+      "do_nll": 3.951765
+    },
+    {
+      "epoch": 301,
+      "obs_test_nll": 6.262281,
+      "do_nll": 3.937571
+    }
+  ]
+}

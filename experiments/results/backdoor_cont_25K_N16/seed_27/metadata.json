@@ -1,0 +1,69 @@
+{
+  "experiment_id": "backdoor_cont_25K_N16",
+  "seed": 27,
+  "config": {
+    "experiment": {
+      "seed": 27,
+      "device": null,
+      "output_dir": "experiments/results/backdoor_cont_25K_N16",
+      "models_dir": "experiments/models/backdoor_cont_25K_N16",
+      "id": "backdoor_cont_25K_N16"
+    },
+    "dataset": {
+      "data_dir": "data",
+      "dataset": "backdoor_cont_Z1_25K",
+      "train_size": 0.9
+    },
+    "model": {
+      "n_confounders": 1,
+      "num_nodes": 16,
+      "md_sets": "XZ",
+      "fairness_temperature": 3.0,
+      "leaf": {
+        "Y": {
+          "distribution": "gaussian"
+        },
+        "default": {
+          "distribution": "log_linear_spline"
+        }
+      }
+    },
+    "training": {
+      "batch_size": 8192,
+      "total_iters": 300,
+      "step_size": 0.1,
+      "decay_rate": 0.98,
+      "decay_every": 5,
+      "log_interval": 20,
+      "leaf_lr": null
+    },
+    "checkpointing": {
+      "checkpoint_every_epochs": 50,
+      "save_initial": true,
+      "save_final": true
+    },
+    "evaluation": {
+      "grid_x_points": 100,
+      "grid_y_points": 200,
+      "grid_x_quantile_range": [
+        0.005,
+        0.995
+      ],
+      "slice_contexts": 16
+    }
+  },
+  "config_hash": "b59f36241beb",
+  "checkpoint_hash": "514534424a64",
+  "start_time": "2026-09-24T21:22:54.477550+00:00",
+  "end_time": "2026-09-24T21:23:55.425046+00:00",
+  "hostname": "x1142.vpn.hrz.tu-darmstadt.de",
+  "device": "cpu",
+  "python_version": "3.12.9",
+  "pytorch_version": "2.11.0",
+  "git_commit": "d5e70ba07a5735188f7c02ee98ccc8971c584884",
+  "command": "/Users/samanb/uni/Thesis/MonarchCausalCircuits/experiments/run_experiment.py --config configs/backdoor_cont_25K_N16.json",
+  "data_file_hashes": {
+    "observational_N25000_backdoor-continuous_Z1_X1_Y1_W0_S30_K1-2_CR1-4_SV0.2-7_DE-2_CS2.csv": "4e61f916dec1727a",
+    "interventional_N25000_backdoor-continuous_Z1_X1_Y1_W0_S30_K1-2_CR1-4_SV0.2-7_DE-2_CS2.csv": "941b64ce677c5e22"
+  }
+}

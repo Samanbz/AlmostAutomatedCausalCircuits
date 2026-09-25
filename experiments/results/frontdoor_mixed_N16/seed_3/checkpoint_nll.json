@@ -1,0 +1,48 @@
+{
+  "experiment_id": "frontdoor_mixed_N16",
+  "seed": 3,
+  "n_obs_test": 5000,
+  "n_interventional": 50000,
+  "checkpoints": [
+    {
+      "epoch": 0,
+      "obs_test_nll": 2.475625,
+      "do_nll": 1.698943
+    },
+    {
+      "epoch": 50,
+      "obs_test_nll": 1.620164,
+      "do_nll": 1.154334
+    },
+    {
+      "epoch": 100,
+      "obs_test_nll": 1.619408,
+      "do_nll": 1.15423
+    },
+    {
+      "epoch": 150,
+      "obs_test_nll": 1.619282,
+      "do_nll": 1.154928
+    },
+    {
+      "epoch": 200,
+      "obs_test_nll": 1.619298,
+      "do_nll": 1.155584
+    },
+    {
+      "epoch": 250,
+      "obs_test_nll": 1.619511,
+      "do_nll": 1.154208
+    },
+    {
+      "epoch": 300,
+      "obs_test_nll": 1.61956,
+      "do_nll": 1.154553
+    },
+    {
+      "epoch": 301,
+      "obs_test_nll": 1.619052,
+      "do_nll": 1.156814
+    }
+  ]
+}
