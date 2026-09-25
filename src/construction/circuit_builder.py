@@ -119,6 +119,8 @@ class CircuitBuilder:
 
         self.built_nodes = {}
 
+        self._all_universal = False
+
     def _spline_quantile_splits(self, var_id: int, num_intervals: int) -> Optional[np.ndarray]:
         """Empirical 1/num_intervals-quantile split points for a spline leaf.
 
@@ -152,6 +154,27 @@ class CircuitBuilder:
             )
             for i in range(num_intervals)
         ]
+
+    @staticmethod
+    def _break_leaf_symmetry(leaf_layer, base_stddev: float = 1.0, amount: float = 0.1):
+        """Jitter per-unit leaf parameters so identical copies start distinct.
+
+        Universal (unconstrained) leaves give every unit the full support with
+        identical parameters, and near-uniform mixture weights make all units
+        ~the same density — the sum layers then see symmetric children and
+        batch EM collapses to the independence fixed point (training NLL
+        freezes at the sum of the per-variable marginal entropies).  The
+        near-one-hot home-component assignment in ``_handle_leaf`` is the
+        primary symmetry break; this jitter just adds independent noise on
+        top.  Split points are shared per layer and are NOT touched (MD parent
+        layers rely on the shared-interval invariant).
+        """
+        means = getattr(leaf_layer, "means", None)
+        if isinstance(means, torch.Tensor) and means.numel() > 1:
+            means.data.add_(torch.randn_like(means) * (amount * base_stddev))
+        log_heights = getattr(leaf_layer, "_log_heights", None)
+        if isinstance(log_heights, torch.Tensor) and log_heights.numel() > 1:
+            log_heights.data.add_(torch.randn_like(log_heights) * amount)
 
     def _handle_leaf(
         self,
@@ -243,6 +266,9 @@ class CircuitBuilder:
         leaf_layer.md_set = vnode.md_set
 
         if not is_constrained:
+            if vnode.md_set.is_universal:
+                base_stddev = float(getattr(dist, "base_stddev", 1.0)) or 1.0
+                self._break_leaf_symmetry(leaf_layer, base_stddev=base_stddev)
             raw_weights = (
                 torch.randn(
                     (
@@ -258,6 +284,11 @@ class CircuitBuilder:
             )
             for g in range(G_b):
                 raw_weights[g % G, :, g, :, :, :] += 0.5
+
+            if self._all_universal:
+                h_idx = torch.arange(H)
+                for g in range(G_b):
+                    raw_weights[g % G, h_idx, g, h_idx % H_b, 0, 0] += 8.0
             weights = torch.exp(raw_weights)
             weights = weights / weights.sum(dim=(2, 3, 4, 5), keepdim=True)
             log_weights = torch.log(weights + 1e-20).detach().requires_grad_(True)
@@ -749,6 +780,10 @@ class CircuitBuilder:
     def build(self) -> SymbolicArithmeticCircuit:
         """Construct a SymbolicArithmeticCircuit directly from the VTree."""
         circuit = SymbolicArithmeticCircuit(vtree=self.vtree)
+        self._all_universal = all(
+            getattr(getattr(self.vtree.get_node_data(vid), "md_set", None), "is_universal", False)
+            for vid in self.vtree.topological_sort()
+        )
         root_vid = self.vtree.get_roots()[0]
         self._build_recursive(circuit, root_vid, G=1, H=1)
         return circuit

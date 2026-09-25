@@ -53,12 +53,14 @@ def _grids_from_data(data_info: Dict[str, Any], eval_cfg: Dict[str, Any]):
     return x_grid, y_grid, slice_contexts
 
 
-def _eval_on_grid(query_acs, data_info, x_grid, y_grid, device, chunk_rows):
+def _eval_on_grid(query_acs, data_info, x_grid, y_grid, device, cfg):
     """Evaluate log P(Y|do(X)) and log P(Y|X) on the (x, y) grid.
 
     Points are laid out x-major (all Y for one X consecutively) so each X
     value forms contiguous chunks; rows are evaluated with freed intermediates
-    since the compiled do-circuit is memory-hungry per row.
+    since the compiled circuits are memory-hungry per row.  The do-circuit and
+    the observational (base-derived) query circuits get separate chunk sizes —
+    see :func:`resolve_eval_chunk_rows`.
     """
     n_vars = data_info["n_vars"]
     x_id, y_id = data_info["x_id"], data_info["y_id"]
@@ -73,6 +75,9 @@ def _eval_on_grid(query_acs, data_info, x_grid, y_grid, device, chunk_rows):
         pts[:, zid] = data_mean[zid]
     pts_t = torch.tensor(pts, device=device)
 
+    chunk_rows = resolve_eval_chunk_rows(cfg, device)
+    chunk_dense = resolve_eval_chunk_rows(cfg, device, dense=True)
+
     log_p_do = np.empty(n_x * n_y, dtype=np.float32)
     log_p_num = np.empty(n_x * n_y, dtype=np.float32)
 
@@ -80,14 +85,22 @@ def _eval_on_grid(query_acs, data_info, x_grid, y_grid, device, chunk_rows):
     obs_num_ac = query_acs["obs_num_ac"]
     obs_den_ac = query_acs["obs_den_ac"]
     with torch.no_grad():
+        for i in range(0, pts_t.size(0), chunk_dense):
+            batch = pts_t[i : i + chunk_dense]
+            log_p_num[i : i + chunk_dense] = (
+                eval_circuit(obs_num_ac, batch, verbose=False, keep_intermediates=False)
+                .reshape(-1)
+                .cpu()
+                .numpy()
+            )
         for i in range(0, pts_t.size(0), chunk_rows):
             batch = pts_t[i : i + chunk_rows]
-            log_p_do[i : i + chunk_rows] = eval_circuit(
-                q_do_ac, batch, verbose=False, keep_intermediates=False
-            ).reshape(-1)
-            log_p_num[i : i + chunk_rows] = eval_circuit(
-                obs_num_ac, batch, verbose=False, keep_intermediates=False
-            ).reshape(-1)
+            log_p_do[i : i + chunk_rows] = (
+                eval_circuit(q_do_ac, batch, verbose=False, keep_intermediates=False)
+                .reshape(-1)
+                .cpu()
+                .numpy()
+            )
         # P(X) is constant over the Y grid: one row per X value suffices.
         den_rows = torch.tensor(pts[::n_y], dtype=torch.float32, device=device)
         log_p_den = (
@@ -112,9 +125,8 @@ def evaluate_and_store(
     """Evaluate the learned densities on the shared grids and store them."""
     eval_cfg = cfg["evaluation"]
     x_grid, y_grid, slice_contexts = _grids_from_data(data_info, eval_cfg)
-    chunk_rows = resolve_eval_chunk_rows(cfg, device)
 
-    log_p_do, log_p_obs = _eval_on_grid(query_acs, data_info, x_grid, y_grid, device, chunk_rows)
+    log_p_do, log_p_obs = _eval_on_grid(query_acs, data_info, x_grid, y_grid, device, cfg)
 
     path = os.path.join(seed_dir, "grids.npz")
     np.savez_compressed(

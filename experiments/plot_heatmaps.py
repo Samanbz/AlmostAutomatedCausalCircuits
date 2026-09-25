@@ -24,7 +24,6 @@ from experiments.plotting.artifacts import _seed_from_dir, load_trained_artifact
 from experiments.plotting.styles import apply_paper_style
 from experiments.utils.data import discrete_categories
 from experiments.utils.evaluation import _eval_on_grid, _grids_from_data
-from experiments.utils.training import resolve_eval_chunk_rows
 
 
 def load_ground_truth(data_info):
@@ -77,8 +76,16 @@ def plot_heatmap_2x2(
     y_discrete=False,
     figsize=None,
 ):
-    """Render the 2x2 comparison figure and save PNG + PDF."""
-    extent = _centered_extent(x_grid) + _centered_extent(y_grid)
+    """Render the 2x2 comparison figure and save PNG + PDF.
+
+    Discrete axes are rendered as equal-width category bands on an integer
+    index grid (with white separators and ``interpolation="nearest"``) — using
+    the category values as coordinates stretches the few columns across the
+    axis and the default antialiased resampling blends the bands together.
+    """
+    x_plot = np.arange(len(x_grid)) if x_discrete else x_grid
+    y_plot = np.arange(len(y_grid)) if y_discrete else y_grid
+    extent = _centered_extent(x_plot) + _centered_extent(y_plot)
     surfaces = [learned_obs, gt_obs, learned_do, gt_do]
     vmax = max(float(np.nanmax(s)) for s in surfaces)
     norm = PowerNorm(gamma=gamma, vmin=0.0, vmax=vmax)
@@ -103,26 +110,32 @@ def plot_heatmap_2x2(
                 extent=extent,
                 cmap=cmap,
                 norm=norm,
+                interpolation="nearest",
             )
             ims.append(im)
             ax.set_title(titles[row][col])
             ax.set_xlabel("X")
             if col == 0:
                 ax.set_ylabel("Y")
-            # Discrete axes: cells center on the categories — show them as ticks
-            # instead of implying a continuous range between them.
+            # Discrete axes: equal-width bands centered on integer indices,
+            # category values as tick labels, white lines between the bands.
             if x_discrete:
-                ax.set_xticks(x_grid)
+                ax.set_xticks(x_plot)
                 ax.set_xticklabels([f"{v:g}" for v in x_grid])
+                ax.set_xticks(x_plot - 0.5, minor=True)
+                ax.xaxis.grid(True, which="minor", color="white", linewidth=0.8)
+                ax.tick_params(which="minor", length=0)
             if y_discrete:
-                ax.set_yticks(y_grid)
+                ax.set_yticks(y_plot)
                 ax.set_yticklabels([f"{v:g}" for v in y_grid])
+                ax.set_yticks(y_plot - 0.5, minor=True)
+                ax.yaxis.grid(True, which="minor", color="white", linewidth=0.8)
+                ax.tick_params(which="minor", length=0)
 
     cbar_label = "probability" if y_discrete else "density"
     fig.colorbar(ims[0], ax=axes, shrink=0.85, label=cbar_label)
     os.makedirs(os.path.dirname(output_base) or ".", exist_ok=True)
     fig.savefig(output_base + ".png")
-    fig.savefig(output_base + ".pdf")
     plt.close(fig)
 
 
@@ -175,8 +188,7 @@ def main() -> None:
         x_grid = np.asarray(x_cats, dtype=np.float64)
     if y_cats is not None:
         y_grid = np.asarray(y_cats, dtype=np.float64)
-    chunk_rows = resolve_eval_chunk_rows(cfg, device)
-    log_p_do, log_p_obs = _eval_on_grid(query_acs, data_info, x_grid, y_grid, device, chunk_rows)
+    log_p_do, log_p_obs = _eval_on_grid(query_acs, data_info, x_grid, y_grid, device, cfg)
     learned_obs = np.exp(log_p_obs)
     learned_do = np.exp(log_p_do)
 
@@ -202,7 +214,7 @@ def main() -> None:
         y_discrete=y_cats is not None,
         figsize=tuple(args.figsize) if args.figsize is not None else None,
     )
-    print(f"Saved heatmaps to {output_base}.png / .pdf")
+    print(f"Saved heatmaps to {output_base}.png")
 
 
 if __name__ == "__main__":

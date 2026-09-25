@@ -346,7 +346,6 @@ def plot_panels(
     os.makedirs(output_dir, exist_ok=True)
     base = os.path.join(output_dir, f"loglinear_leaves_{density.name}_K{ks[0]}_K{ks[1]}")
     fig.savefig(base + ".png")
-    fig.savefig(base + ".pdf")
     plt.close(fig)
     return base + ".png"
 

@@ -32,13 +32,20 @@ logger = g_logger.getChild("training")
 EVAL_CHUNK_ROWS = 512
 
 
-def resolve_eval_chunk_rows(cfg: Dict[str, Any], device: torch.device) -> int:
-    """Rows per evaluation chunk for NLL passes.
+def resolve_eval_chunk_rows(cfg: Dict[str, Any], device: torch.device, dense: bool = False) -> int:
+    """Rows per evaluation chunk for NLL/grid passes.
 
     ``evaluation.eval_batch_size`` overrides everything.  On CPU the
-    conservative :data:`EVAL_CHUNK_ROWS` applies.  On CUDA the budget is ~8 GB
-    of do-circuit stage temporaries, which grow as ~N^4 per row, so the chunk
-    size scales as N^-4 (≈1300 rows at N=32, ≈80 at N=64).
+    conservative :data:`EVAL_CHUNK_ROWS` applies.  On CUDA the budget is ~24 GB
+    for do-circuit temporaries; empirically (V100, keep_intermediates=False)
+    the do-circuit peak stays ~2.1 GiB at N=64 and ~2.4 GiB at N=128 for a
+    4096-row chunk and grows only ~0.1 MB/row beyond that.
+
+    The base circuit and the observational query circuits (numerator /
+    denominator of P(Y|X)) are a different story: their layer outputs scale
+    ~linearly with rows at ~1.1 MB/row * (N/64)^2 (measured 18.2 GiB at
+    N=128 for a 4096-row chunk vs. 2.4 GiB for the do-circuit), so ``dense=True``
+    uses a 12 GB budget and a 4096-row cap for them.
     """
     override = cfg.get("evaluation", {}).get("eval_batch_size")
     if override:
@@ -46,8 +53,11 @@ def resolve_eval_chunk_rows(cfg: Dict[str, Any], device: torch.device) -> int:
     if device.type != "cuda":
         return EVAL_CHUNK_ROWS
     n = cfg.get("model", {}).get("num_nodes", 32)
-    per_row_bytes = 12e6 * (n / 32.0) ** 4
-    return int(max(16, min(8192, 8e9 // per_row_bytes)))
+    if dense:
+        per_row_bytes = 1.1e6 * (n / 64.0) ** 2
+        return int(max(256, min(4096, 12e9 // per_row_bytes)))
+    per_row_bytes = 0.5e6 * (n / 64.0) ** 2
+    return int(max(256, min(8192, 24e9 // per_row_bytes)))
 
 
 def compute_nll(circuit, data: torch.Tensor, batch_size: int = EVAL_CHUNK_ROWS) -> float:
