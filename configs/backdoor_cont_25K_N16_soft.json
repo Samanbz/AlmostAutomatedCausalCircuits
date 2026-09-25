@@ -2,17 +2,17 @@
   "experiment": {
     "seed": 27,
     "device": null,
-    "output_dir": "experiments/results/backdoor_cont_1200K_N64",
-    "models_dir": "experiments/models/backdoor_cont_1200K_N64"
+    "output_dir": "experiments/results/backdoor_cont_25K_N16_soft",
+    "models_dir": "experiments/models/backdoor_cont_25K_N16_soft"
   },
   "dataset": {
     "data_dir": "data",
-    "dataset": "backdoor_cont_Z1_1200K",
+    "dataset": "backdoor_cont_Z1_25K",
     "train_size": 0.9
   },
   "model": {
     "n_confounders": 1,
-    "num_nodes": 64,
+    "num_nodes": 16,
     "md_sets": "XZ",
     "fairness_temperature": 3.0,
     "leaf": {
@@ -31,7 +31,10 @@
     "decay_rate": 0.98,
     "decay_every": 5,
     "log_interval": 20,
-    "leaf_lr": null
+    "leaf_lr": null,
+    "softening": {
+      "noise_std_scale": 0.1
+    }
   },
   "checkpointing": {
     "checkpoint_every_epochs": 50,

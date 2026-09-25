@@ -12,7 +12,7 @@
   },
   "model": {
     "n_confounders": 1,
-    "num_nodes": 16,
+    "num_nodes": 64,
     "md_sets": "XZ",
     "fairness_temperature": 3.0,
     "leaf": {
@@ -25,7 +25,7 @@
     }
   },
   "training": {
-    "batch_size": 4096,
+    "batch_size": 8192,
     "total_iters": 300,
     "step_size": 0.1,
     "decay_rate": 0.98,
