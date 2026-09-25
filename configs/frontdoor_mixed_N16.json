@@ -28,7 +28,7 @@
         "distribution": "categorical"
       },
       "Y": {
-        "distribution": "log_linear_spline"
+        "distribution": "gaussian"
       },
       "default": {
         "distribution": "log_linear_spline"
