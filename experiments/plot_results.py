@@ -54,11 +54,41 @@ LABELS = {
     "backdoor_cont_400K_N64_G1": "N=64 G1",
     "backdoor_cont_400K_N64_unconstrained": "N=64 unconstr.",
 }
+# Okabe-Ito palette (same family as the slice/heatmap figures): cool hues for
+# small N warming to orange/vermillion for large N; G1 is black and dashed so
+# it stays legible against white.
+OKABE_ITO = ["#56B4E9", "#0072B2", "#009E73", "#E69F00", "#D55E00", "#CC79A7", "#F0E442"]
+SERIES_COLORS = {
+    "backdoor_cont_400K_N8": ("#56B4E9", "-"),
+    "backdoor_cont_400K_N16": ("#0072B2", "-"),
+    "backdoor_cont_400K_N32": ("#009E73", "-"),
+    "backdoor_cont_400K_N64": ("#E69F00", "-"),
+    "backdoor_cont_400K_N128": ("#D55E00", "-"),
+    "backdoor_cont_400K_N64_G1": ("#000000", "--"),
+}
+DATA_COLORS = {
+    "backdoor_cont_25K_N64": "#56B4E9",
+    "backdoor_cont_100K_N64": "#0072B2",
+    "backdoor_cont_400K_N64": "#E69F00",
+    "backdoor_cont_1200K_N64": "#D55E00",
+}
+# Slice-figure semantics: blue = P(Y|X), orange/vermillion = P(Y|do(X)).
+CURVE_COLORS = {"do": "#D55E00", "obs": "#0072B2"}
+# Half-column figures: fonts stay legible when included at natural size in the
+# A4 paper (a full-width figure scaled to column width shrinks its labels).
+COMPACT_FIGSIZE = (3.8, 2.6)
 
 
 def read_csv_rows(path):
     with open(path) as f:
         return list(csv.DictReader(f))
+
+
+def _to_float(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float("nan")
 
 
 def valid_seed_dirs(results_root, config):
@@ -91,7 +121,9 @@ def mean_std_over_seeds(results_root, config, filename, value_keys):
         if not os.path.exists(path):
             continue
         rows = read_csv_rows(path)
-        per_seed.append({int(r["epoch"]): {k: float(r[k]) for k in value_keys} for r in rows})
+        per_seed.append(
+            {int(r["epoch"]): {k: _to_float(r.get(k)) for k in value_keys} for r in rows}
+        )
     epochs = sorted({e for rows in per_seed for e in rows})
     stats = {}
     for key in value_keys:
@@ -150,7 +182,7 @@ def collect_kl_curves(results_root, config):
     return grids, curves
 
 
-def fig_kl_profile_overlay(results_root, output_dir, config_labels, figname):
+def fig_kl_profile_overlay(results_root, output_dir, config_labels, figname, figsize=(5.5, 3.2)):
     """Overlay per-X do-KL curves of several configs on a common X window.
 
     ``config_labels`` is a list of (config, label, color, linestyle). Curves
@@ -171,7 +203,7 @@ def fig_kl_profile_overlay(results_root, output_dir, config_labels, figname):
     hi = min(w[1] for w in windows)
     xs = np.linspace(lo, hi, 300)
 
-    fig, ax = plt.subplots(figsize=(5.5, 3.2), constrained_layout=True)
+    fig, ax = plt.subplots(figsize=figsize, constrained_layout=True)
     for (_config, label, color, ls), (_c, grids, curves) in zip(config_labels, series):
         interp = np.array([np.interp(xs, g, c) for g, c in zip(grids, curves)])
         mean, std = interp.mean(axis=0), interp.std(axis=0)
@@ -210,23 +242,29 @@ def fig_vs_N(results_root, output_dir):
 
     fig, ax = plt.subplots(figsize=(5.5, 3.2), constrained_layout=True)
     ns, mean, std = collect_nll("do_nll")
-    ax.errorbar(ns, mean, yerr=std, marker="o", capsize=3, color="#d62728", label="do NLL")
+    ax.errorbar(ns, mean, yerr=std, marker="o", capsize=3, color=CURVE_COLORS["do"], label="do NLL")
     ax.set_xlabel("num_nodes N")
     ax.set_ylabel("interventional NLL (lower is better)")
     ax.set_xticks(ns)
     style_ax(ax)
     save(fig, output_dir, "fig_do_nll_vs_N")
 
-    fig, ax = plt.subplots(figsize=(5.5, 3.2), constrained_layout=True)
-    colors = plt.cm.viridis(np.linspace(0.15, 0.85, 2))
-    for (curve, style), color in zip([("do", "-"), ("obs", "--")], colors):
+    fig, ax = plt.subplots(figsize=COMPACT_FIGSIZE, constrained_layout=True)
+    for curve, style in [("do", "-"), ("obs", "--")]:
         ns, mean, std = collect_metric(f"kl_{curve}_gt_learned")
         label = r"$P(Y\mid do(X))$" if curve == "do" else r"$P(Y\mid X)$"
         ax.errorbar(
-            ns, mean, yerr=std, marker="o", capsize=3, linestyle=style, color=color, label=label
+            ns,
+            mean,
+            yerr=std,
+            marker="o",
+            capsize=3,
+            linestyle=style,
+            color=CURVE_COLORS[curve],
+            label=label,
         )
     ax.set_xlabel("num_nodes N")
-    ax.set_ylabel(r"X-averaged KL$\left(P_{\mathrm{GT}}\|P_{\mathrm{learned}}\right)$ (nats)")
+    ax.set_ylabel(r"X-averaged KL (nats)")
     ax.set_xticks(ns)
     ax.legend(framealpha=0.9)
     style_ax(ax)
@@ -237,8 +275,8 @@ def fig_over_training(
     results_root, output_dir, csv_name, key, ylabel, figname, configs, max_epoch=None
 ):
     fig, ax = plt.subplots(figsize=(5.5, 3.4), constrained_layout=True)
-    colors = plt.cm.viridis(np.linspace(0.1, 0.9, len(configs)))
-    for config, color in zip(configs, colors):
+    for i, config in enumerate(configs):
+        color, linestyle = SERIES_COLORS.get(config, (OKABE_ITO[i % len(OKABE_ITO)], "-"))
         epochs, stats = mean_std_over_seeds(results_root, config, csv_name, [key])
         if len(epochs) == 0:
             print(f"skip {config}: no {csv_name}")
@@ -247,7 +285,9 @@ def fig_over_training(
         if max_epoch is not None:
             keep = epochs <= max_epoch
             epochs, mean, std = epochs[keep], mean[keep], std[keep]
-        plot_band(ax, epochs, mean, std, LABELS.get(config, config), color=color)
+        plot_band(
+            ax, epochs, mean, std, LABELS.get(config, config), color=color, linestyle=linestyle
+        )
     ax.set_xlabel("training epoch")
     ax.set_ylabel(ylabel)
     ax.legend(framealpha=0.9)
@@ -309,6 +349,40 @@ def write_obs_nll_table(results_root, output_dir, configs):
         print(f"| {LABELS.get(config, config)} | " + " | ".join(cells) + " |")
 
 
+def write_final_nll_table(results_root, output_dir, configs):
+    """Final-checkpoint interventional and observational test NLL per config.
+
+    One row per config: mean +/- std over seeds of the last checkpoint's
+    do NLL (empty for configs without a compiled do-query, i.e. the
+    unconstrained PC) and observational test NLL.
+    """
+    rows = []
+    for config in configs:
+        _e, stats = mean_std_over_seeds(
+            results_root, config, "checkpoint_nll.csv", ["do_nll", "obs_test_nll"]
+        )
+        if len(_e) == 0:
+            print(f"skip {config}: no checkpoint_nll.csv")
+            continue
+        row = {"config": LABELS.get(config, config)}
+        for key in ("do_nll", "obs_test_nll"):
+            mean, std = stats[key][0][-1], stats[key][1][-1]
+            row[key] = f"{mean:.4f}±{std:.4f}" if mean == mean else ""
+        rows.append(row)
+
+    path = os.path.join(output_dir, "tab_final_nll.csv")
+    os.makedirs(output_dir, exist_ok=True)
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["config", "do_nll", "obs_test_nll"])
+        writer.writeheader()
+        writer.writerows(rows)
+    print(f"Saved {os.path.basename(path)}")
+    print("\n| config | do NLL | obs test NLL |")
+    print("|---|---|---|")
+    for row in rows:
+        print(f"| {row['config']} | {row['do_nll'] or '—'} | {row['obs_test_nll']} |")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--results-root", default="experiments/results")
@@ -317,13 +391,21 @@ def main():
     output_dir = args.output_dir or os.path.join(args.results_root, "figures")
     apply_paper_style()
 
-    n_colors = plt.cm.viridis(np.linspace(0.1, 0.9, len(N_SERIES)))
-    g1_color = "#333333"
     fig_kl_profile_overlay(
         args.results_root,
         output_dir,
-        [(config, LABELS[config], color, "-") for config, color in zip(N_SERIES, n_colors)]
-        + [("backdoor_cont_400K_N64_G1", LABELS["backdoor_cont_400K_N64_G1"], g1_color, "--")],
+        [
+            (config, LABELS[config], SERIES_COLORS[config][0], SERIES_COLORS[config][1])
+            for config in N_SERIES
+        ]
+        + [
+            (
+                "backdoor_cont_400K_N64_G1",
+                LABELS["backdoor_cont_400K_N64_G1"],
+                SERIES_COLORS["backdoor_cont_400K_N64_G1"][0],
+                SERIES_COLORS["backdoor_cont_400K_N64_G1"][1],
+            )
+        ],
         "fig_kl_profile_N",
     )
     data_series = [
@@ -332,15 +414,12 @@ def main():
         ("backdoor_cont_400K_N64", "400K"),
         ("backdoor_cont_1200K_N64", "1.2M"),
     ]
-    data_colors = plt.cm.viridis(np.linspace(0.1, 0.9, len(data_series)))
     fig_kl_profile_overlay(
         args.results_root,
         output_dir,
-        [
-            (config, f"N=64, {label}", color, "-")
-            for (config, label), color in zip(data_series, data_colors)
-        ],
+        [(config, f"N=64, {label}", DATA_COLORS[config], "-") for config, label in data_series],
         "fig_kl_profile_data",
+        figsize=COMPACT_FIGSIZE,
     )
 
     fig_vs_N(args.results_root, output_dir)
@@ -366,6 +445,7 @@ def main():
     )
     obs_configs = n_and_g1 + ["backdoor_cont_400K_N64_unconstrained"]
     write_obs_nll_table(args.results_root, output_dir, obs_configs)
+    write_final_nll_table(args.results_root, output_dir, obs_configs)
 
 
 if __name__ == "__main__":
