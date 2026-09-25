@@ -22,12 +22,11 @@ scratch/
 # jupyter Notebook checkpoints
 .ipynb_checkpoints/
 
+Papers/
+
 # data files
-data/
-*.csv
 *.tsv
 *.h5
-*.parquet
 *.html
 *.log
 
@@ -36,16 +35,11 @@ papers/
 *.dot
 *.pdf
 *.svg
-*.png
 
 build/
 *.egg-info/
 
 .DS_Store
-
-
-wandb/
-.wandb/
 
 
 # AI Agents
@@ -57,5 +51,6 @@ GEMINI.md
 
 # temporary
 iclr/
-experiments/results/
-models/
+causal-pc/
+*.sh
+/.vscode
