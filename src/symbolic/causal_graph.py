@@ -171,15 +171,15 @@ class CausalGraph:
             link(a, b)
         for a, b in sub.bidirected:
             link(a, b)
-        # Moralize: marry co-parents (directed) and co-spouses handled by skeleton.
         child_parents: Dict[Any, Set[Any]] = {n: set() for n in sub.nodes}
         for a, b in sub.directed:
             child_parents[b].add(a)
-        for parents in child_parents.values():
-            parents = list(parents)
-            for i in range(len(parents)):
-                for j in range(i + 1, len(parents)):
-                    link(parents[i], parents[j])
+        for v in sub.nodes:
+            fam = child_parents[v] | self.spouses(v)
+            fam = [n for n in fam if n in adj]
+            for i in range(len(fam)):
+                for j in range(i + 1, len(fam)):
+                    link(fam[i], fam[j])
         # Remove conditioning set.
         seen = set()
         stack = [n for n in xs if n not in blocked]
