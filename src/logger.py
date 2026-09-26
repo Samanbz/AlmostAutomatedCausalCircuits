@@ -20,7 +20,7 @@ formatter = colorlog.ColoredFormatter(
 )
 
 handler.setFormatter(formatter)
-logger = logging.getLogger("mcc")
+logger = logging.getLogger("aac")
 logger.setLevel(logging.WARNING)
 logger.addHandler(handler)
 logging.getLogger("graphviz").setLevel(logging.WARNING)

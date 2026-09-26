@@ -40,7 +40,7 @@ def _reset_peak_memory(device: torch.device) -> None:
         torch.cuda.reset_peak_memory_stats(device)
 
 
-def build_circuit(num_nodes: int, data: torch.Tensor, prioritize: str, device: torch.device):
+def build_circuit(num_nodes: int, data: torch.Tensor, device: torch.device):
     """Build the same 4-variable MD circuit shape used in test_joint_fit.py."""
     var_to_id = {"Z0": 0, "Z1": 1, "X": 2, "Y": 3}
     x_id, y_id = var_to_id["X"], var_to_id["Y"]
@@ -54,7 +54,6 @@ def build_circuit(num_nodes: int, data: torch.Tensor, prioritize: str, device: t
     vt = construct_optimal_md_vtree(
         data,
         md_sets,
-        prioritize=prioritize,
         keep_together=[(x_id, y_id)],
     )
     vtree_s = time.perf_counter() - t0
@@ -113,7 +112,6 @@ def main():
     parser.add_argument("--batch_sizes", type=int, nargs="+", default=[1024, 4096])
     parser.add_argument("--n_samples", type=int, default=8192)
     parser.add_argument("--grid", type=int, default=100)
-    parser.add_argument("--prioritize", type=str, default="hardware")
     parser.add_argument(
         "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu"
     )
@@ -135,7 +133,7 @@ def main():
     }
 
     for num_nodes in args.num_nodes:
-        ac, vtree_s, build_s = build_circuit(num_nodes, data, args.prioritize, device)
+        ac, vtree_s, build_s = build_circuit(num_nodes, data, device)
         for batch_size in args.batch_sizes:
             _reset_peak_memory(device)
             em_s = time_em_epoch(ac, data, batch_size, device)

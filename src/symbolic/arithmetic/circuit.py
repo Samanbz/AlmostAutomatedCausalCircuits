@@ -402,8 +402,6 @@ def _eval_circuit_single(
     for node_id in ac.topological_sort(reverse=True):
         node = ac.get_node_data(node_id)
 
-        # print("Evaluating node with scope", node.scope)
-
         if show_weights and isinstance(node, SumLayer) and (0 in node.scope and 1 in node.scope):
             w_obj = node.log_weights
             wt = (
@@ -445,18 +443,8 @@ def _eval_circuit_single(
             per_node_stds_over_group = torch.from_numpy(per_node_stds_over_group)
             per_group_stds_over_left_child = torch.from_numpy(per_group_stds_over_left_child)
 
-            # print(
-            #     f"DEBUG: STDs for node {node_id:2d} ({type(node).__name__}) (scope: {list(node.scope) if node.scope and not node.scope.is_empty else 'N/A'}) of nodes (overlapped) over groups:\n{per_node_stds_over_group}\nmean:{per_node_stds_over_group.mean()}"
-            # )
-
-            # for g in range(G):
-            #     print(
-            #         f"DEBUG: STDs for node {node_id:2d} ({type(node).__name__}) (scope: {list(node.scope) if node.scope and not node.scope.is_empty else 'N/A'}) of group {g} over all nodes over left children:\n{per_group_stds_over_left_child[g]}\nmean:{per_group_stds_over_left_child[g].mean()}"
-            #     )
-
         child_ids = ac.get_children(node_id)
         child_outs = [outputs[cid] for cid in child_ids]
-        # print(f"Evaluating node with scope {node.scope}")
         out = node.forward(data, child_outs)
         outputs[node_id] = out
 

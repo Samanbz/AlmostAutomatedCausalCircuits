@@ -59,7 +59,6 @@ def check_integration_to_one(
         )
         mc_prob = torch.exp(mc_log).item()
 
-    # print(f"density: {mc_prob}")
     assert abs(mc_prob - 1.0) < atol, f"Circuit does not integrate to 1. Integral: {mc_prob:.4f}"
 
 

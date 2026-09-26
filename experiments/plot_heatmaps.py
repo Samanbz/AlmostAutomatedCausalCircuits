@@ -8,7 +8,7 @@ visual comparison, at the paper's (A4) proportions.
 
 Example:
     python -m experiments.plot_heatmaps \
-        --results-dir experiments/results/backdoor_cont_Z2_100K/seed_27 \
+        --results-dir experiments/results/backdoor_cont_100K_N64/seed_27 \
         --output-dir scratch/plots
 """
 

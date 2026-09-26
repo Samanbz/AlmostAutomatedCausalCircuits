@@ -355,10 +355,6 @@ def plot_2d_heatmaps(
     for ax in axes.flat:
         ax.set_xlim(x_range)
 
-    # for ax in axes.flat:
-    #     for x_split in get_x_split_points(ac, data_info["x_id"]):
-    #         ax.axvline(x_split, color="white", linestyle="--", linewidth=1, alpha=0.5)
-
     cmap_do = plt.cm.viridis.with_extremes(bad=mask_color)
     cmap_diff = plt.cm.coolwarm.with_extremes(bad=mask_color)
 

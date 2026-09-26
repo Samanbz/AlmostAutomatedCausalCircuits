@@ -22,15 +22,12 @@ scratch/
 # jupyter Notebook checkpoints
 .ipynb_checkpoints/
 
-Papers/
-
 # data files
 *.tsv
 *.h5
 *.html
 *.log
 
-papers/
 *.gv
 *.dot
 *.pdf
@@ -40,17 +37,3 @@ build/
 *.egg-info/
 
 .DS_Store
-
-
-# AI Agents
-.aiexclude
-.geminiignore
-CLAUDE.md
-GEMINI.md
-.claude/
-
-# temporary
-iclr/
-causal-pc/
-*.sh
-/.vscode

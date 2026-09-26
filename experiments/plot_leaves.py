@@ -7,7 +7,7 @@ observational dataset) is overlaid as a black step histogram for reference.
 
 Example:
     python -m experiments.plot_leaves \
-        --results-dir experiments/results/backdoor_cont_Z2_100K/seed_27 \
+        --results-dir experiments/results/backdoor_cont_100K_N64/seed_27 \
         --output-dir scratch/plots/leaves
 """
 

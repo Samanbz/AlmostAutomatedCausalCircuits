@@ -35,8 +35,8 @@ orchestration.
 
 Example
 -------
-    python -m experiments.run_experiment --config configs/config_0.json
-    python -m experiments.run_experiment --config configs/config_0.json --seeds 27 28 29 --gpus 0 1 2
+    python -m experiments.run_experiment --config configs/backdoor_cont_100K_N64.json
+    python -m experiments.run_experiment --config configs/backdoor_cont_100K_N64.json --seeds 27 28 29 --gpus 0 1 2
 """
 
 import argparse

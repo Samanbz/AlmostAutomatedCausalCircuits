@@ -340,7 +340,6 @@ def plot_panels(
     ylim_left = 1.08 * ymax_left
     axes[1][0].set_ylim(0.0, ylim_left)
     axes[1][1].set_ylim(0.0, ylim_left * k_right / k_left)
-    # fig.suptitle(f"Log-linear spline leaves fit to the {density.name} density")
     fig.tight_layout(rect=(0, 0, 1, 0.96))
 
     os.makedirs(output_dir, exist_ok=True)

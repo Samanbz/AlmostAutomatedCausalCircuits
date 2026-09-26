@@ -9,12 +9,12 @@ from src.symbolic.arithmetic.nodes.leaf_layer import (
 )
 from src.symbolic.arithmetic.train import SymbolicEMTrainer
 from src.symbolic.vtree import VNode, VTree
-from src.utils import BitSet, Support
+from src.utils import BitSet
 
 
 def _make_loglinear_leaf(num_nodes: int = 4, num_groups: int = 2) -> LogLinearSplineLeafLayer:
     spec = LogLinearSplineDistribution(var=0, base_mean=0.0, base_stddev=1.0)
-    supports = [Support({0: iv}) for iv in spec.split_support(num_nodes)]
+    supports = list(spec.split_support(num_nodes))
     return LogLinearSplineLeafLayer(
         spec, num_nodes=num_nodes, num_groups=num_groups, node_supports=supports
     )

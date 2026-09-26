@@ -136,7 +136,7 @@ def test_ps_md_vtree_warns_on_second_ps_layer(caplog):
     y = m + z + torch.randn(2000, generator=g)
     data = torch.stack([x, m, z, y], dim=1)
 
-    with caplog.at_level(logging.WARNING, logger="mcc.learned_vtree"):
+    with caplog.at_level(logging.WARNING, logger="aac.learned_vtree"):
         vt = learn_liang_ps_md_vtree(data, md_sets=[{0, 1, 2}, {0, 1}, {0}], y_vars={3})
 
     assert len(_ps_layers(vt)) >= 2
@@ -152,7 +152,7 @@ def test_ps_md_vtree_singleton_family_is_classical_at_root(caplog):
     import logging
 
     data = _frontdoor_like_data()
-    with caplog.at_level(logging.INFO, logger="mcc.learned_vtree"):
+    with caplog.at_level(logging.INFO, logger="aac.learned_vtree"):
         vt = learn_liang_ps_md_vtree(data, md_sets=[{0}], y_vars={2})
     assert not _ps_layers(vt)
     assert any("classical disjoint mixing layer" in r.message for r in caplog.records)

@@ -21,17 +21,6 @@ def synthetic_data():
 
 
 @pytest.fixture
-def trivial_vtree():
-    """A pre-constructed 2-variable VTree without MD-sets."""
-    vt = VTree()
-    n0_id = vt.add_node(VNode(scope=BitSet({0, 1}), md_set=BitSet()))
-    n1_id = vt.add_node(VNode(scope=BitSet({0}), md_set=BitSet()))
-    n2_id = vt.add_node(VNode(scope=BitSet({1}), md_set=BitSet()))
-    vt.add_children(n0_id, n1_id, n2_id)
-    return vt
-
-
-@pytest.fixture
 def complex_vtree():
     """A 4-variable VTree with nested MD-sets."""
     vt = VTree()
@@ -49,16 +38,6 @@ def complex_vtree():
 
     vt.add_children(n0_id, n1_id, n4_id)
     return vt
-
-
-@pytest.fixture(scope="module")
-def device():
-    """A fixture that returns the appropriate torch device (GPU if available, else CPU)."""
-    return torch.device(
-        "cuda"
-        if torch.cuda.is_available()
-        else ("mps" if torch.backends.mps.is_available() else "cpu")
-    )
 
 
 @pytest.fixture(autouse=True)

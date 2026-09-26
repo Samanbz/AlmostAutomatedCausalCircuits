@@ -187,7 +187,7 @@ class Distribution(ABC):
         self.var_support = var_support
 
     @abstractmethod
-    def split_support(self, split_count: int, strategy: str = "quantile") -> List[Interval]:
+    def split_support(self, split_count: int) -> List[Interval]:
         """Split the variable's support into `split_count` intervals for unit supports."""
         pass
 
@@ -217,9 +217,7 @@ class GaussianDistribution(Distribution):
         self.base_stddev = float(base_stddev)
 
     def split_support(self, split_count: int) -> List[Interval]:
-        """For a Gaussian, we can split the real line into intervals.
-        Supported strategies: 'quantile', 'perturbed_quantile'.
-        """
+        """For a Gaussian, we can split the real line into quantile intervals."""
         quantiles = np.linspace(0, 1, split_count + 1)
 
         boundaries = stats.norm.ppf(quantiles, loc=self.base_mean, scale=self.base_stddev)
@@ -560,7 +558,7 @@ class CategoricalDistribution(Distribution):
         self.categories = categories
         self.probabilities = probabilities
 
-    def split_support(self, split_count: int, strategy: str = "quantile") -> List[Interval]:
+    def split_support(self, split_count: int) -> List[Interval]:
         intervals = self.var_support.split(split_count)
         while len(intervals) < split_count:
             intervals.append(DiscreteInterval(range(0)))

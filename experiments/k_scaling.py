@@ -39,7 +39,7 @@ import torch
 from matplotlib import ticker
 
 
-logging.getLogger("mcc.query").setLevel(logging.ERROR)
+logging.getLogger("aac.query").setLevel(logging.ERROR)
 
 from experiments.plotting.styles import apply_paper_style  # noqa: E402
 from experiments.utils.identification import identify_estimands  # noqa: E402
@@ -222,7 +222,6 @@ def plot(rows: list, K: float) -> None:
 
     ax.set_xlabel(r"$|\mathcal{C}_{\text{base}}|$", fontsize=10)
     ax.set_ylabel(r"$|\mathcal{C}_{do}|$", fontsize=10)
-    # ax.set_title("T-ID compile-size scaling — colliderdoor", fontsize=10, pad=8)
     ax.grid(True, alpha=0.3, linewidth=0.5)
     ax.tick_params(labelsize=9)
     for axis in (ax.xaxis, ax.yaxis):

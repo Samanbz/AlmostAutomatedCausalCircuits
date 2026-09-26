@@ -205,8 +205,6 @@ def load_data(cfg: Dict[str, Any]) -> Dict[str, Any]:
     logger.info("Variables: %s", var_names)
     logger.info("Confounders: %s", z_names)
     logger.info("MD sets: %s", [sorted(s) for s in md_set_names])
-    # logger.info("Data mean: %s", data_mean.round(4).tolist())
-    # logger.info("Data std:  %s", data_std.round(4).tolist())
 
     return {
         "df_test": df_test,

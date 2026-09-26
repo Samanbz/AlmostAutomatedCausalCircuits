@@ -13,7 +13,7 @@ for P(Y|X), red/orange family for P(Y|do(X)).
 
 Example:
     python -m experiments.plot_x_support_slices \
-        --results-dir experiments/results/backdoor_cont_Z2_100K/seed_27
+        --results-dir experiments/results/backdoor_cont_100K_N64/seed_27
 """
 
 import argparse

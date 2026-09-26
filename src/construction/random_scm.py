@@ -5,7 +5,6 @@ from src.symbolic.scm import (
     GaussianNoise,
     LinearLogic,
     StructuralCausalModel,
-    UniformNoise,
 )
 
 
@@ -52,18 +51,10 @@ def generate_random_scm(n_nodes: int, expected_degree: float = 2.0) -> Structura
         # Logic closure is passed only if there are parents
         logic = LinearLogic(coeffs) if parents else None
 
-        # 2. Additive Noise (50% Gaussian, 50% Uniform mixing)
-        # noise_type = np.random.choice(["gaussian", "uniform"])
-        noise_type = "gaussian"  # --- IGNORE ---
-
-        if noise_type == "gaussian":
-            loc = float(np.random.uniform(-0.5, 0.5))
-            scale = float(np.random.uniform(0.1, 1.0))
-            noise_dist = GaussianNoise(loc, scale)
-        else:
-            low = float(np.random.uniform(-1.0, -0.1))
-            high = float(np.random.uniform(0.1, 1.0))
-            noise_dist = UniformNoise(low, high)
+        # 2. Additive Gaussian noise
+        loc = float(np.random.uniform(-0.5, 0.5))
+        scale = float(np.random.uniform(0.1, 1.0))
+        noise_dist = GaussianNoise(loc, scale)
 
         # Add to the graph
         mechanism = AdditiveNoiseMechanism(logic=logic, noise_dist=noise_dist)

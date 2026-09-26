@@ -548,7 +548,7 @@ class ProductWeights(Weights):
         self.expand_GL = expand_L if expand_GL is None else expand_GL
         self.expand_GR = expand_R if expand_GR is None else expand_GR
         self.expand_Lu = expand_L if expand_Lu is None else expand_Lu
-        self.expand_Ru = expand_R if expand_R is None else expand_Ru
+        self.expand_Ru = expand_R if expand_Ru is None else expand_Ru
 
     def to(self, device: torch.device) -> "Weights":
         if hasattr(self.w1, "to"):

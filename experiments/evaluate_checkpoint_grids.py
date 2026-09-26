@@ -20,7 +20,10 @@ Examples:
 """
 
 import argparse
+import csv
 import os
+import subprocess
+import sys
 
 import numpy as np
 import torch
@@ -110,8 +113,6 @@ def evaluate_checkpoint_grids(results_seed_dir: str) -> str:
             f"obs KL(g||l) {r['kl_obs_gt_learned']:.4f}"
         )
 
-    import csv
-
     with open(out_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
         writer.writeheader()
@@ -122,9 +123,6 @@ def evaluate_checkpoint_grids(results_seed_dir: str) -> str:
 
 def run_seed_workers(results_dir: str, seeds: list[int], gpus: list[int]) -> None:
     """Evaluate each seed in its own subprocess, pinned round-robin to ``gpus``."""
-    import subprocess
-    import sys
-
     base = results_dir
     try:
         _seed_from_dir(results_dir)

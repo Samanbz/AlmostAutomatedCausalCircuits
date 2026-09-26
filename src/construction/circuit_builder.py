@@ -746,7 +746,6 @@ class CircuitBuilder:
         )
 
         logger.debug(f"Generating weights for node {vid} with scope {vnode.scope}")
-        # print(f"Generating weights for node {vid} with scope {vnode.scope}")
         w = self._generate_weights(
             G,
             H,

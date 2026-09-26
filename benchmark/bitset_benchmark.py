@@ -7,33 +7,12 @@ import numpy as np
 from src.utils.bitset import BitSet  # noqa: E402
 
 
-def get_size(obj, seen=None):
-    """Recursively finds size of objects"""
-    size = sys.getsizeof(obj)
-    if seen is None:
-        seen = set()
-    obj_id = id(obj)
-    if obj_id in seen:
-        return 0
-    seen.add(obj_id)
-    if isinstance(obj, dict):
-        size += sum([get_size(v, seen) for v in obj.values()])
-        size += sum([get_size(k, seen) for k in obj.keys()])
-    elif hasattr(obj, "__dict__"):
-        size += get_size(obj.__dict__, seen)
-    elif hasattr(obj, "__iter__") and not isinstance(obj, (str, bytes, bytearray)):
-        size += sum([get_size(i, seen) for i in obj])
-    return size
-
-
 def benchmark_storage(elements: List[int], n_universe: int):
     print(f"\n--- Storage Benchmark (n_elements={len(elements)}, universe_size={n_universe}) ---")
 
     # 1. Python Set
     py_set = set(elements)
     size_set = sys.getsizeof(py_set)  # This is shallow, but for ints it's mostly the structure
-    # For more accuracy recursive:
-    # size_set = get_size(py_set)
 
     # 2. BitSet
     bit_set = BitSet(elements)
@@ -86,11 +65,11 @@ def benchmark_time(n_elements: int, n_universe: int, n_iterations: int = 1000):
 
     def check_set_many():
         for x in check_items:
-            x in s1
+            x in s1  # noqa: B015  (membership probe timed by timeit)
 
     def check_bs_many():
         for x in check_items:
-            x in bs1
+            x in bs1  # noqa: B015  (membership probe timed by timeit)
 
     t_in_set = timeit.timeit(check_set_many, number=n_iterations)
     t_in_bs = timeit.timeit(check_bs_many, number=n_iterations)
