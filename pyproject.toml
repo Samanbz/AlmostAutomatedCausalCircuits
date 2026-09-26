@@ -9,9 +9,6 @@ description = "Tractable causal inference with marginal-determinism probabilisti
 readme = "README.md"
 requires-python = ">=3.12"
 license = {file = "LICENSE"}
-authors = [
-  {name = "Amirsaman Bozorgvar", email = "amirsaman.bozorgvar@stud.tu-darmstadt.de"},
-]
 dependencies = [
     "numpy",
     "pandas",
